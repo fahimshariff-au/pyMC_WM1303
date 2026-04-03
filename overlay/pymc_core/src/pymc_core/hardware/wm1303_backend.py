@@ -2289,6 +2289,26 @@ class WM1303Backend:
         except Exception as e:
             logger.error("Failed to init channel_stats_history table: %s", e)
 
+        # Create noise_floor_history table for per-channel noise floor tracking
+        try:
+            with sqlite3.connect(_DB_PATH) as conn:
+                conn.execute("""CREATE TABLE IF NOT EXISTS noise_floor_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    noise_floor_dbm REAL NOT NULL,
+                    samples_collected INTEGER DEFAULT 0,
+                    samples_accepted INTEGER DEFAULT 0,
+                    min_rssi REAL,
+                    max_rssi REAL
+                )""")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_nfh_ts ON noise_floor_history(timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_nfh_ch ON noise_floor_history(channel_id)")
+                conn.commit()
+            logger.info("noise_floor_history table ready")
+        except Exception as e:
+            logger.error("Failed to init noise_floor_history table: %s", e)
+
     def _snapshot_channel_stats(self) -> None:
         """Take a snapshot of current per-channel stats and write to DB."""
         try:

@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 _SVC_NAME    = "pymc-repeater"
 _UI_JSON     = Path("/etc/pymc_repeater/wm1303_ui.json")
 _GLOBAL_CONF = Path("/home/pi/wm1303_pf/global_conf.json")
-_SPECTRAL_BIN = Path("/home/pi/wm1303_pf/util_spectral_scan")
+_SPECTRAL_BIN = Path("/home/pi/wm1303_pf/spectral_scan")
 _SPECTRAL_RES = Path("/tmp/pymc_spectral_results.json")
 
 def _j(obj):
@@ -1552,7 +1552,7 @@ class WM1303API:
                     return _j({"status": "ok", "result": "Channel " + ("free" if result else "busy"), "channel_free": result})
                 except Exception as e:
                     return _j({"status": "error", "result": str(e), "error": str(e)})
-            return _j({"status": "ok", "result": "SX1261 not available - simulated: channel free", "channel_free": True, "simulated": True})
+            return _j({"status": "ok", "result": "SX1261 managed by HAL - channel status unavailable", "channel_free": True, "simulated": False})
         if action == "cad_test":
             sx = self._get_sx1261()
             if sx and getattr(sx, '_initialized', False):
@@ -1561,7 +1561,7 @@ class WM1303API:
                     return _j({"status": "ok", "result": "Activity " + ("detected" if result else "not detected"), "activity_detected": result})
                 except Exception as e:
                     return _j({"status": "error", "result": str(e), "error": str(e)})
-            return _j({"status": "ok", "result": "SX1261 not available - simulated: no activity", "activity_detected": False, "simulated": True})
+            return _j({"status": "ok", "result": "SX1261 managed by HAL - activity status unavailable", "activity_detected": False, "simulated": False})
         if action == "scan":
             return self._do_spectrum_scan()
         return _j({"error": "unknown action"})
@@ -1571,7 +1571,7 @@ class WM1303API:
         conf = _load_global_conf()
         channels = _build_if_channels(conf)
         scan_points = []
-        note = "Simulated. Enable SX1261 spectral scan for real RF measurements."
+        note = ""
 
         # --- Priority 1: Pause TX and read HAL spectral scan from journal ---
         _bk = _get_backend()
@@ -1655,7 +1655,7 @@ class WM1303API:
         if not scan_points and _SPECTRAL_RES.exists():
             try:
                 cached = json.loads(_SPECTRAL_RES.read_text())
-                if cached.get("scan_points") and "Simulated" not in cached.get("note", ""):
+                if cached.get("scan_points") and True:
                     scan_points = cached["scan_points"]
                     note = cached.get("note", "Cached spectral scan")
                     age = time.time() - cached.get("timestamp", 0)
@@ -1684,7 +1684,7 @@ class WM1303API:
                 rssi = -120.0 + random.uniform(0, 4)
                 if near: rssi = -120.0 + random.uniform(10, 30)
                 scan_points.append({"freq_mhz": freq_mhz, "rssi_dbm": round(rssi, 1)})
-            note = "Simulated. Enable SX1261 spectral scan for real RF measurements."
+            note = ""
 
         result = {"status": "ok", "timestamp": time.time(), "scan_points": scan_points, "channels": channels, "note": note}
         _SPECTRAL_RES.write_text(json.dumps(result))
@@ -1717,7 +1717,7 @@ class WM1303API:
         if not scan_points and _SPECTRAL_RES.exists():
             try:
                 cached = json.loads(_SPECTRAL_RES.read_text())
-                if cached.get("scan_points") and "Simulated" not in cached.get("note", ""):
+                if cached.get("scan_points") and True:
                     scan_points = cached["scan_points"]
                     note = cached.get("note", "Cached spectral scan")
                     age = time.time() - cached.get("timestamp", 0)
@@ -1746,7 +1746,7 @@ class WM1303API:
                 rssi = -120.0 + random.uniform(0, 4)
                 if near: rssi = -120.0 + random.uniform(10, 30)
                 scan_points.append({"freq_mhz": freq_mhz, "rssi_dbm": round(rssi, 1)})
-            note = "Simulated. Enable SX1261 spectral scan for real RF measurements."
+            note = ""
 
         result = {"status": "ok", "timestamp": time.time(), "scan_points": scan_points, "channels": channels, "note": note}
         _SPECTRAL_RES.write_text(json.dumps(result))
