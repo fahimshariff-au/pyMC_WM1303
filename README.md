@@ -2,7 +2,7 @@
 
 **WM1303 (SX1302/SX1303) LoRa Concentrator Module for MeshCore**
 
-A complete installation and management system for running a [WM1303 LoRa concentrator](https://www.seeedstudio.com/WM1303-LoRaWAN-Gateway-Module-SX1303-p-5154.html) with [MeshCore](https://meshcore.co) (pyMC_core & pyMC_Repeater) on a SenseCAP M1 / Raspberry Pi.
+A complete installation and management system for running a [WM1303 LoRa concentrator](https://www.seeedstudio.com/WM1303-LoRaWAN-Gateway-Module-SX1303-p-5154.html) with [MeshCore](https://meshcore.co) ([pyMC_core](https://github.com/rightup/pyMC_core) & [pyMC_Repeater](https://github.com/rightup/pyMC_Repeater)) on a SenseCAP M1 / Raspberry Pi.
 
 ![WM1303 Manager — Status Dashboard](screenshots/status.jpg)
 
@@ -248,7 +248,7 @@ pyMC_WM1303/
 └── scripts/                # Utility scripts
 ```
 
-## Fork Repositories
+## Used Fork Repositories
 
 This project uses unmodified forks of the upstream repositories. **Do not modify the forks directly** — all changes are managed through the overlay directory.
 
