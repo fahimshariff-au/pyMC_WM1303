@@ -955,10 +955,19 @@ class RepeaterDaemon:
         from pymc_core.hardware import WM1303Backend
 
         cfg_bridge = self.config.get("bridge", {})
-        bridge_rules = cfg_bridge.get("bridge_rules", [])
-        if not bridge_rules:
-            logger.info("No bridge_rules in config.yaml bridge section – skipping bridge init")
-            return
+
+        # Load rules from SSOT (wm1303_ui.json) — this is authoritative,
+        # config.yaml bridge_rules is kept only for legacy/fallback.
+        rules = self._load_bridge_rules_from_ui()
+        if not rules:
+            # Fallback: try config.yaml bridge_rules
+            rules_yaml = cfg_bridge.get("bridge_rules", [])
+            if rules_yaml:
+                logger.info("No SSOT bridge rules – falling back to config.yaml bridge_rules")
+                rules = rules_yaml
+            else:
+                logger.info("No bridge rules in SSOT or config.yaml – skipping bridge init")
+                return
 
         # Get radios from WM1303Backend
         backend = None
@@ -973,8 +982,7 @@ class RepeaterDaemon:
             logger.warning(f"Need >= 2 radios for bridge, got {len(radios)}")
             return
 
-        # Load rules from SSOT (wm1303_ui.json)
-        rules = self._load_bridge_rules_from_ui()
+        # Rules already loaded above from SSOT or config.yaml fallback
 
         dedup_ttl = cfg_bridge.get("dedup_ttl", 15.0)
 
