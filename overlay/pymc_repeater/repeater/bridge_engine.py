@@ -1,0 +1,852 @@
+"""Bridge engine for WM1303 multi-channel operation.
+
+Forwards packets between channels with deduplication and rule-based
+packet-type filtering.
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import time
+from collections import deque
+import threading
+import queue
+
+logger = logging.getLogger('BridgeEngine')
+
+_active_bridge: "BridgeEngine | None" = None  # module-level reference for API access
+
+
+def _hexdump(data: bytes, mx: int = 80) -> str:
+    """Format bytes as hex string for logging."""
+    h = ' '.join(f'{b:02x}' for b in data[:mx])
+    return h + (f' ...({len(data)}B)' if len(data) > mx else '')
+
+def _mc_hdr(data: bytes) -> str:
+    """Parse MeshCore header for hex dump logging."""
+    if not data or len(data) < 2:
+        return 'TOO_SHORT'
+    hdr = data[0]
+    rt = hdr & 0x03
+    pt = (hdr >> 2) & 0x0F
+    ver = (hdr >> 6) & 0x03
+    has_tc = rt in (0x00, 0x03)
+    idx = 5 if has_tc else 1
+    if idx >= len(data):
+        return f'rt={rt} pt={pt} v={ver} TRUNC'
+    pl_raw = data[idx]
+    hops = pl_raw & 0x3F
+    hsz = ((pl_raw >> 6) & 0x03) + 1
+    pbytes = hops * hsz
+    rn = {0:'TFLOOD',1:'FLOOD',2:'DIRECT',3:'TDIRECT'}
+    tn = {0:'REQ',1:'RESP',2:'TXT',3:'ACK',4:'ADVERT',5:'GRP_TXT',6:'GRP_DATA',7:'ANON',8:'PATH',9:'TRACE',10:'MULTI',11:'CTRL',15:'RAW'}
+    return f'{rn.get(rt,"?")}/{tn.get(pt,"?")} v{ver} path_raw=0x{pl_raw:02x}(hops={hops},hsz={hsz},pbytes={pbytes}) tc={has_tc}'
+
+
+
+class BridgeEngine:
+    """Cross-channel packet bridge for WM1303 concentrator.
+
+    Supports rule-based forwarding with MeshCore packet-type filtering.
+    """
+
+    # ------------------------------------------------------------------ #
+    # MeshCore header bit-field layout (from protocol/constants.py)
+    # ------------------------------------------------------------------ #
+    # Byte 0: [VER(2) | TYPE(4) | ROUTE(2)]
+    #   bits 0-1  = route type
+    #   bits 2-5  = payload type (shifted by 2)
+    #   bits 6-7  = version
+    PH_TYPE_SHIFT = 2
+    PH_TYPE_MASK  = 0x0F
+
+    # Payload-type values (4 bits, from protocol/constants.py)
+    PAYLOAD_TYPE_REQ        = 0x00
+    PAYLOAD_TYPE_RESPONSE   = 0x01
+    PAYLOAD_TYPE_TXT_MSG    = 0x02
+    PAYLOAD_TYPE_ACK        = 0x03
+    PAYLOAD_TYPE_ADVERT     = 0x04
+    PAYLOAD_TYPE_GRP_TXT    = 0x05
+    PAYLOAD_TYPE_GRP_DATA   = 0x06
+    PAYLOAD_TYPE_ANON_REQ   = 0x07
+    PAYLOAD_TYPE_PATH       = 0x08
+    PAYLOAD_TYPE_TRACE      = 0x09
+    PAYLOAD_TYPE_MULTIPART  = 0x0A
+    PAYLOAD_TYPE_CONTROL    = 0x0B
+    PAYLOAD_TYPE_RAW_CUSTOM = 0x0F
+
+    # Human-readable name -> numeric type mapping for rule filters
+    PKT_TYPE_MAP = {
+        'REQ':        0x00,
+        'REQUEST':    0x00,
+        'RESPONSE':   0x01,
+        'TXT_MSG':    0x02,
+        'TEXT':       0x02,
+        'MESSAGE':    0x02,
+        'ACK':        0x03,
+        'ADVERT':     0x04,
+        'GRP_TXT':    0x05,
+        'GROUP_TEXT': 0x05,
+        'GRP_DATA':   0x06,
+        'GROUP_DATA': 0x06,
+        'ANON_REQ':   0x07,
+        'PATH':       0x08,
+        'TRACE':      0x09,
+        'MULTIPART':  0x0A,
+        'CONTROL':    0x0B,
+        'RAW_CUSTOM': 0x0F,
+        'RAW':        0x0F,
+        'ALL':        None,  # None = match everything
+    }
+
+    # Reverse map: numeric -> canonical name (for logging)
+    PKT_TYPE_NAMES = {
+        0x00: 'REQ',
+        0x01: 'RESPONSE',
+        0x02: 'TXT_MSG',
+        0x03: 'ACK',
+        0x04: 'ADVERT',
+        0x05: 'GRP_TXT',
+        0x06: 'GRP_DATA',
+        0x07: 'ANON_REQ',
+        0x08: 'PATH',
+        0x09: 'TRACE',
+        0x0A: 'MULTIPART',
+        0x0B: 'CONTROL',
+        0x0F: 'RAW_CUSTOM',
+    }
+
+    # Non-radio endpoints (handled by external callbacks, not in _radio_map)
+    NON_RADIO_ENDPOINTS = {'mqtt', 'repeater'}
+
+    # Static fallback aliases (overridden by dynamic aliases built in __init__)
+    _STATIC_ALIASES = {
+        'n1': 'channel_a', 'channel_a': 'channel_a', 'ch-1': 'channel_a',
+        'n2': 'channel_b', 'channel_b': 'channel_b', 'ch-2': 'channel_b',
+        'n3': 'channel_c', 'channel_c': 'channel_c', 'ch-3': 'channel_c',
+        'n4': 'channel_d', 'channel_d': 'channel_d', 'ch-4': 'channel_d',
+    }
+
+    def __init__(self, radios: list, rules: list | None = None,
+                 dedup_ttl: float = 15.0, tx_delay_ms: float = 50.0):
+        self.radios = radios
+        # Build radio map: channel_id -> radio instance
+        self._radio_map = {
+            getattr(r, 'channel_id', f'ch{i}'): r
+            for i, r in enumerate(radios)
+        }
+
+        # Build CHANNEL_ALIASES dynamically from actual radio objects
+        self.CHANNEL_ALIASES = dict(self._STATIC_ALIASES)  # start with defaults
+        self._build_dynamic_aliases(radios)
+
+        # Build reverse alias map: channel_id -> set of all names that resolve to it
+        self._reverse_aliases: dict[str, set[str]] = {}
+        self._build_reverse_aliases()
+
+        self.rules = rules or []
+        self.dedup_ttl = dedup_ttl
+        self.tx_delay = tx_delay_ms / 1000.0
+        self._seen: dict[str, float] = {}
+        self._running = False
+        self.forwarded_packets = 0
+        self.dropped_duplicate = 0
+        self.dropped_filtered = 0
+
+        # External endpoint handlers (for non-radio targets like mqtt, repeater)
+        self._mqtt_handler = None      # callback(data: bytes) -> None
+        self._repeater_handler = None   # callback(data: bytes) -> None
+        self._repeater_engine = None     # RepeaterHandler instance for counter updates
+        self._endpoint_handlers: dict[str, callable] = {}  # name -> callback
+
+        # Forwarded-packet echo detection (secondary safety net)
+        self._recently_forwarded: dict[str, float] = {}  # hash -> monotonic_time
+        self._fwd_echo_ttl = 10.0  # seconds
+        self._fwd_echo_detected = 0  # counter
+
+        # Dedup event logging for visualization
+        self._dedup_events: deque = deque(maxlen=500)  # ring buffer
+
+        # SQLite dedup event persistence (non-blocking writer thread)
+        self._sqlite_handler = None
+        self._dedup_queue: queue.Queue = queue.Queue()
+        self._sqlite_writer_thread: threading.Thread | None = None
+        self._sqlite_writer_running = False
+        self._last_cleanup_ts = time.time()
+        self._cleanup_interval = 3600  # cleanup every hour
+
+        # Module-level reference for API access
+        global _active_bridge
+        _active_bridge = self
+
+        logger.info('BridgeEngine: initialized with %d radios, %d rules, dedup_ttl=%.1fs',
+                    len(radios), len(self.rules), self.dedup_ttl)
+        logger.info('BridgeEngine: radio_map keys: %s', list(self._radio_map.keys()))
+        logger.info('BridgeEngine: reverse_aliases: %s',
+                    {k: sorted(v) for k, v in self._reverse_aliases.items()})
+        for rule in self.rules:
+            rsrc = rule.get('source', '?')
+            rtgt = rule.get('target', '?')
+            rsrc_resolved = self._resolve_channel(rsrc)
+            rtgt_resolved = self._resolve_channel(rtgt)
+            logger.info('BridgeEngine: rule %s: %s(%s) -> %s(%s) '
+                       '(filter=%s, packet_types=%s, enabled=%s)',
+                       rule.get('id', '?'), rsrc, rsrc_resolved,
+                       rtgt, rtgt_resolved,
+                       rule.get('filter', 'all'), rule.get('packet_types', []),
+                       rule.get('enabled', True))
+
+    def _build_reverse_aliases(self) -> None:
+        """Build reverse alias map: canonical channel_id -> set of all alias names.
+
+        This enables bidirectional matching: given a channel_id like 'channel_a',
+        we can find all names that resolve to it (e.g., {'ch-1', 'n1', 'channel_a',
+        'Channel A', 'channel a'}).
+        """
+        self._reverse_aliases = {}
+        for alias_name, canonical_id in self.CHANNEL_ALIASES.items():
+            if canonical_id not in self._reverse_aliases:
+                self._reverse_aliases[canonical_id] = set()
+            self._reverse_aliases[canonical_id].add(alias_name)
+        # Also add non-radio endpoints as identity mappings
+        for ep in self.NON_RADIO_ENDPOINTS:
+            if ep not in self._reverse_aliases:
+                self._reverse_aliases[ep] = {ep}
+        logger.info('BridgeEngine: reverse aliases built for %d canonical IDs',
+                    len(self._reverse_aliases))
+
+    def _source_matches(self, rule_source_raw: str, source_cid: str) -> bool:
+        """Check if a rule's source matches the packet's source channel.
+
+        Bidirectional matching:
+        1. Forward: resolve rule_source_raw to canonical ID, compare with source_cid
+        2. Reverse: check if rule_source_raw is in the set of aliases for source_cid
+        3. Direct: exact string match as fallback
+
+        This ensures 'ch-1' matches 'channel_a' regardless of alias direction.
+        """
+        # Direct match (fastest path)
+        if rule_source_raw == source_cid:
+            return True
+
+        # Forward resolution: resolve rule source name to canonical channel_id
+        resolved = self.CHANNEL_ALIASES.get(rule_source_raw, rule_source_raw)
+        if resolved == source_cid:
+            return True
+
+        # Reverse lookup: check if rule_source_raw is any alias of source_cid
+        aliases_for_source = self._reverse_aliases.get(source_cid, set())
+        if rule_source_raw in aliases_for_source:
+            return True
+
+        # Also try resolving source_cid (in case it's an alias too)
+        source_resolved = self.CHANNEL_ALIASES.get(source_cid, source_cid)
+        if resolved == source_resolved:
+            return True
+
+        return False
+
+    def _build_dynamic_aliases(self, radios: list) -> None:
+        """Build channel aliases dynamically from actual radio objects AND wm1303_ui.json.
+
+        Each VirtualLoRaRadio has:
+          - channel_id: e.g., 'channel_a', 'channel_b', 'channel_d'
+          - channel_config: dict from config.yaml (may lack 'name' / 'friendly_name')
+
+        The wm1303_ui.json (SSOT) has the actual UI channel names ('ch-1', 'ch-new')
+        and friendly names ('Channel A', 'Channel D'). We match UI channels to radios
+        by spreading_factor since that's unique per channel.
+
+        Builds aliases from all sources so any name resolves correctly.
+        """
+        import json
+        from pathlib import Path
+
+        # Phase 1: Build aliases from radio objects (config.yaml data)
+        sf_to_cid = {}  # spreading_factor -> channel_id mapping
+        for r in radios:
+            cid = getattr(r, 'channel_id', None)
+            if not cid:
+                continue
+            # Identity alias: channel_id -> channel_id
+            self.CHANNEL_ALIASES[cid] = cid
+            cfg = getattr(r, 'channel_config', {})
+            # Track SF -> channel_id for UI matching
+            sf = int(cfg.get('spreading_factor', 0))
+            if sf:
+                sf_to_cid[sf] = cid
+            # Config-based aliases (if present)
+            name = cfg.get('name', '')
+            if name:
+                self.CHANNEL_ALIASES[name] = cid
+            friendly = cfg.get('friendly_name', '')
+            if friendly:
+                self.CHANNEL_ALIASES[friendly] = cid
+                self.CHANNEL_ALIASES[friendly.lower()] = cid
+
+        # Phase 2: Read wm1303_ui.json for UI channel names and friendly names
+        # Match by POSITION (index) not by SF to avoid mismatches when SF is
+        # changed in the UI but not yet in config.yaml.
+        ui_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+        try:
+            if ui_path.exists():
+                ui = json.loads(ui_path.read_text())
+                # Build ordered list of active radio channel_ids
+                radio_cids = [getattr(r, 'channel_id', None) for r in radios]
+                radio_cids = [c for c in radio_cids if c]  # filter None
+                ui_channels = ui.get("channels", [])  # ALL channels for position-based alias mapping
+                for idx, uc in enumerate(ui_channels):
+                    if idx >= len(radio_cids):
+                        logger.debug('BridgeEngine: UI channel index %d has no radio (only %d radios)',
+                                    idx, len(radio_cids))
+                        break
+                    cid = radio_cids[idx]
+                    # UI name alias: e.g., 'ch-1' -> 'channel_a'
+                    ui_name = uc.get('name', '')
+                    if ui_name:
+                        self.CHANNEL_ALIASES[ui_name] = cid
+                    # Friendly name alias: e.g., 'Channel A' -> 'channel_a'
+                    ui_friendly = uc.get('friendly_name', '')
+                    if ui_friendly:
+                        self.CHANNEL_ALIASES[ui_friendly] = cid
+                        self.CHANNEL_ALIASES[ui_friendly.lower()] = cid
+                    logger.debug('BridgeEngine: UI channel[%d] %r -> %s (position-based)',
+                                idx, ui_name, cid)
+        except Exception as e:
+            logger.warning('BridgeEngine: failed to read UI config for aliases: %s', e)
+
+        logger.info('BridgeEngine: dynamic aliases built: %s', dict(self.CHANNEL_ALIASES))
+
+    # ------------------------------------------------------------------ #
+    # External endpoint handler registration
+    # ------------------------------------------------------------------ #
+    def set_repeater_handler(self, callback) -> None:
+        """Register a callback for forwarding packets to the repeater."""
+        self._repeater_handler = callback
+        self._endpoint_handlers['repeater'] = callback
+        logger.info('BridgeEngine: repeater handler registered')
+
+    def set_repeater_engine(self, engine) -> None:
+        """Store reference to RepeaterHandler for counter/recent_packets updates."""
+        self._repeater_engine = engine
+        logger.info('BridgeEngine: repeater engine reference set for counter updates')
+
+
+    def set_mqtt_handler(self, callback) -> None:
+        """Register a callback for forwarding packets to MQTT."""
+        self._mqtt_handler = callback
+        self._endpoint_handlers['mqtt'] = callback
+        logger.info('BridgeEngine: MQTT handler registered')
+
+    async def inject_packet(self, source_name: str, data: bytes) -> None:
+        """Inject a packet into the bridge as if received from the given source.
+
+        Allows external components (MQTT, repeater) to feed packets into
+        the bridge rule engine for forwarding.
+        """
+        if not self._running:
+            logger.warning('BridgeEngine: inject_packet called but bridge not running')
+            return
+
+        if self._is_duplicate(data):
+            self.dropped_duplicate += 1
+            _dup_hash = hashlib.sha256(data).hexdigest()[:12]
+            self._record_dedup_event('duplicate', source_name, _dup_hash, len(data))
+            logger.debug('BridgeEngine: injected duplicate dropped from %s (hash=%s)', source_name, _dup_hash)
+            return
+
+        pkt_hash = hashlib.sha256(data).hexdigest()[:12]
+        pkt_type_name = self._get_packet_type_name(data)
+        logger.info('[HEXDUMP] dir=INJECT src=%s sz=%d hdr=%s hex=%s', source_name, len(data), _mc_hdr(data), _hexdump(data))
+        logger.info('BridgeEngine: injected %d bytes from %s (type=%s, hash=%s)',
+                   len(data), source_name, pkt_type_name, pkt_hash)
+
+        await self._forward_by_rules(source_name, data, pkt_hash, pkt_type_name)
+
+    async def _forward_by_rules(self, source_cid: str, data: bytes,
+                                 pkt_hash: str, pkt_type_name: str) -> None:
+        """Apply bridge rules to forward a packet from the given source.
+
+        Uses bidirectional alias matching via _source_matches() so that
+        packets from 'channel_a' match rules with source='ch-1' (and vice
+        versa) regardless of which direction the alias is defined.
+
+        Handles both radio targets (via _radio_map) and external endpoint
+        targets (via _endpoint_handlers).
+
+        Radio sends are collected and fired concurrently via asyncio.gather()
+        so that packets destined for multiple channels are queued before any
+        TX burst cycle starts. This allows the WM1303 TX burst batching to
+        collect all packets in a single cycle instead of one cycle per channel.
+        """
+        forwarded = False
+        rules_checked = 0
+        # Collect radio send tasks to fire concurrently
+        radio_sends: list[tuple] = []  # (tcid, rule_id, tx_delay, target, data)
+
+        for rule in self.rules:
+            if not rule.get('enabled', True):
+                continue
+
+            rule_source_raw = rule.get('source', '')
+            rules_checked += 1
+
+            # Use bidirectional source matching
+            if not self._source_matches(rule_source_raw, source_cid):
+                continue
+
+            if not self._matches_filter(rule, data):
+                self.dropped_filtered += 1
+                self._record_dedup_event('filtered', source_cid, pkt_hash, len(data), pkt_type_name)
+                logger.info('BridgeEngine: filtered by rule %s (type=%s)',
+                           rule.get('id', '?'), pkt_type_name)
+                continue
+
+            rule_target_raw = rule.get('target', '')
+            rule_target = self._resolve_channel(rule_target_raw)
+            tx_delay = float(rule.get('tx_delay_ms', 50)) / 1000.0
+
+            # Check if target is an external endpoint (mqtt, repeater)
+            if rule_target in self.NON_RADIO_ENDPOINTS:
+                handler = self._endpoint_handlers.get(rule_target)
+                if handler:
+                    logger.info('BridgeEngine: forwarding %d bytes: %s -> %s '
+                               '(rule=%s, type=%s, hash=%s)',
+                               len(data), source_cid, rule_target,
+                               rule.get('id', '?'), pkt_type_name, pkt_hash)
+                    try:
+                        if tx_delay > 0:
+                            await asyncio.sleep(tx_delay)
+                        result = handler(data)
+                        if asyncio.iscoroutine(result):
+                            await result
+                        self.forwarded_packets += 1
+                        forwarded = True
+                        self._record_dedup_event('forwarded', source_cid, pkt_hash, len(data), pkt_type_name)
+                        logger.info('BridgeEngine: delivered to %s endpoint', rule_target)
+                    except Exception as e:
+                        logger.error('BridgeEngine: handler error for %s: %s', rule_target, e)
+                else:
+                    logger.debug('BridgeEngine: no handler registered for %s', rule_target)
+                continue
+
+            # Radio target - collect for concurrent sending
+            target = self._radio_map.get(rule_target)
+            if not target:
+                logger.warning('BridgeEngine: no radio found for target %r '
+                              '(resolved from %r)', rule_target, rule_target_raw)
+                continue
+            # Don't forward back to same radio if source is also a radio
+            source_radio = self._radio_map.get(source_cid)
+            if target is source_radio and source_radio is not None:
+                continue
+
+            tcid = getattr(target, 'channel_id', 'unknown')
+            rule_id = rule.get('id', '?')
+            radio_sends.append((tcid, rule_id, tx_delay, target))
+            logger.info('BridgeEngine: queuing TX %d bytes: %s -> %s '
+                       '(rule=%s, type=%s, hash=%s)',
+                       len(data), source_cid, tcid, rule_id,
+                       pkt_type_name, pkt_hash)
+
+        # Fire all radio sends concurrently so TX burst batching can
+        # collect packets for ALL channels in a single burst cycle
+        if radio_sends:
+            logger.info('BridgeEngine: firing %d radio sends concurrently '
+                       'for %s (type=%s, hash=%s)',
+                       len(radio_sends), source_cid, pkt_type_name, pkt_hash)
+
+            async def _do_radio_send(tcid, rule_id, tx_delay, target, payload):
+                """Send to one radio target, return (tcid, result_or_error)."""
+                try:
+                    if tx_delay > 0:
+                        await asyncio.sleep(tx_delay)
+                    logger.info('[HEXDUMP] dir=TX ch=%s sz=%d hdr=%s hex=%s', tcid, len(payload), _mc_hdr(payload), _hexdump(payload))
+                    tx_result = await target.send(payload)
+                    return (tcid, rule_id, tx_result, None)
+                except Exception as e:
+                    return (tcid, rule_id, None, e)
+
+            tasks = [
+                _do_radio_send(tcid, rule_id, tx_delay, target, data)
+                for tcid, rule_id, tx_delay, target in radio_sends
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for res in results:
+                if isinstance(res, Exception):
+                    logger.error('BridgeEngine: unexpected gather error: %s', res)
+                    continue
+                tcid, rule_id, tx_result, err = res
+                if err:
+                    logger.error('BridgeEngine: TX error to %s (rule=%s): %s',
+                                tcid, rule_id, err)
+                else:
+                    self.forwarded_packets += 1
+                    forwarded = True
+                    self._record_dedup_event('forwarded', source_cid, pkt_hash, len(data), pkt_type_name)
+                    logger.info('BridgeEngine: TX result on %s (rule=%s): %s',
+                               tcid, rule_id, tx_result)
+
+            # Store echo hash once for all radio sends (same packet data)
+            if forwarded:
+                _fwd_hash = hashlib.sha256(data).hexdigest()[:12]
+                self._recently_forwarded[_fwd_hash] = time.monotonic()
+                # Cleanup expired
+                _now_fwd = time.monotonic()
+                self._recently_forwarded = {
+                    k: v for k, v in self._recently_forwarded.items()
+                    if _now_fwd - v < self._fwd_echo_ttl
+                }
+                logger.debug('BridgeEngine: stored fwd echo hash %s (active=%d)',
+                            _fwd_hash, len(self._recently_forwarded))
+
+        if not forwarded:
+            logger.debug('BridgeEngine: no rule matched for %s on %s (type=%s, '
+                        'rules_checked=%d)',
+                        pkt_hash, source_cid, pkt_type_name, rules_checked)
+
+    @staticmethod
+    def _get_packet_type(data: bytes) -> int | None:
+        """Extract MeshCore payload type from the raw packet header."""
+        if not data or len(data) < 1:
+            return None
+        return (data[0] >> 2) & 0x0F
+
+    def _get_packet_type_name(self, data: bytes) -> str:
+        """Get human-readable packet type name for logging."""
+        pkt_type = self._get_packet_type(data)
+        if pkt_type is None:
+            return 'UNKNOWN'
+        return self.PKT_TYPE_NAMES.get(pkt_type, f'TYPE_{pkt_type:#04x}')
+
+    def _matches_filter(self, rule: dict, data: bytes) -> bool:
+        """Check if a packet matches the rule's filter/packet_types."""
+        filter_val = rule.get('filter', 'all')
+        packet_types = rule.get('packet_types', [])
+
+        if filter_val == 'all' and not packet_types:
+            return True
+
+        pkt_type = self._get_packet_type(data)
+        if pkt_type is None:
+            return True
+
+        if packet_types:
+            for pt in packet_types:
+                pt_upper = pt.upper() if isinstance(pt, str) else str(pt)
+                if pt_upper == 'ALL':
+                    return True
+                expected = self.PKT_TYPE_MAP.get(pt_upper)
+                if expected is not None and expected == pkt_type:
+                    return True
+            return False
+
+        return True
+
+    def _resolve_channel(self, name: str) -> str:
+        """Resolve a channel alias to its canonical channel_id."""
+        resolved = self.CHANNEL_ALIASES.get(name, name)
+        if resolved == name and name not in self.NON_RADIO_ENDPOINTS and name not in self._radio_map:
+            logger.warning('BridgeEngine: alias miss for %r - not in CHANNEL_ALIASES or radio_map', name)
+        return resolved
+
+    def _is_duplicate(self, data: bytes) -> bool:
+        now = time.monotonic()
+        key = hashlib.sha256(data).hexdigest()
+        self._seen = {k: v for k, v in self._seen.items() if now - v < self.dedup_ttl}
+        if key in self._seen:
+            return True
+        self._seen[key] = now
+        return False
+
+    def set_sqlite_handler(self, handler) -> None:
+        """Set the SQLiteHandler for persistent dedup event storage."""
+        self._sqlite_handler = handler
+        if handler is not None and not self._sqlite_writer_running:
+            self._sqlite_writer_running = True
+            self._sqlite_writer_thread = threading.Thread(
+                target=self._sqlite_dedup_writer, daemon=True,
+                name="dedup-sqlite-writer")
+            self._sqlite_writer_thread.start()
+            logger.info("BridgeEngine: SQLite dedup writer thread started")
+
+    def _sqlite_dedup_writer(self) -> None:
+        """Background thread: batch-write dedup events to SQLite."""
+        batch: list = []
+        while self._sqlite_writer_running:
+            try:
+                # Drain queue with timeout
+                try:
+                    evt = self._dedup_queue.get(timeout=2.0)
+                    batch.append(evt)
+                    # Drain any remaining items without blocking
+                    while not self._dedup_queue.empty():
+                        try:
+                            batch.append(self._dedup_queue.get_nowait())
+                        except queue.Empty:
+                            break
+                except queue.Empty:
+                    pass
+
+                # Write batch to SQLite
+                if batch and self._sqlite_handler is not None:
+                    try:
+                        self._sqlite_handler.store_dedup_events_batch(batch)
+                    except Exception as e:
+                        logger.error("BridgeEngine: SQLite dedup write error: %s", e)
+                    batch = []
+
+                # Periodic cleanup (every hour)
+                now = time.time()
+                if now - self._last_cleanup_ts > self._cleanup_interval:
+                    self._last_cleanup_ts = now
+                    if self._sqlite_handler is not None:
+                        try:
+                            deleted = self._sqlite_handler.cleanup_dedup_events(max_age_days=7)
+                            if deleted:
+                                logger.info("BridgeEngine: dedup cleanup removed %d old events", deleted)
+                        except Exception as e:
+                            logger.error("BridgeEngine: dedup cleanup error: %s", e)
+
+            except Exception as e:
+                logger.error("BridgeEngine: dedup writer loop error: %s", e)
+                time.sleep(1.0)
+
+        # Flush remaining on shutdown
+        if batch and self._sqlite_handler is not None:
+            try:
+                self._sqlite_handler.store_dedup_events_batch(batch)
+            except Exception:
+                pass
+
+    def _record_dedup_event(self, event_type: str, source_channel: str,
+                            pkt_hash: str, pkt_size: int = 0,
+                            pkt_type: str = '') -> None:
+        """Record a dedup detection event for visualization."""
+        self._dedup_events.append({
+            'ts': time.time(),
+            'type': event_type,
+            'src': source_channel,
+            'hash': pkt_hash[:12],
+            'size': pkt_size,
+            'pkt_type': pkt_type,
+        })
+        # Queue for SQLite persistence (non-blocking)
+        if self._sqlite_handler is not None:
+            try:
+                self._dedup_queue.put_nowait({
+                    'ts': time.time(),
+                    'event_type': event_type,
+                    'source': source_channel,
+                    'pkt_hash': pkt_hash[:12],
+                    'pkt_size': pkt_size,
+                    'pkt_type': pkt_type,
+                })
+            except queue.Full:
+                pass  # drop if queue is full (should not happen)
+
+    def get_dedup_events(self, since: float = 0, limit: int = 100) -> list:
+        """Return recent dedup events, optionally filtered by timestamp."""
+        events = list(self._dedup_events)
+        if since > 0:
+            events = [e for e in events if e['ts'] >= since]
+        return events[-limit:]
+
+    def _update_repeater_counters(self, data: bytes, channel_id: str,
+                                    rssi: int = -120, snr: float = 0.0,
+                                    pkt_type_name: str = 'UNKNOWN',
+                                    pkt_hash: str = '',
+                                    was_forwarded: bool = False,
+                                    was_duplicate: bool = False,
+                                    was_echo: bool = False,
+                                    drop_reason: str | None = None) -> None:
+        """Update RepeaterHandler counters and recent_packets from bridge traffic."""
+        eng = self._repeater_engine
+        if not eng:
+            return
+        try:
+            eng.rx_count += 1
+            if was_forwarded:
+                eng.forwarded_count += 1
+            elif was_duplicate or was_echo or drop_reason:
+                eng.dropped_count += 1
+
+            # Build minimal packet_record compatible with dashboard
+            packet_record = {
+                'timestamp': time.time(),
+                'header': f'0x{data[0]:02X}' if data else None,
+                'payload': data.hex() if data else None,
+                'payload_length': len(data) if data else 0,
+                'type': self._get_packet_type(data) if data else None,
+                'route': (data[0] & 0x03) if data else None,
+                'length': len(data) if data else 0,
+                'rssi': rssi,
+                'snr': snr,
+                'score': 0,
+                'tx_delay_ms': 0,
+                'transmitted': was_forwarded,
+                'is_duplicate': was_duplicate,
+                'packet_hash': pkt_hash[:16] if pkt_hash else '',
+                'drop_reason': drop_reason,
+                'path_hash': None,
+                'src_hash': None,
+                'dst_hash': None,
+                'original_path': None,
+                'forwarded_path': None,
+                'path_hash_size': 0,
+                'raw_packet': data.hex() if data else None,
+                'bridge_source': channel_id,
+                'bridge_pkt_type': pkt_type_name,
+            }
+
+            # Handle duplicates: attach to original if found
+            if was_duplicate and len(eng.recent_packets) > 0:
+                for idx in range(len(eng.recent_packets) - 1, -1, -1):
+                    prev_pkt = eng.recent_packets[idx]
+                    if prev_pkt.get('packet_hash') == packet_record['packet_hash']:
+                        if 'duplicates' not in prev_pkt:
+                            prev_pkt['duplicates'] = []
+                        max_dup = getattr(eng, 'max_duplicates_per_packet', 10)
+                        if len(prev_pkt['duplicates']) < max_dup:
+                            prev_pkt['duplicates'].append(packet_record)
+                        return
+
+            eng.recent_packets.append(packet_record)
+            max_recent = getattr(eng, 'max_recent_packets', 50)
+            if len(eng.recent_packets) > max_recent:
+                eng.recent_packets.pop(0)
+        except Exception as e:
+            logger.error('BridgeEngine: error updating repeater counters: %s', e)
+
+    async def _rx_loop(self, source) -> None:
+        cid = getattr(source, 'channel_id', 'unknown')
+        logger.info('BridgeEngine: RX loop started for channel %s', cid)
+        while self._running:
+            try:
+                data = await asyncio.wait_for(source.wait_for_rx(), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error('BridgeEngine: RX error on %s: %s', cid, e)
+                await asyncio.sleep(1.0)
+                continue
+
+            if self._is_duplicate(data):
+                self.dropped_duplicate += 1
+                _dup_hash = hashlib.sha256(data).hexdigest()[:12]
+                self._record_dedup_event('duplicate', cid, _dup_hash, len(data), self._get_packet_type_name(data))
+                logger.debug('BridgeEngine: duplicate dropped on %s (hash=%s)',
+                            cid, _dup_hash)
+                # Update repeater engine: duplicate drop
+                self._update_repeater_counters(
+                    data, cid, pkt_type_name=self._get_packet_type_name(data),
+                    pkt_hash=_dup_hash, was_duplicate=True,
+                    drop_reason="duplicate")
+                continue
+
+
+            # Forwarded-packet echo detection (secondary safety net)
+            _fwd_check_hash = hashlib.sha256(data).hexdigest()[:12]
+            _fwd_now = time.monotonic()
+            if _fwd_check_hash in self._recently_forwarded:
+                _fwd_age = _fwd_now - self._recently_forwarded[_fwd_check_hash]
+                if _fwd_age < self._fwd_echo_ttl:
+                    self._fwd_echo_detected += 1
+                    self._record_dedup_event('echo', cid, _fwd_check_hash, len(data), self._get_packet_type_name(data))
+                    logger.warning('BridgeEngine: Forwarded-packet echo detected on %s! '
+                                   'hash=%s age=%.1fs (total=%d) - DISCARDING',
+                                   cid, _fwd_check_hash, _fwd_age, self._fwd_echo_detected)
+                    # Update repeater engine: echo drop
+                    self._update_repeater_counters(
+                        data, cid, pkt_type_name=self._get_packet_type_name(data),
+                        pkt_hash=_fwd_check_hash, was_duplicate=False,
+                        was_echo=True, drop_reason="echo")
+                    continue
+
+            pkt_hash = hashlib.sha256(data).hexdigest()[:12]
+            pkt_type_name = self._get_packet_type_name(data)
+            logger.info('BridgeEngine: RX %d bytes on %s (type=%s, hash=%s)',
+                       len(data), cid, pkt_type_name, pkt_hash)
+            logger.info('[HEXDUMP] dir=RX ch=%s sz=%d hdr=%s hex=%s', cid, len(data), _mc_hdr(data), _hexdump(data))
+
+            # Snapshot forwarded counter for repeater engine tracking
+            _fwd_before = self.forwarded_packets
+
+            # --- Rule-based forwarding ---
+            if self.rules:
+                await self._forward_by_rules(cid, data, pkt_hash, pkt_type_name)
+            else:
+                # Fallback: no rules configured -> forward to all other radios
+                for target in self.radios:
+                    if target is source:
+                        continue
+                    tcid = getattr(target, 'channel_id', 'unknown')
+                    logger.info('BridgeEngine: forwarding %d bytes (no rules): '
+                               '%s -> %s (type=%s, hash=%s)',
+                               len(data), cid, tcid, pkt_type_name, pkt_hash)
+                    try:
+                        if self.tx_delay > 0:
+                            await asyncio.sleep(self.tx_delay)
+                        await target.send(data)
+                        self.forwarded_packets += 1
+                    except Exception as e:
+                        logger.error('BridgeEngine: TX error to %s: %s', tcid, e)
+
+            # --- Update RepeaterHandler counters ---
+            _fwd_after = self.forwarded_packets
+            _was_forwarded = (_fwd_after > _fwd_before)
+            self._update_repeater_counters(
+                data, cid, pkt_type_name=pkt_type_name,
+                pkt_hash=pkt_hash, was_forwarded=_was_forwarded,
+                drop_reason=None if _was_forwarded else "no_rule_match")
+
+    async def run(self) -> None:
+        self._running = True
+        logger.info('BridgeEngine: starting with %d channels, %d rules',
+                    len(self.radios), len(self.rules))
+        tasks = [asyncio.create_task(self._rx_loop(r)) for r in self.radios]
+        try:
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._running = False
+            for t in tasks:
+                t.cancel()
+
+    def stop(self) -> None:
+        self._running = False
+
+    def update_rules(self, new_rules: list) -> None:
+        """Hot-reload bridge rules without restarting the engine."""
+        old_count = len(self.rules)
+        self.rules = new_rules or []
+        # Rebuild reverse aliases in case aliases changed
+        self._build_reverse_aliases()
+        logger.info('BridgeEngine: rules hot-reloaded: %d -> %d rules',
+                    old_count, len(self.rules))
+        for rule in self.rules:
+            rsrc = rule.get('source', '?')
+            rtgt = rule.get('target', '?')
+            logger.info('BridgeEngine: rule %s: %s -> %s (enabled=%s)',
+                       rule.get('id', '?'), rsrc, rtgt, rule.get('enabled', True))
+        logger.info('BridgeEngine: current aliases: %s', dict(self.CHANNEL_ALIASES))
+        logger.info('BridgeEngine: reverse aliases: %s',
+                    {k: sorted(v) for k, v in self._reverse_aliases.items()})
+
+    def get_stats(self) -> dict:
+        return {
+            'forwarded_packets': self.forwarded_packets,
+            'dropped_duplicate': self.dropped_duplicate,
+            'dropped_filtered': self.dropped_filtered,
+            'fwd_echo_detected': self._fwd_echo_detected,
+            'fwd_echo_hashes_active': len(self._recently_forwarded),
+            'dedup_events_buffered': len(self._dedup_events),
+            'dedup_seen_active': len(self._seen),
+            'channels': [getattr(r, 'channel_id', str(i)) for i, r in enumerate(self.radios)],
+            'rules': self.rules,
+        }

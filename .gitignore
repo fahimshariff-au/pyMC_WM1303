@@ -1,0 +1,28 @@
+# Agent Zero project metadata
+.a0proj/
+
+# Reference files extracted from pi01 (contains sensitive data)
+_collect/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Build artifacts
+*.o
+*.a
+*.so

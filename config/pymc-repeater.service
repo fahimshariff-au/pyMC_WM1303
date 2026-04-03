@@ -1,0 +1,38 @@
+#Systemd service file for pyMC - Meshcore Repeater Daemon (clean install)
+#Install as /etc/systemd/system/pymc-repeater.service
+
+[Unit]
+Description=pyMC Repeater Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/pymc_repeater/repos/pyMC_Repeater
+Environment="PYTHONPATH=/opt/pymc_repeater/repos/pyMC_Repeater"
+Environment="VIRTUAL_ENV=/opt/pymc_repeater/venv"
+Environment="PATH=/opt/pymc_repeater/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Start command - use venv python with proper path
+ExecStartPre=-/usr/bin/sudo /bin/systemctl stop lora_pkt_fwd.service
+ExecStart=/opt/pymc_repeater/venv/bin/python3 -m repeater.main --config /etc/pymc_repeater/config.yaml
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5
+
+# Resource limits
+MemoryHigh=256M
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pymc-repeater
+
+# Security (relaxed for proper operation)
+ReadWritePaths=/var/log/pymc_repeater /var/lib/pymc_repeater /etc/pymc_repeater /home/pi /tmp
+
+[Install]
+WantedBy=multi-user.target
