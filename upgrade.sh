@@ -356,6 +356,20 @@ if [ "$CORE_UPDATED" = true ] || [ "$FORCE_REBUILD" = true ]; then
     cd "${REPO_DIR}/pyMC_core"
     sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install -e . 2>&1 | tail -3
     ok "pyMC_core reinstalled"
+
+    # Verify editable install worked - if not, re-apply overlay to site-packages
+    step "Verifying pyMC_core overlay is accessible"
+    PYMC_CORE_IMPORT_PATH=$(sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import pymc_core.hardware; print(pymc_core.hardware.__file__)" 2>/dev/null || echo "")
+    if echo "$PYMC_CORE_IMPORT_PATH" | grep -q "site-packages"; then
+        warn "pyMC_core editable install fell back to regular install"
+        info "Re-applying pyMC_core overlay to site-packages..."
+        SITE_HW_DIR=$(dirname "$PYMC_CORE_IMPORT_PATH")
+        cp -v "${OVERLAY_DIR}/pymc_core/src/pymc_core/hardware/"*.py "${SITE_HW_DIR}/" 2>&1
+        chown -R ${PI_USER}:${PI_USER} "${SITE_HW_DIR}"
+        ok "pyMC_core overlay re-applied to site-packages"
+    else
+        ok "pyMC_core editable install working (imports from source)"
+    fi
 else
     step "Skipping pyMC_core reinstall (no changes)"
 fi
