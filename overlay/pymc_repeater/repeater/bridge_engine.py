@@ -711,12 +711,25 @@ class BridgeEngine:
                         max_dup = getattr(eng, 'max_duplicates_per_packet', 10)
                         if len(prev_pkt['duplicates']) < max_dup:
                             prev_pkt['duplicates'].append(packet_record)
+                        # Store duplicate to SQLite for dashboard
+                        if hasattr(eng, 'storage') and eng.storage:
+                            try:
+                                eng.storage.record_packet(packet_record)
+                            except Exception:
+                                pass
                         return
 
             eng.recent_packets.append(packet_record)
             max_recent = getattr(eng, 'max_recent_packets', 50)
             if len(eng.recent_packets) > max_recent:
                 eng.recent_packets.pop(0)
+
+            # Store to persistent SQLite storage for dashboard API
+            if hasattr(eng, 'storage') and eng.storage:
+                try:
+                    eng.storage.record_packet(packet_record)
+                except Exception as store_err:
+                    logger.debug('BridgeEngine: failed to store packet to SQLite: %s', store_err)
         except Exception as e:
             logger.error('BridgeEngine: error updating repeater counters: %s', e)
 
