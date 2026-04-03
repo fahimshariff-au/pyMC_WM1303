@@ -28,9 +28,9 @@ During installation, template files from the `config/` directory in the reposito
            │ generates at startup
            ▼
 ┌──────────────────────┐     ┌──────────────────────┐
-│   global_conf.json   │     │     config.yaml       │
-│  (HAL, RF chains,    │     │  (service settings,   │
-│   IF chains, SX1261) │     │   JWT, mesh, radio)   │
+│   global_conf.json   │     │     config.yaml      │
+│  (HAL, RF chains,    │     │  (service settings,  │
+│   IF chains, SX1261) │     │   JWT, mesh, radio)  │
 └──────────┬───────────┘     └──────────┬────────────┘
            │                            │
            ▼                            ▼

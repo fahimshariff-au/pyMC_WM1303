@@ -57,9 +57,9 @@ The WM1303 is a LoRa concentrator module based on the Semtech SX1302/SX1303 base
                        │ SPI (spidev0.1, 2 MHz)
                        │
             ┌──────────┴───────────┐
-            │       SX1261          │
-            │  Companion Chip       │
-            │  (Spectral scan/LBT)  │
+            │       SX1261         │
+            │  Companion Chip      │
+            │  (Spectral scan/LBT) │
             └───────────────────────┘
 ```
 

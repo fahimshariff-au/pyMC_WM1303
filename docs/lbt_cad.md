@@ -42,7 +42,7 @@ The `NoiseFloorMonitor` is the foundation for both LBT and CAD. It runs as a bac
 │     └─ No TX interference on the SPI bus                        │
 │                                                                 │
 │  3. Read scan results from /tmp/pymc_spectral_results.json      │
-│     └─ SX1261 scans 863-870 MHz (36 channels, 100 scans/ch)    │
+│     └─ SX1261 scans 863-870 MHz (36 channels, 100 scans/ch)     │
 │                                                                 │
 │  4. Per-channel frequency matching                              │
 │     └─ Match scan freq to channel freq ± BW/2                   │
@@ -179,7 +179,7 @@ Packet in TX queue
      │ passed
      ▼
 ┌──────────┐     detected   ┌─────────────┐
-│ CAD Check├───────────────►│ Wait + Retry │
+│ CAD Check├───────────────►│ Wait + Retry│
 │ (pattern)│                └─────────────┘
 └────┬─────┘
      │ clear

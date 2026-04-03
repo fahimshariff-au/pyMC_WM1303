@@ -17,11 +17,11 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 │  ┌─────────────────────────────────────────────────────────────────┐    │
 │  │                    WM1303 Pi HAT Module                         │    │
 │  │                                                                 │    │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │    │
-│  │  │ SX1302/03│  │ SX1250_0 │  │ SX1250_1 │  │    SX1261     │  │    │
-│  │  │ Baseband │  │ RF0 Radio│  │ RF1 Radio│  │ Companion Chip│  │    │
-│  │  │ Processor│  │ (TX+RX)  │  │ (RX only)│  │ (Spectral/LBT)│  │    │
-│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬────────┘  │    │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐    │    │
+│  │  │ SX1302/03│  │ SX1250_0 │  │ SX1250_1 │  │    SX1261     │    │    │
+│  │  │ Baseband │  │ RF0 Radio│  │ RF1 Radio│  │ Companion Chip│    │    │
+│  │  │ Processor│  │ (TX+RX)  │  │ (RX only)│  │ (Spectral/LBT)│    │    │
+│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬────────┘    │    │
 │  │       │              │              │               │           │    │
 │  │       └──────────────┴──────────────┘               │           │    │
 │  │                      │ SPI bus                      │ SPI bus   │    │
@@ -32,8 +32,8 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
 │  │                   Raspberry Pi 4 (SenseCAP M1)                  │    │
-│  │  GPIO: BCM17(reset) BCM18(power) BCM5(SX1261) BCM13(AD5338R)   │    │
-│  │  GPIO base offset: 512 (sysfs = BCM + 512)                     │    │
+│  │  GPIO: BCM17(reset) BCM18(power) BCM5(SX1261) BCM13(AD5338R)    │    │
+│  │  GPIO base offset: 512 (sysfs = BCM + 512)                      │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────┘
                          │
@@ -42,44 +42,44 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         HAL & FORWARDER LAYER                           │
 │                                                                         │
-│  ┌─────────────────────────────────────┐  ┌──────────────────────────┐ │
-│  │       libloragw.a (SX1302 HAL)      │  │   lora_pkt_fwd           │ │
-│  │                                     │  │   (Packet Forwarder)     │ │
-│  │  - Board/RF/IF chain configuration  │  │                          │ │
-│  │  - SX1250 radio control             │  │  - UDP server (:1730)    │ │
-│  │  - TX/RX packet handling            │  │  - PUSH_DATA (RX→UDP)    │ │
-│  │  - AGC management (debounced)       │  │  - PULL_RESP (UDP→TX)    │ │
-│  │  - FEM/LNA register control         │  │  - TX_ACK feedback       │ │
-│  │  - SX1261 spectral scan             │  │  - Spectral scan thread  │ │
-│  │  - Calibration routines             │  │  - JSON config loading   │ │
-│  └─────────────────────────────────────┘  └───────────┬──────────────┘ │
+│  ┌─────────────────────────────────────┐  ┌──────────────────────────┐  │
+│  │       libloragw.a (SX1302 HAL)      │  │   lora_pkt_fwd           │  │
+│  │                                     │  │   (Packet Forwarder)     │  │
+│  │  - Board/RF/IF chain configuration  │  │                          │  │
+│  │  - SX1250 radio control             │  │  - UDP server (:1730)    │  │
+│  │  - TX/RX packet handling            │  │  - PUSH_DATA (RX→UDP)    │  │
+│  │  - AGC management (debounced)       │  │  - PULL_RESP (UDP→TX)    │  │
+│  │  - FEM/LNA register control         │  │  - TX_ACK feedback       │  │
+│  │  - SX1261 spectral scan             │  │  - Spectral scan thread  │  │
+│  │  - Calibration routines             │  │  - JSON config loading   │  │
+│  └─────────────────────────────────────┘  └───────────┬──────────────┘  │
 │                                                       │                 │
 └───────────────────────────────────────────────────────┼─────────────────┘
                                                         │ UDP :1730
                                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                          BACKEND LAYER                                   │
+│                          BACKEND LAYER                                  │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    WM1303 Backend                                │    │
+│  │                    WM1303 Backend                               │    │
 │  │                                                                 │    │
-│  │  ┌──────────────┐  ┌─────────────────┐  ┌───────────────────┐  │    │
-│  │  │ UDP Handler  │  │ NoiseFloor      │  │   RX Watchdog     │  │    │
-│  │  │ _handle_udp()│  │ Monitor (30s)   │  │ (3 detect modes)  │  │    │
-│  │  │ RX dispatch  │  │ TX Hold (4s)    │  │ PUSH_DATA stats   │  │    │
-│  │  └──────┬───────┘  │ Spectral harvest│  │ RSSI spike detect │  │    │
-│  │         │          │ Rolling buffer  │  │ RX timeout (180s) │  │    │
-│  │         │          └────────┬────────┘  └───────────────────┘  │    │
+│  │  ┌──────────────┐  ┌─────────────────┐  ┌───────────────────┐   │    │
+│  │  │ UDP Handler  │  │ NoiseFloor      │  │   RX Watchdog     │   │    │
+│  │  │ _handle_udp()│  │ Monitor (30s)   │  │ (3 detect modes)  │   │    │
+│  │  │ RX dispatch  │  │ TX Hold (4s)    │  │ PUSH_DATA stats   │   │    │
+│  │  └──────┬───────┘  │ Spectral harvest│  │ RSSI spike detect │   │    │
+│  │         │          │ Rolling buffer  │  │ RX timeout (180s) │   │    │
+│  │         │          └────────┬────────┘  └───────────────────┘   │    │
 │  │         │                   │                                   │    │
 │  │         ▼                   ▼                                   │    │
 │  │  ┌──────────────────────────────────────────┐                   │    │
-│  │  │         VirtualLoRaRadio (per channel)    │                   │    │
+│  │  │         VirtualLoRaRadio (per channel)   │                   │    │
 │  │  │  ch-1 (SF7) │ ch-2 (SF8) │ ch-3 │ ch-4   │                   │    │
 │  │  └──────────────────────┬───────────────────┘                   │    │
 │  └─────────────────────────┼───────────────────────────────────────┘    │
 │                            │                                            │
 │  ┌─────────────────────────▼───────────────────────────────────────┐    │
-│  │                     Bridge Engine                                │    │
+│  │                     Bridge Engine                               │    │
 │  │                                                                 │    │
 │  │  1. RX packet received on channel_x                             │    │
 │  │  2. Dedup check (hash + time window)                            │    │
@@ -89,12 +89,12 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 │  │  6. TX batch window (2s) for concurrent queuing                 │    │
 │  │  7. Fire sends to all target channel TX queues                  │    │
 │  └───────────┬─────────────┬──────────────┬────────────────────────┘    │
-│              │             │              │                              │
-│       ┌──────▼──────┐ ┌───▼────────┐ ┌───▼────────┐                    │
-│       │ TX Queue    │ │ TX Queue   │ │ TX Queue   │  (per channel)     │
-│       │ LBT check   │ │ CAD check  │ │ TTL check  │                    │
+│              │             │              │                             │
+│       ┌──────▼──────┐ ┌───▼────────┐ ┌───▼────────┐                     │
+│       │ TX Queue    │ │ TX Queue   │ │ TX Queue   │  (per channel)      │
+│       │ LBT check   │ │ CAD check  │ │ TTL check  │                     │
 │       │ Overflow mgmt│ │ FIFO order │ │ Hold check │                    │
-│       └──────┬──────┘ └───┬────────┘ └───┬────────┘                    │
+│       └──────┬──────┘ └───┬────────┘ └───┬────────┘                     │
 │              └────────────┴──────────────┘                              │
 │                           │ PULL_RESP (UDP)                             │
 │                           ▼                                             │
@@ -102,13 +102,13 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 └─────────────────────────────────────────────────────────────────────────┘
                                                         │
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                           WEB / API LAYER                                │
+│                           WEB / API LAYER                               │
 │                                                                         │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────────────┐   │
-│  │  HTTP Server      │  │  REST API         │  │  WebSocket          │   │
-│  │  (port 8000)      │  │  /api/wm1303/*    │  │  Real-time updates  │   │
-│  │  Static files     │  │  JWT auth         │  │  Stats push         │   │
-│  └──────────────────┘  └──────────────────┘  └─────────────────────┘   │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────────────┐    │
+│  │  HTTP Server      │  │  REST API         │  │  WebSocket          │  │
+│  │  (port 8000)      │  │  /api/wm1303/*    │  │  Real-time updates  │  │
+│  │  Static files     │  │  JWT auth         │  │  Stats push         │  │
+│  └──────────────────┘  └──────────────────┘  └─────────────────────┘    │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
 │  │              WM1303 Manager UI (wm1303.html)                    │    │
@@ -119,7 +119,7 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │              pyMC Console (Vue.js app)                           │    │
+│  │              pyMC Console (Vue.js app)                          │    │
 │  │  Existing MeshCore functionality: nodes, mesh, messaging        │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -129,31 +129,31 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      Component Dependency Graph                   │
+│                      Component Dependency Graph                  │
 │                                                                  │
-│   libloragw.a ◄── lora_pkt_fwd ◄── WM1303 Backend              │
+│   libloragw.a ◄── lora_pkt_fwd ◄── WM1303 Backend                │
 │       │                │                    │                    │
 │       │           UDP :1730            ┌────┴────────┐           │
 │       │                                │             │           │
-│   SX1302/SX1261                   pymc_core    pymc_repeater    │
+│   SX1302/SX1261                   pymc_core    pymc_repeater     │
 │   (hardware)                      (library)    (application)     │
-│                                       │             │           │
+│                                       │             │            │
 │                                       │        Bridge Engine     │
 │                                       │        Config Manager    │
 │                                       │        Packet Router     │
-│                                       │             │           │
-│                                  VirtualLoRaRadio   │           │
-│                                  TXQueue            │           │
-│                                  SX1261Driver       │           │
-│                                       │             │           │
-│                                       └──────┬──────┘           │
-│                                              │                  │
-│                                         WM1303 API              │
-│                                         HTTP Server             │
-│                                         WebSocket               │
-│                                              │                  │
-│                                      WM1303 Manager UI          │
-│                                      pyMC Console UI            │
+│                                       │             │            │
+│                                  VirtualLoRaRadio   │            │
+│                                  TXQueue            │            │
+│                                  SX1261Driver       │            │
+│                                       │             │            │
+│                                       └──────┬──────┘            │
+│                                              │                   │
+│                                         WM1303 API               │
+│                                         HTTP Server              │
+│                                         WebSocket                │
+│                                              │                   │
+│                                      WM1303 Manager UI           │
+│                                      pyMC Console UI             │
 └──────────────────────────────────────────────────────────────────┘
 ```
 

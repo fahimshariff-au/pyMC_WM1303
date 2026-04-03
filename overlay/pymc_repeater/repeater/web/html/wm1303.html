@@ -546,6 +546,51 @@ select.ci option{background:#1e293b}
     </div>
   </div>
 
+  <!-- Group 5: GPIO Pin Configuratie -->
+  <div style="background:var(--bg2);border:1px solid rgba(251,191,36,.4);border-radius:12px;padding:20px;margin-bottom:16px">
+    <h3 style="margin:0 0 12px 0;color:var(--tx);font-size:1.1em">&#128268; GPIO Pin Configuratie</h3>
+    <div style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.4);border-radius:8px;padding:12px;margin-bottom:16px;color:#fbbf24;font-size:0.85em">
+      &#9888;&#65039; <strong>WAARSCHUWING</strong>: Verkeerde pin-toewijzingen kunnen hardware beschadigen. Controleer de BCM pin-nummers van je board voordat je wijzigingen aanbrengt.
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">
+
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">GPIO Base Offset</label>
+        <input id="ac-gpio-base" type="number" min="0" max="1024" value="512" oninput="updateGpioSysfs()" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid rgba(251,191,36,.5);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:#fbbf24;display:block;margin-top:4px">&#9888;&#65039; Base offset voor sysfs GPIO nummering. RPi4/5 gebruiken meestal 512</small>
+      </div>
+
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">&#9888;&#65039; SX1302 Reset Pin (BCM)</label>
+        <input id="ac-gpio-sx1302-rst" type="number" min="0" max="27" value="17" oninput="updateGpioSysfs()" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid rgba(251,191,36,.5);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:#fbbf24;display:block;margin-top:4px">&#9888;&#65039; BCM pin voor SX1302 reset &mdash; <span id="sysfs-sx1302-rst" style="font-weight:600">Sysfs: 529</span></small>
+      </div>
+
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">&#9888;&#65039; SX1302 Power Enable Pin (BCM)</label>
+        <input id="ac-gpio-sx1302-pwr" type="number" min="0" max="27" value="18" oninput="updateGpioSysfs()" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid rgba(251,191,36,.5);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:#fbbf24;display:block;margin-top:4px">&#9888;&#65039; BCM pin voor SX1302 power enable &mdash; <span id="sysfs-sx1302-pwr" style="font-weight:600">Sysfs: 530</span></small>
+      </div>
+
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">&#9888;&#65039; SX1261 Reset Pin (BCM)</label>
+        <input id="ac-gpio-sx1261-rst" type="number" min="0" max="27" value="5" oninput="updateGpioSysfs()" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid rgba(251,191,36,.5);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:#fbbf24;display:block;margin-top:4px">&#9888;&#65039; BCM pin voor SX1261 reset &mdash; <span id="sysfs-sx1261-rst" style="font-weight:600">Sysfs: 517</span></small>
+      </div>
+
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">&#9888;&#65039; AD5338R Reset Pin (BCM)</label>
+        <input id="ac-gpio-ad5338r-rst" type="number" min="0" max="27" value="13" oninput="updateGpioSysfs()" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid rgba(251,191,36,.5);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:#fbbf24;display:block;margin-top:4px">&#9888;&#65039; BCM pin voor AD5338R reset &mdash; <span id="sysfs-ad5338r-rst" style="font-weight:600">Sysfs: 525</span></small>
+      </div>
+
+    </div>
+    <div style="margin-top:16px;text-align:right">
+      <button onclick="saveAdvGroup('gpio_pins')" style="padding:8px 20px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:500">&#9888;&#65039; Save GPIO &amp; Restart</button>
+    </div>
+  </div>
+
+
   <div id="ac-status" style="display:none;padding:12px;border-radius:8px;margin-top:8px;font-size:0.9em"></div>
 </div>
 
@@ -3071,14 +3116,20 @@ function renderTxActChart(channels) {
     'ac-pa-lut':      { key: 'pa_lut',                       source: 'hal' },
     'ac-agc-ana':     { key: 'agc_ana_gain',                 source: 'hal' },
     'ac-agc-dec':     { key: 'agc_dec_gain',                 source: 'hal' },
-    'ac-chan-fixed':   { key: 'channelizer_fixed_gain',      source: 'hal' }
+    'ac-chan-fixed':   { key: 'channelizer_fixed_gain',      source: 'hal' },
+    'ac-gpio-base':       { key: 'gpio_base_offset',           source: 'gpio' },
+    'ac-gpio-sx1302-rst': { key: 'sx1302_reset_pin',           source: 'gpio' },
+    'ac-gpio-sx1302-pwr': { key: 'sx1302_power_en_pin',        source: 'gpio' },
+    'ac-gpio-sx1261-rst': { key: 'sx1261_reset_pin',           source: 'gpio' },
+    'ac-gpio-ad5338r-rst':{ key: 'ad5338r_reset_pin',          source: 'gpio' }
   };
 
   var AC_GROUPS = {
     dedup_cache:  ['ac-dedup-ttl', 'ac-cache-ttl', 'ac-max-cache'],
     tx_queue:     ['ac-queue-size', 'ac-tx-delay', 'ac-pkt-ttl', 'ac-overflow'],
     noise_floor:  ['ac-nf-interval', 'ac-nf-hold', 'ac-nf-buffer'],
-    hal_advanced: ['ac-force-fe', 'ac-lna-lut', 'ac-pa-lut', 'ac-agc-ana', 'ac-agc-dec', 'ac-chan-fixed']
+    hal_advanced: ['ac-force-fe', 'ac-lna-lut', 'ac-pa-lut', 'ac-agc-ana', 'ac-agc-dec', 'ac-chan-fixed'],
+    gpio_pins:    ['ac-gpio-base', 'ac-gpio-sx1302-rst', 'ac-gpio-sx1302-pwr', 'ac-gpio-sx1261-rst', 'ac-gpio-ad5338r-rst']
   };
 
   function setVal(id, val) {
@@ -3111,6 +3162,7 @@ function renderTxActChart(channels) {
             setVal(id, data[key]);
           }
         }
+        updateGpioSysfs();
         showAcStatus('Configuratie geladen', '#22c55e');
       })
       .catch(function(err) {
@@ -3127,7 +3179,8 @@ function renderTxActChart(channels) {
       dedup_cache: 'Deduplicatie & Cache',
       tx_queue: 'TX Queue Management',
       noise_floor: 'Noise Floor Monitor',
-      hal_advanced: 'HAL Geavanceerd (GEVAARLIJK!)'
+      hal_advanced: 'HAL Geavanceerd (GEVAARLIJK!)',
+      gpio_pins: 'GPIO Pin Configuratie'
     }[group] || group;
 
     var confirmMsg = 'Weet je zeker dat je de "' + groupLabel + '" instellingen wilt opslaan?
@@ -3137,6 +3190,9 @@ De service wordt herstart.';
       confirmMsg = '⚠️ WAARSCHUWING: HAL wijzigingen kunnen hardware beschadigen!
 
 ' + confirmMsg;
+    }
+    if (group === 'gpio_pins') {
+      confirmMsg = '⚠️ WAARSCHUWING: Verkeerde GPIO pins kunnen hardware beschadigen!\n\n' + confirmMsg;
     }
     if (!confirm(confirmMsg)) return;
 
@@ -3178,6 +3234,21 @@ De service wordt herstart.';
     el.textContent = msg;
     setTimeout(function() { el.style.display = 'none'; }, 6000);
   }
+
+  window.updateGpioSysfs = function() {
+    var base = parseInt(document.getElementById('ac-gpio-base').value) || 512;
+    var pins = [
+      { input: 'ac-gpio-sx1302-rst', label: 'sysfs-sx1302-rst' },
+      { input: 'ac-gpio-sx1302-pwr', label: 'sysfs-sx1302-pwr' },
+      { input: 'ac-gpio-sx1261-rst', label: 'sysfs-sx1261-rst' },
+      { input: 'ac-gpio-ad5338r-rst', label: 'sysfs-ad5338r-rst' }
+    ];
+    for (var i = 0; i < pins.length; i++) {
+      var bcm = parseInt(document.getElementById(pins[i].input).value) || 0;
+      var el = document.getElementById(pins[i].label);
+      if (el) el.textContent = 'Sysfs: ' + (bcm + base);
+    }
+  };
 
 })();
 </script>
