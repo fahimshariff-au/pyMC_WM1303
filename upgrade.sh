@@ -315,6 +315,7 @@ chown -R ${PI_USER}:${PI_USER} "${REPO_DIR}"
 # =============================================================================
 phase "Rebuild HAL & Packet Forwarder"
 
+if [ "$FORCE_REBUILD" = true ] || [ "$HAL_UPDATED" = true ]; then
     step "Cleaning previous build artifacts"
     cd "${HAL_DIR}"
     sudo -u ${PI_USER} make clean 2>&1 || true

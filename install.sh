@@ -356,6 +356,7 @@ chown -R ${PI_USER}:${PI_USER} "${REPO_DIR}"
 # =============================================================================
 phase "Build HAL & Packet Forwarder"
 
+if [ "$SKIP_BUILD" = false ]; then
     step "Cleaning previous HAL build artifacts"
     cd "${HAL_DIR}"
     sudo -u ${PI_USER} make clean 2>&1 || true
