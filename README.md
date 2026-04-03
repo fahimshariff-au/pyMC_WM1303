@@ -64,12 +64,17 @@ The system uses an **overlay approach**: unmodified forks of the upstream reposi
 
 ### 1. Install
 
+**One-line installer** (recommended):
+
 ```bash
-# Clone this repository
+curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
+```
+
+**Or manually**:
+
+```bash
 git clone https://github.com/HansvanMeer/pyMC_WM1303.git
 cd pyMC_WM1303
-
-# Run the installation script
 sudo bash install.sh
 ```
 
