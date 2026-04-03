@@ -4,6 +4,8 @@
 
 A complete installation and management system for running a [WM1303 LoRa concentrator](https://www.seeedstudio.com/WM1303-LoRaWAN-Gateway-Module-SX1303-p-5154.html) with [MeshCore](https://meshcore.co) (pyMC_core & pyMC_Repeater) on a SenseCAP M1 / Raspberry Pi.
 
+![WM1303 Manager — Status Dashboard](screenshots/status.jpg)
+
 ---
 
 ## Overview
@@ -60,16 +62,15 @@ The system uses an **overlay approach**: unmodified forks of the upstream reposi
 
 ## Quick Start
 
+### 1. Install
+
 ```bash
-# 1. Clone this repository
+# Clone this repository
 git clone https://github.com/HansvanMeer/pyMC_WM1303.git
 cd pyMC_WM1303
 
-# 2. Run the installation script
+# Run the installation script
 sudo bash install.sh
-
-# 3. Access the web interface
-# Open http://<your-pi-ip>:8000/wm1303.html
 ```
 
 The installation script handles everything:
@@ -84,7 +85,84 @@ The installation script handles everything:
 - Systemd service installation and startup
 - NTP synchronization verification
 
-See [docs/installation.md](docs/installation.md) for detailed instructions.
+### 2. Setup Wizard
+
+After installation, open the pyMC Repeater web interface:
+
+```
+http://<your-pi-ip>:8000
+```
+
+The setup wizard will guide you through the initial configuration. When prompted for hardware type, select **WM1303 LoRa Concentrator**.
+
+> ⚠️ **Important:** The pyMC Repeater dashboard has a **Configure → Radio Settings** page. These radio settings are **NOT used** when running with the WM1303 concentrator. All radio configuration is managed exclusively through the **WM1303 Manager** interface (see next steps). You can safely ignore the Radio Settings page.
+
+### 3. Configure Channels
+
+Once the setup wizard is complete, open the **WM1303 Manager**:
+
+```
+http://<your-pi-ip>:8000/wm1303.html
+```
+
+Navigate to the **Channels** tab to configure your RF chains and channel assignments:
+
+![WM1303 Manager — Channels: RF Chain Configuration](screenshots/channels-1.jpg)
+
+In the upper section you configure the **RF Chain** settings:
+- **RF Center Frequency** — Set the center frequency for your RF chain (e.g., `869.5245 MHz` for EU868). Both SX1250 radios share this center frequency.
+- **RF0 (SX1250_0)** — Primary radio: RX + TX + Clock source. IF chains 0–4 are mapped to this radio.
+- **RF1 (SX1250_1)** — Secondary radio: Clock Only (RX). No IF chains assigned by default.
+- The **Analog Bandwidth Coverage** visualization shows you exactly which frequencies your IF chains cover.
+
+Scroll down to configure the **IF Chains** and **Channel Definitions**:
+
+![WM1303 Manager — Channels: IF Chain & Channel Configuration](screenshots/channels-2.jpg)
+
+In the lower section:
+- **IF Chain Configuration** — Maps IF demodulators to RF chains with frequency offsets. Each active IF chain becomes a receive slot.
+- **Channel Definition Table** — Configure each channel with:
+  - **Channel Name** — Friendly name (e.g., `sf8`, `sf7`)
+  - **Frequency** — Exact RX/TX frequency in MHz
+  - **Spreading Factor (SF)** — SF7 through SF12
+  - **Bandwidth** — Typically 125 kHz
+  - **Coding Rate** — Typically 4/5
+  - **Preamble** — LoRa preamble length
+  - **LBT / CAD** — Enable/disable Listen Before Talk and Channel Activity Detection per channel
+  - **TX Power** — Transmit power in dBm
+  - **Active** — Enable/disable the channel
+- **Radio Summary** — Shows live RX/TX statistics including duty cycle
+- **Channel Status** — Real-time per-channel metrics (RX/TX packets, pending, sent, failed, TX duty)
+
+Click **Save & Restart** after making changes to apply the new channel configuration.
+
+### 4. Configure Bridge Rules
+
+Navigate to the **Bridge Rules** tab to define how packets are forwarded between channels:
+
+![WM1303 Manager — Bridge Rules](screenshots/bridge-rules.jpg)
+
+Bridge rules define the **forwarding paths** between your channels and the MeshCore repeater:
+- **Source → Target** — Each rule specifies a source (left) and a target (right)
+- For a basic 2-channel repeater setup, create 4 rules:
+  1. `SF8 (869.461 MHz)` → `Repeater` — Forward packets received on channel A to the mesh repeater
+  2. `SF7 (869.588 MHz)` → `Repeater` — Forward packets received on channel B to the mesh repeater
+  3. `Repeater` → `SF8 (869.461 MHz)` — Forward mesh repeater packets out on channel A
+  4. `Repeater` → `SF7 (869.588 MHz)` — Forward mesh repeater packets out on channel B
+- **Pkt Types** — Optionally filter which packet types are forwarded per rule
+- **TX Delay** — Add a delay (in ms) before forwarding
+- Use the **toggle** on each rule to enable/disable it
+
+Click **Save & Restart** to activate the bridge rules.
+
+### 5. Verify Operation
+
+Go back to the **Status** tab to verify everything is running:
+- Both services (`lora_pkt_fwd` and `pymc-repeater`) should show **RUNNING**
+- The **Packet Activity** chart should start showing RX/TX activity
+- Active channels should be counted in the summary cards
+
+See [docs/installation.md](docs/installation.md) for detailed installation instructions and troubleshooting.
 
 ## Upgrading
 
@@ -100,6 +178,35 @@ Options:
 - `--skip-pull` — Skip pulling from fork repositories
 
 The upgrade script automatically backs up your configuration before making changes.
+
+## WM1303 Manager UI
+
+The WM1303 Manager is a single-page web application accessible at `http://<your-pi-ip>:8000/wm1303.html`. It provides real-time monitoring and configuration across multiple tabs:
+
+### Status
+Hardware overview, service health, packet activity charts, and active channel summary.
+
+![Status Dashboard](screenshots/status.jpg)
+
+### Spectrum
+SX1261-based spectral scanning, per-channel signal quality (RSSI/SNR), channel activity monitoring, and frequency spectrum visualization.
+
+![Spectrum & Signal Quality](screenshots/spectrum-1.jpg)
+
+### Deduplication
+Packet deduplication statistics showing forwarded, duplicate, echo, and filtered packets with historical charts.
+
+![Deduplication Statistics](screenshots/dedup.jpg)
+
+### Channels
+RF chain configuration, IF chain-to-channel mapping, per-channel settings, and live radio statistics.
+
+See [Quick Start — Step 3](#3-configure-channels) above for details.
+
+### Bridge Rules
+Visual bridge rule editor for inter-channel packet forwarding.
+
+See [Quick Start — Step 4](#4-configure-bridge-rules) above for details.
 
 ## Repository Structure
 
@@ -125,6 +232,7 @@ pyMC_WM1303/
 │   │   └── hardware/           #   WM1303Backend, TXQueue, SX1261, etc.
 │   └── pymc_repeater/          # MeshCore repeater modifications
 │       └── repeater/           #   Bridge engine, API, UI, config
+├── screenshots/            # UI screenshots
 ├── docs/                   # Comprehensive documentation
 │   ├── architecture.md         # System architecture overview
 │   ├── hardware.md             # Hardware & HAL details
