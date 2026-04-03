@@ -105,8 +105,8 @@ done
 # ---------------------------------------------------------------------------
 echo -e "${BOLD}${GREEN}"
 echo "  ╔══════════════════════════════════════════════════════════╗"
-echo "  ║     pyMC_WM1303 Upgrade                                ║"
-echo "  ║     Updating WM1303 LoRa Concentrator + MeshCore       ║"
+echo "  ║     pyMC_WM1303 Upgrade                                  ║"
+echo "  ║     Updating WM1303 LoRa Concentrator + MeshCore         ║"
 echo "  ╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -640,7 +640,7 @@ fi
 # =============================================================================
 echo -e "\n${BOLD}${GREEN}"
 echo "  ╔══════════════════════════════════════════════════════════╗"
-echo "  ║     Upgrade Complete!                                   ║"
+echo "  ║     Upgrade Complete!                                    ║"
 echo "  ╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 echo -e "  ${BOLD}Summary:${NC}"

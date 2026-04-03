@@ -19,7 +19,7 @@ INSTALL_DIR="/home/pi/pyMC_WM1303"
 
 echo ""
 echo "  ╔══════════════════════════════════════════════════════════╗"
-echo "  ║     pyMC_WM1303 One-Line Installer                     ║"
+echo "  ║     pyMC_WM1303 One-Line Installer                       ║"
 echo "  ╚══════════════════════════════════════════════════════════╝"
 echo ""
 

@@ -107,7 +107,7 @@ cleanup_on_failure() {
     if [ "$INSTALL_SUCCESS" = false ]; then
         echo ""
         echo -e "  ${BOLD}${RED}╔══════════════════════════════════════════════════════════╗${NC}"
-        echo -e "  ${BOLD}${RED}║     Installation FAILED!                                ║${NC}"
+        echo -e "  ${BOLD}${RED}║     Installation FAILED!                                 ║${NC}"
         echo -e "  ${BOLD}${RED}╚══════════════════════════════════════════════════════════╝${NC}"
         echo ""
         echo -e "  ${RED}The installation encountered an error and could not complete.${NC}"
@@ -125,8 +125,8 @@ trap cleanup_on_failure EXIT
 # ---------------------------------------------------------------------------
 echo -e "${BOLD}${GREEN}"
 echo "  ╔══════════════════════════════════════════════════════════╗"
-echo "  ║     pyMC_WM1303 Installation                           ║"
-echo "  ║     WM1303 LoRa Concentrator + MeshCore Repeater       ║"
+echo "  ║     pyMC_WM1303 Installation                             ║"
+echo "  ║     WM1303 LoRa Concentrator + MeshCore Repeater         ║"
 echo "  ╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -851,7 +851,7 @@ INSTALL_SUCCESS=true
 
 echo -e "\n${BOLD}${GREEN}"
 echo "  ╔══════════════════════════════════════════════════════════╗"
-echo "  ║     Installation Completed Successfully!               ║"
+echo "  ║     Installation Completed Successfully!                 ║"
 echo "  ╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 echo -e "  ${BOLD}Quick Reference:${NC}"
@@ -864,7 +864,7 @@ echo ""
 
 if [ "$REBOOT_REQUIRED" = true ]; then
     echo -e "  ${BOLD}${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "  ${BOLD}${YELLOW}║  REBOOT REQUIRED to activate SPI and start the service  ║${NC}"
+    echo -e "  ${BOLD}${YELLOW}║  REBOOT REQUIRED to activate SPI and start the service   ║${NC}"
     echo -e "  ${BOLD}${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  The service is installed and enabled. It will start automatically after reboot."
