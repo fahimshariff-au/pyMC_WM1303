@@ -269,8 +269,8 @@ Array of channel configuration objects. Each channel defines frequency, modulati
 | `tx_power` | integer | `14` | TX power in dBm |
 | `active` | boolean | `true` | Channel is active (receiving and transmitting) |
 | `preamble_length` | integer | `17` | Number of preamble symbols |
-| `lbt_enabled` | boolean | `false` | Enable LBT per channel. See [LBT & CAD](lbt_cad.md) |
-| `lbt_rssi_target` | integer | `-115` | LBT RSSI target threshold (dBm) |
+| `lbt_enabled` | boolean | `true` | Enable LBT per channel. See [LBT & CAD](lbt_cad.md) |
+| `lbt_rssi_target` | integer | `-80` | LBT RSSI target threshold (dBm) |
 | `cad_enabled` | boolean | `false` | Enable CAD per channel. See [LBT & CAD](lbt_cad.md) |
 
 Note: `friendly_name` values are aliases for display purposes only. They should never be used as reference identifiers in bridge rules or API calls. Use `name` for programmatic references.

@@ -78,7 +78,7 @@ Returns comprehensive system status including radio state, channel statistics, a
             "last_rssi": -87.5,
             "avg_rssi": -92.3,
             "last_snr": 8.2,
-            "noise_floor": -115.0
+            "noise_floor": -93.5
         }
     ],
     "totals": {
@@ -112,9 +112,9 @@ Returns channel configuration from the SSOT (`wm1303_ui.json`).
             "tx_power": 14,
             "active": true,
             "preamble_length": 17,
-            "lbt_enabled": false,
+            "lbt_enabled": true,
             "cad_enabled": false,
-            "lbt_rssi_target": -115
+            "lbt_rssi_target": -80
         }
     ]
 }
@@ -458,6 +458,58 @@ Per-channel RSSI and SNR history from channel_stats_history.
     }
 }
 ```
+
+#### GET /api/recent_packets
+
+Returns recently bridged packets from the SQLite `packets` table. Used by the dashboard to display recent packet activity.
+
+**Query parameters:** `limit` (default: 100)
+
+**Response:**
+
+```json
+{
+    "ok": true,
+    "data": [
+        {
+            "timestamp": 1712160000.123,
+            "source_channel": "ch-1",
+            "target_channel": "ch-2",
+            "rssi": -87.5,
+            "snr": 8.2,
+            "payload_type": "TXT",
+            "route_type": "FLOOD",
+            "size": 42
+        }
+    ],
+    "count": 1
+}
+```
+
+#### GET /api/wm1303/noise_floor_history
+
+Returns noise floor measurement history from the SQLite `noise_floor` table. Used for noise floor trend charts.
+
+**Query parameters:** `hours` (default: 24), `limit` (optional)
+
+**Response:**
+
+```json
+{
+    "ok": true,
+    "data": [
+        {
+            "timestamp": 1712160000.0,
+            "noise_floor_dbm": -93.5
+        },
+        {
+            "timestamp": 1712160030.0,
+            "noise_floor_dbm": -94.1
+        }
+    ]
+}
+```
+
 
 ### Logs
 

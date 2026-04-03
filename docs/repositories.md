@@ -154,6 +154,7 @@ overlay/
         ├── packet_router.py          # Packet routing
         ├── web/
         │   ├── wm1303_api.py         # REST API endpoints
+        │   ├── api_endpoints.py      # Additional API endpoint handlers
         │   ├── http_server.py        # Web server
         │   ├── spectrum_collector.py  # Spectral data collection
         │   ├── cad_calibration_engine.py  # CAD calibration

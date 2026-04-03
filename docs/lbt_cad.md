@@ -144,7 +144,7 @@ LBT is configured per channel in the IF Chain Configuration section of the [WM13
       "name": "ch-1",
       "frequency": 869525000,
       "lbt_enabled": true,
-      "lbt_rssi_target": -115,
+      "lbt_rssi_target": -80,
       "cad_enabled": false
     }
   ]

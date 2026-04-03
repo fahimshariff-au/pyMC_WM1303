@@ -117,6 +117,33 @@ ls -la /dev/spidev0.*
 # Should show: /dev/spidev0.0  /dev/spidev0.1
 ```
 
+### Enabling I2C
+
+I2C must be enabled for the WM1303 on-board temperature sensor and the AD5338R DAC. The installer handles this automatically, but for manual setup:
+
+```
+# /boot/firmware/config.txt
+dtparam=i2c_arm=on
+```
+
+The `i2c-dev` kernel module must also be loaded at boot:
+
+```bash
+echo "i2c-dev" | sudo tee /etc/modules-load.d/i2c-dev.conf
+sudo modprobe i2c-dev
+sudo modprobe i2c-bcm2835
+```
+
+Verify I2C is available after reboot:
+
+```bash
+ls -la /dev/i2c-1
+# Should show the I2C device
+```
+
+> **Note:** The HAL uses I2C to read the on-board temperature sensor for RSSI temperature compensation. If I2C is not available, the HAL falls back to a fixed temperature offset.
+
+
 ## GPIO Pin Mapping
 
 The Raspberry Pi 4 (Bookworm) uses a GPIO base offset of **512** for sysfs access. The actual sysfs GPIO number is calculated as `BCM pin + 512`.

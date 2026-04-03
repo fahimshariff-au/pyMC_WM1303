@@ -132,7 +132,7 @@ Channels are configured in `wm1303_ui.json` (the SSOT). Each channel has the fol
 | `preamble_length` | Number of preamble symbols | 8-65535 (typically 17) |
 | `lbt_enabled` | Listen Before Talk per channel | true, false |
 | `cad_enabled` | Channel Activity Detection | true, false |
-| `lbt_rssi_target` | LBT RSSI threshold in dBm | -115, -110, etc. |
+| `lbt_rssi_target` | LBT RSSI threshold in dBm | -80, -90, etc. |
 
 ### Example Channel Configuration
 
@@ -148,8 +148,8 @@ Channels are configured in `wm1303_ui.json` (the SSOT). Each channel has the fol
     "active": true,
     "preamble_length": 17,
     "friendly_name": "Channel A",
-    "lbt_rssi_target": -115,
-    "lbt_enabled": false,
+    "lbt_rssi_target": -80,
+    "lbt_enabled": true,
     "cad_enabled": false
 }
 ```

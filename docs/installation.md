@@ -18,6 +18,7 @@ See [Hardware Overview](hardware.md) for detailed hardware specifications.
 
 - **Raspberry Pi OS Lite** (Bookworm or newer, 64-bit recommended)
 - **SPI enabled** in `/boot/firmware/config.txt`
+- **I2C enabled** in `/boot/firmware/config.txt` (for temperature sensor and AD5338R DAC)
 - **Internet connectivity** for package installation and repository cloning
 - **SSH access** to the Raspberry Pi
 
@@ -48,6 +49,35 @@ ls -la /dev/spidev0.*
 # /dev/spidev0.1  (SX1261 companion chip)
 ```
 
+### Enable I2C
+
+I2C is required for the WM1303 temperature sensor and AD5338R DAC. The installer enables this automatically, but for manual setup:
+
+```bash
+# Method 1: raspi-config
+sudo raspi-config
+# Navigate to: Interface Options → I2C → Enable
+
+# Method 2: Manual edit
+sudo nano /boot/firmware/config.txt
+# Add or uncomment:
+dtparam=i2c_arm=on
+
+# Ensure kernel module loads at boot
+echo "i2c-dev" | sudo tee /etc/modules-load.d/i2c-dev.conf
+
+# Reboot to apply
+sudo reboot
+```
+
+Verify I2C is working after reboot:
+
+```bash
+ls -la /dev/i2c-1
+# Should show the I2C device node
+```
+
+
 ---
 
 ## Quick Start
@@ -66,6 +96,9 @@ The installation takes approximately 10-15 minutes depending on internet speed a
 2. Log in with the admin password (shown during installation or auto-generated)
 3. Configure channels and bridge rules via the [Web UI](ui.md)
 4. Edit `/etc/pymc_repeater/config.yaml` to set `node_name` and other preferences
+
+> **⚠️ Important:** The **Configure → Radio Settings** page in the pyMC Repeater dashboard is **NOT used** with the WM1303 setup. All radio configuration (channels, frequencies, TX power, LBT/CAD) is managed exclusively through the **WM1303 Manager** UI at `http://<pi-ip>:8000/wm1303.html`. Changing radio settings in the pyMC Repeater dashboard will have no effect on the WM1303 hardware.
+
 
 ---
 
@@ -105,15 +138,22 @@ Updates the system and installs required packages.
 | `jq` | JSON processing for GPIO script generation |
 | `ntp`, `ntpdate` | Time synchronization |
 
-### Phase 2: SPI Configuration Check
+### Phase 2: SPI & I2C Configuration Check
 
-Verifies SPI is enabled and device nodes exist.
+Verifies SPI and I2C are enabled and device nodes exist.
 
-**Actions:**
+**SPI actions:**
 - Check for `spi_bcm2835` or `spidev` kernel modules
 - Verify `/dev/spidev0.0` and `/dev/spidev0.1` exist
 - If missing, attempt to enable SPI in boot config
 - Warn if reboot is needed
+
+**I2C actions:**
+- Check for `/dev/i2c-1` device node
+- Load `i2c-dev` and `i2c-bcm2835` kernel modules if needed
+- Enable `dtparam=i2c_arm=on` in boot config if not present
+- Configure `i2c-dev` module to load at boot
+- Warn if reboot is needed for I2C activation
 
 ### Phase 3: Directory Structure Creation
 
@@ -181,6 +221,7 @@ Sets up an isolated Python environment with all required packages.
 - Install `pyMC_core` in editable (dev) mode
 - Install `pyMC_Repeater` in editable (dev) mode
 - Install additional dependencies: `spidev`, `RPi.GPIO`, `pyyaml`, `cherrypy`, `pyjwt`, `cryptography`, `aiohttp`
+- Clean Python `__pycache__` directories from installation and venv paths to prevent stale bytecode issues
 
 ### Phase 8: Install Configuration Files
 

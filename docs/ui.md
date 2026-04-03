@@ -41,6 +41,9 @@ Overview of the entire system:
 | RX/TX counters | Total packets received and transmitted |
 | Error indicators | Red dot for active issues, green for healthy |
 
+![Status Tab](../screenshots/status.jpg)
+
+
 **Per-channel status card:**
 - Channel name and frequency
 - RX count, last RSSI, average RSSI
@@ -59,6 +62,11 @@ Detailed channel configuration and monitoring:
 | Radio Summary | Aggregated RX/TX statistics |
 | TX airtime and duty cycle | Per-channel airtime and duty cycle percentage |
 | Noise floor display | Per-channel noise floor with guard against -120 fallback |
+
+![Channels Configuration](../screenshots/channels-1.jpg)
+
+![IF Chain Configuration](../screenshots/channels-2.jpg)
+
 
 **IF Chain Configuration block:**
 
@@ -82,6 +90,9 @@ Bridge rule management:
 | Bridge statistics | Packets forwarded, duplicates detected |
 | Save & restart | Save rules to SSOT and trigger service configuration reload |
 
+![Bridge Rules](../screenshots/bridge-rules.jpg)
+
+
 ### 4. Spectrum Tab
 
 RF spectrum visualization:
@@ -96,17 +107,24 @@ RF spectrum visualization:
 
 The spectrum data comes from the SX1261 spectral scan (updated via NoiseFloorMonitor every 30 seconds).
 
+![Spectrum View](../screenshots/spectrum-1.jpg)
+
+![Spectrum Waterfall](../screenshots/spectrum-2.jpg)
+
 ### 5. Adv. Config Tab
 
-Advanced configuration options:
+Advanced configuration options for fine-tuning system behavior:
 
 | Section | Content |
 |---------|----------|
-| GPIO pins | SX1302 reset, power enable, SX1261 reset, AD5338R reset, base offset |
-| HAL advanced | Force host FE control, LNA LUT, PA LUT, AGC settings |
-| TX queue settings | TTL, overflow policy, noise floor interval/hold/buffer |
-| Cache settings | Max cache size |
+| GPIO pins | SX1302 reset, power enable, SX1261 reset, AD5338R reset, base offset — with **live sysfs GPIO state preview** showing the actual kernel GPIO numbers and current pin values |
+| Dedup settings | Dedup TTL (time-to-live) for duplicate detection window |
+| TX queue settings | Packet TTL, overflow policy, max cache size |
+| Noise floor settings | Scan interval, TX hold duration, rolling buffer size |
+| HAL advanced | Force host FE control, LNA LUT, PA LUT, AGC analog/digital gain, channelizer fixed gain |
 | Advert interval | MeshCore advertisement interval |
+
+> **Note:** The GPIO pin configuration includes a live preview panel that reads the actual sysfs GPIO state from the system. This shows the computed sysfs numbers (BCM pin + base offset) and their current HIGH/LOW state, useful for verifying hardware connections.
 
 ## Real-Time Updates
 
@@ -166,13 +184,18 @@ The UI includes several interactive charts built with Chart.js:
 - Data stored in SQLite for historical view
 - Helps tune dedup window settings
 
+![Dedup Events](../screenshots/dedup.jpg)
+
+
 ## Known UI Characteristics
 
 - **Desktop-optimized layout** — Mobile responsive design is a future improvement
 - **Single HTML file** — All CSS and JavaScript embedded for easy deployment
 - **Chart.js race condition** — Charts wait for library load before initialization (fixed)
-- **Decimal separator** — Frequency input fields use decimal point (not comma)
+- **Decimal separator** — Frequency input fields use `type="text"` with `inputmode="decimal"` and automatic comma-to-dot replacement to ensure locale-independent decimal point input across all browsers
 - **-120 dBm guard** — Noise floor display shows "--" instead of -120 when no data available
+
+> **⚠️ Important:** The **Configure → Radio Settings** page in the pyMC Repeater dashboard is **NOT used** with the WM1303 setup. All radio configuration (channels, frequencies, TX power, LBT/CAD settings) is managed exclusively through the WM1303 Manager UI. Changing radio settings in the pyMC Repeater dashboard will have no effect on the WM1303 concentrator hardware.
 
 ---
 

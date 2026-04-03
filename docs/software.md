@@ -139,6 +139,12 @@ Cross-channel packet bridge with rule-based forwarding and deduplication.
 6. **TX batch window** (2 seconds) — all target channels queued simultaneously
 7. **Fire sends** — concurrent TX to all target channel TX queues
 
+**Additional processing:**
+
+- **ADVERT neighbor tracking** — When a packet of type ADVERT (0x04) is received, the bridge engine extracts the sender information and logs it to the `adverts` table in SQLite. This provides a neighbor discovery mechanism, tracking which MeshCore nodes are visible on each channel.
+- **Packet logging** — All bridged packets (source channel, target channel, RSSI, SNR, payload type, timestamp) are stored in the `packets` table in SQLite. This data powers the recent packets API (`/api/recent_packets`) and the dashboard packet display.
+
+
 **MeshCore header parsing:**
 
 ```
@@ -334,14 +340,18 @@ The system uses SQLite (`/var/lib/pymc_repeater/repeater.db`) for persistent dat
 
 | Table | Purpose |
 |-------|----------|
-| `channel_stats` | Per-channel RX/TX counts, RSSI, SNR snapshots |
+| `packets` | Bridged packet log — source/target channel, RSSI, SNR, payload type. Powers the recent packets API and dashboard |
+| `adverts` | ADVERT packet tracking — neighbor node advertisements with sender info and timestamps |
+| `noise_floor` | Noise floor measurements from the SX1261 spectral scan (timestamp + dBm) |
+| `crc_errors` | CRC error event log with timestamps and counts |
 | `dedup_events` | Deduplication events for the dedup chart |
-| `signal_quality` | Signal quality history (RSSI/SNR over time) |
-| `tx_queue_stats` | TX queue statistics per channel |
-| `spectral_data` | Spectral scan results |
+| `transport_keys` | Transport encryption key storage |
+| `api_tokens` | API authentication token storage |
 
 Data is used for:
 - Dashboard charts and graphs in the WM1303 Manager UI
+- Recent bridged packets display via `/api/recent_packets`
+- Noise floor history charts via `/api/wm1303/noise_floor_history`
 - Historical trend analysis
 - Signal quality monitoring over time
 - LBT/CAD decision visualization
