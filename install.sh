@@ -527,7 +527,7 @@ fi
 
 # Clean Python bytecode caches to ensure updated overlay files are loaded
 step "Cleaning Python bytecode caches"
-find ${INSTALL_DIR} -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+find ${INSTALL_BASE} -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
 find ${VENV_DIR} -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
 rm -f /tmp/pymc_spectral_results.json 2>/dev/null
 ok "Python caches cleaned"
