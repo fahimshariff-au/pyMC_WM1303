@@ -179,6 +179,7 @@ apt-get install -y \
     libffi-dev \
     libssl-dev \
     jq \
+    i2c-tools \
     2>&1 | tail -3
 ok "Build tools and dependencies installed"
 
@@ -197,9 +198,9 @@ info "${PYTHON_VERSION}"
 ok "Python 3 available"
 
 # =============================================================================
-# Phase 2: SPI Configuration
+# Phase 2: SPI & I2C Configuration
 # =============================================================================
-phase "SPI Configuration Check"
+phase "SPI & I2C Configuration Check"
 
 step "Checking SPI kernel module"
 if lsmod | grep -q spi_bcm2835 || lsmod | grep -q spidev; then
@@ -247,6 +248,39 @@ if [ -f "$BOOT_CONFIG" ]; then
     fi
     ok "Boot configuration checked"
 fi
+
+step "Checking I2C for WM1303 temperature sensor and AD5338R DAC"
+if [ -e /dev/i2c-1 ]; then
+    ok "I2C device /dev/i2c-1 found"
+else
+    warn "I2C device /dev/i2c-1 not found"
+    info "Attempting to load I2C modules..."
+    modprobe i2c-dev 2>/dev/null || true
+    modprobe i2c-bcm2835 2>/dev/null || true
+    # Ensure i2c-dev loads on boot
+    echo "i2c-dev" > /etc/modules-load.d/i2c-dev.conf
+
+    BOOT_CONFIG="/boot/firmware/config.txt"
+    [ ! -f "$BOOT_CONFIG" ] && BOOT_CONFIG="/boot/config.txt"
+
+    if [ -f "$BOOT_CONFIG" ]; then
+        if grep -q "^dtparam=i2c_arm=on" "$BOOT_CONFIG"; then
+            warn "I2C is enabled in config.txt but /dev/i2c-1 not present. Reboot required."
+            REBOOT_REQUIRED=true
+        else
+            info "Enabling I2C in ${BOOT_CONFIG}..."
+            sed -i '/^#.*dtparam=i2c_arm/d' "$BOOT_CONFIG"
+            echo "# enable I2C for WM1303 temperature sensor and AD5338R DAC" >> "$BOOT_CONFIG"
+            echo "dtparam=i2c_arm=on" >> "$BOOT_CONFIG"
+            ok "I2C enabled in config.txt"
+            warn "A REBOOT is required after installation for I2C to become active!"
+            REBOOT_REQUIRED=true
+        fi
+    else
+        fail "Cannot find boot config file. Please enable I2C manually."
+    fi
+fi
+
 
 # =============================================================================
 # Phase 3: Directory Structure
