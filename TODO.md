@@ -276,32 +276,4 @@ The comprehensive documentation (item #24) should cover the following topics, or
 | 04-03 | — | **Missing __init__.py fix** — Found and fixed missing `__init__.py` in pymc_core overlay (`overlay/pymc_core/src/pymc_core/hardware/`). Added proper imports for WM1303Backend and VirtualLoRaRadio classes to ensure Python package discovery works correctly during installation. |
 | 04-03 | — | **GPIO pin configuration via Adv. Config tab** — Added Group 5 (GPIO Pin Configuratie) to the WM1303 Manager's Adv. Config tab with configurable BCM pin numbers for SX1302 Reset, SX1302 Power Enable, SX1261 Reset, AD5338R Reset, and GPIO Base Offset. Includes live sysfs number preview, hardware warning dialog, and auto-regeneration of `reset_lgw.sh` and `power_cycle_lgw.sh` when pins are changed. API endpoint extended with GET/POST support for `gpio_pins` group. |
 
----
 
-## 📊 Statistics
-
-| Metric | Value |
-|--------|-------|
-| Total deploys | **94** |
-| First deploy | 2026-03-19 |
-| Latest deploy | 2026-04-03 |
-| Project duration | **18 days** |
-| Backup milestones | 2 (success-version-01, success-version-02) |
-| Documentation | 20+ research reports + DOCS.md + TX_Queue_Flow.md + TODO.md |
-| Categories | HAL/hardware (AGC, FEM, LNA, SPI), Radio (RF chains, IF chains, spectral scan), Protocol (bridge, repeater, dedup, MeshCore), UI (charts, tabs, controls), Infra (systemd, watchdog, config), Deployment (install.sh, upgrade.sh, overlay) |
-| Open items | **31** |
-| Completed items | **95** |
-
----
-
-## 📁 Related Documentation
-
-| Document | Description |
-|----------|-------------|
-| [README.md](README.md) | Project overview, quick start, and installation instructions |
-| [TX_Queue_Flow.md](docs/TX_Queue_Flow.md) | Complete TX processing flow: RX → Bridge → TX Queue → Radio |
-| [DOCS.md](docs/DOCS.md) | Main documentation: architecture, components, hardware setup |
-
----
-
-*This TODO is automatically maintained as part of the pyMC_WM1303 project. For the development history and research reports, see the dev-wm1303-pymc project.*
