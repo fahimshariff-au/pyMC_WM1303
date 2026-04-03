@@ -12,7 +12,7 @@
       "active": true,
       "preamble_length": 17,
       "friendly_name": "Channel A",
-      "lbt_rssi_target": -115,
+      "lbt_rssi_target": -80,
       "lbt_enabled": false,
       "cad_enabled": false
     },
@@ -27,7 +27,7 @@
       "active": true,
       "preamble_length": 17,
       "friendly_name": "Channel B",
-      "lbt_rssi_target": -115,
+      "lbt_rssi_target": -80,
       "lbt_enabled": false,
       "cad_enabled": false
     }
