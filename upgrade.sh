@@ -540,6 +540,52 @@ chmod 755 "${PKTFWD_DIR}/reset_lgw.sh"
 chown ${PI_USER}:${PI_USER} "${PKTFWD_DIR}/reset_lgw.sh"
 ok "reset_lgw.sh regenerated"
 
+step "Regenerating power_cycle_lgw.sh"
+cat > "${PKTFWD_DIR}/power_cycle_lgw.sh" << POWER_EOF
+#!/bin/sh
+# Auto-generated power cycle script for WM1303 CoreCell
+# Full power cycle to clear SX1250 TX-induced desensitization
+
+SX1302_RESET_PIN=${SX1302_RESET_PIN}
+SX1302_POWER_EN_PIN=${SX1302_POWER_PIN}
+SX1261_RESET_PIN=${SX1261_RESET_PIN}
+AD5338R_RESET_PIN=${AD5338R_RESET_PIN}
+
+for pin in \${SX1302_RESET_PIN} \${SX1261_RESET_PIN} \${SX1302_POWER_EN_PIN} \${AD5338R_RESET_PIN}; do
+    echo "\${pin}" > /sys/class/gpio/export 2>/dev/null || true
+    sleep 0.1
+    echo "out" > /sys/class/gpio/gpio\${pin}/direction
+    sleep 0.1
+done
+
+echo "Power OFF CoreCell..."
+echo "0" > /sys/class/gpio/gpio\${SX1302_POWER_EN_PIN}/value
+sleep 3
+
+echo "Power ON CoreCell..."
+echo "1" > /sys/class/gpio/gpio\${SX1302_POWER_EN_PIN}/value
+sleep 0.5
+
+echo "CoreCell reset..."
+echo "1" > /sys/class/gpio/gpio\${SX1302_RESET_PIN}/value; sleep 0.1
+echo "0" > /sys/class/gpio/gpio\${SX1302_RESET_PIN}/value; sleep 0.1
+
+echo "SX1261 reset..."
+echo "0" > /sys/class/gpio/gpio\${SX1261_RESET_PIN}/value; sleep 0.1
+echo "1" > /sys/class/gpio/gpio\${SX1261_RESET_PIN}/value; sleep 0.1
+
+echo "AD5338R reset..."
+echo "0" > /sys/class/gpio/gpio\${AD5338R_RESET_PIN}/value; sleep 0.1
+echo "1" > /sys/class/gpio/gpio\${AD5338R_RESET_PIN}/value; sleep 0.1
+
+sleep 1
+echo "Power cycle complete"
+POWER_EOF
+chmod 755 "${PKTFWD_DIR}/power_cycle_lgw.sh"
+chown ${PI_USER}:${PI_USER} "${PKTFWD_DIR}/power_cycle_lgw.sh"
+ok "power_cycle_lgw.sh regenerated"
+
+
 chown -R ${PI_USER}:${PI_USER} "${CONFIG_DIR}"
 chown -R ${PI_USER}:${PI_USER} "${PKTFWD_DIR}"
 
