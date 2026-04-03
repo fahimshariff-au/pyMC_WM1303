@@ -18,7 +18,6 @@
 | 3 | **Dynamic TX power** | Adjust TX power based on link quality (RSSI/SNR of received ACK) | Saves airtime, reduces interference for nearby nodes, extends PA lifespan | Low |
 | 4 | **RX sensitivity fine-tuning** | IF chain bandwidth/SF optimization specific to each channel | Current IF chain config is generic; channel-specific tuning can yield 1–3 dB improvement | Low |
 | 5 | **AD5338R DAC investigation** | Investigate whether the AD5338R DAC is physically present on the WM1303 HAT and what possibilities exist for full-duplex or gain control | WM1302 wiki references `AD5338R_RESET_PIN=13` — CN490 full-duplex reference design. Not in use; GPIO 13 not driven. Potentially relevant for noise floor/TX power optimization | Low |
-| 6 | **PiHat + WM1303 pin configuration** | Make PiHat and WM1303 GPIO pins configurable as parameters via the 'Adv. Config' tab in the UI | Currently pin assignments are hardcoded; different hardware revisions or custom setups may require different pin mappings without code changes | Medium |
 
 ---
 
@@ -275,6 +274,7 @@ The comprehensive documentation (item #24) should cover the following topics, or
 | 04-03 | — | **Upgrade script** — Created `upgrade.sh` with 8 phases: backup current state, stop services, update git repositories, re-apply overlay modifications, rebuild HAL and pkt_fwd, reinstall Python packages, update configuration files, restart services. Enables safe updates when upstream repos change. |
 | 04-03 | — | **Overlay verification** — Verified all overlay files against pi01 reference system. 100% match confirmed across all HAL source modifications, pyMC_core hardware modules, and pyMC_Repeater integration files. |
 | 04-03 | — | **Missing __init__.py fix** — Found and fixed missing `__init__.py` in pymc_core overlay (`overlay/pymc_core/src/pymc_core/hardware/`). Added proper imports for WM1303Backend and VirtualLoRaRadio classes to ensure Python package discovery works correctly during installation. |
+| 04-03 | — | **GPIO pin configuration via Adv. Config tab** — Added Group 5 (GPIO Pin Configuratie) to the WM1303 Manager's Adv. Config tab with configurable BCM pin numbers for SX1302 Reset, SX1302 Power Enable, SX1261 Reset, AD5338R Reset, and GPIO Base Offset. Includes live sysfs number preview, hardware warning dialog, and auto-regeneration of `reset_lgw.sh` and `power_cycle_lgw.sh` when pins are changed. API endpoint extended with GET/POST support for `gpio_pins` group. |
 
 ---
 
@@ -289,8 +289,8 @@ The comprehensive documentation (item #24) should cover the following topics, or
 | Backup milestones | 2 (success-version-01, success-version-02) |
 | Documentation | 20+ research reports + DOCS.md + TX_Queue_Flow.md + TODO.md |
 | Categories | HAL/hardware (AGC, FEM, LNA, SPI), Radio (RF chains, IF chains, spectral scan), Protocol (bridge, repeater, dedup, MeshCore), UI (charts, tabs, controls), Infra (systemd, watchdog, config), Deployment (install.sh, upgrade.sh, overlay) |
-| Open items | **32** |
-| Completed items | **94** |
+| Open items | **31** |
+| Completed items | **95** |
 
 ---
 
