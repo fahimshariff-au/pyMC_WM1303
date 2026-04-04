@@ -883,14 +883,14 @@ function loadTxQueues(){
       if(queues[qKey]) q=queues[qKey];
       if(!q){
         for(var k in queues){
-          if(queues[k].freq && Math.abs(queues[k].freq-ch.frequency)<1000){q=queues[k];break;}
+          if(queues[k].freq && Math.abs(queues[k].freq-ch.frequency)<1000 && (!queues[k].sf || queues[k].sf==sf)){q=queues[k];break;}
         }
       }
       // Match live channel data
       var live=null;
       for(var j=0;j<liveChs.length;j++){
         var lc=liveChs[j];
-        if(lc.name===ch.name || lc.friendly_name===friendlyName || (lc.frequency && Math.abs(lc.frequency-ch.frequency)<1000)){
+        if(lc.name===ch.name || lc.friendly_name===friendlyName || (lc.frequency && Math.abs(lc.frequency-ch.frequency)<1000 && lc.spreading_factor==ch.spreading_factor)){
           live=lc; break;
         }
       }
