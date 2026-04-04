@@ -1468,20 +1468,23 @@ class WM1303API:
             except Exception:
                 pass
 
-        # Build response with channel info from config
-        import yaml
+        # Build response with channel info from SSOT
+        _CHANNEL_ID_BY_INDEX = ['channel_a', 'channel_b', 'channel_c', 'channel_d']
+        _ui_chs = _load_ui().get('channels', [])
+        # Build config lookup for active channels mapped to backend IDs
         channels_config = {}
-        try:
-            cfg_path = Path("/etc/pymc_repeater/config.yaml")
-            with open(cfg_path) as f:
-                cfg = yaml.safe_load(f) or {}
-            channels_config = cfg.get("wm1303", {}).get("channels", {})
-        except Exception:
-            pass
+        active_idx = 0
+        for uch in _ui_chs:
+            if not uch.get('active', False):
+                continue
+            if active_idx >= len(_CHANNEL_ID_BY_INDEX):
+                break
+            ch_id = _CHANNEL_ID_BY_INDEX[active_idx]
+            channels_config[ch_id] = uch
+            active_idx += 1
 
         queues = {}
-        channel_names = ["channel_a", "channel_b", "channel_c", "channel_d"]
-        for ch_name in channel_names:
+        for ch_name in _CHANNEL_ID_BY_INDEX:
             ch_cfg = channels_config.get(ch_name, {})
             ch_stats = tx_stats.get(ch_name, {})
             if ch_stats:

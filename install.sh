@@ -410,11 +410,6 @@ for f in sqlite_handler.py storage_collector.py; do
     fi
 done
 
-# Optional repeater-level files
-[ -f "${OVERLAY_DIR}/pymc_repeater/repeater/wm1303_api.py" ] && \
-    cp -v "${OVERLAY_DIR}/pymc_repeater/repeater/wm1303_api.py" "${RPT_DIR}/repeater/" 2>&1
-[ -f "${OVERLAY_DIR}/pymc_repeater/repeater/wm1303.html" ] && \
-    cp -v "${OVERLAY_DIR}/pymc_repeater/repeater/wm1303.html" "${RPT_DIR}/repeater/" 2>&1
 
 ok "pyMC_Repeater overlay applied"
 
