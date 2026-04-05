@@ -340,7 +340,7 @@ sudo systemctl status pymc-repeater
 ## Disclaimer
 
 > **⚠️ Use at your own risk.** This software interacts directly with radio hardware via SPI and GPIO.
-> The authors accept no responsibility for any damage to hardware, loss of data, or regulatory
+> I'm not taking any responsibility for any damage to hardware, loss of data, or regulatory
 > non-compliance resulting from the use of this software. Ensure your radio configuration complies
 > with local regulations (e.g., EU868 duty cycle limits).
 
