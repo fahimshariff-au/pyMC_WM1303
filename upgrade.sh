@@ -138,6 +138,16 @@ if [ ! -d "${OVERLAY_DIR}" ]; then
     fail "Overlay directory not found at ${OVERLAY_DIR}"
 fi
 
+UPGRADE_VERSION="unknown"
+if [ -f "${SCRIPT_DIR}/VERSION" ]; then
+    UPGRADE_VERSION="v$(cat ${SCRIPT_DIR}/VERSION)"
+fi
+CURRENT_VERSION="unknown"
+if [ -f "${CONFIG_DIR}/version" ]; then
+    CURRENT_VERSION="v$(cat ${CONFIG_DIR}/version)"
+fi
+info "Current version: ${CURRENT_VERSION}"
+info "Upgrading to: ${UPGRADE_VERSION}"
 info "Installation directory: ${INSTALL_BASE}"
 info "Overlay directory: ${OVERLAY_DIR}"
 info "Log file: ${LOG_FILE}"

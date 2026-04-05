@@ -147,6 +147,11 @@ if ! id "$PI_USER" &>/dev/null; then
 fi
 PI_HOME=$(eval echo ~${PI_USER})
 
+INSTALL_VERSION="unknown"
+if [ -f "${SCRIPT_DIR}/VERSION" ]; then
+    INSTALL_VERSION="v$(cat ${SCRIPT_DIR}/VERSION)"
+fi
+info "Installing version: ${INSTALL_VERSION}"
 info "Installation directory: ${INSTALL_BASE}"
 info "Configuration directory: ${CONFIG_DIR}"
 info "Log file: ${LOG_FILE}"
