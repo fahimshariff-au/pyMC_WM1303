@@ -35,14 +35,15 @@ The `NoiseFloorMonitor` is the foundation for both LBT and CAD. It runs as a bac
 ┌─────────────────────────────────────────────────────────────────┐
 │                   NoiseFloorMonitor Cycle (every 30s)           │
 │                                                                 │
-│  1. Set TX Hold (4 seconds)                                     │
-│     └─ All TX queues pause                                      │
+│  1. Wait for TX-free window (retry logic)                       │
+│     └─ Retry up to N attempts, checking if any TX is active     │
+│     └─ Mutex released during retry (preserves RX availability)  │
 │                                                                 │
 │  2. SX1261 spectral scan gets a clean measurement window        │
 │     └─ No TX interference on the SPI bus                        │
 │                                                                 │
 │  3. Read scan results from /tmp/pymc_spectral_results.json      │
-│     └─ SX1261 scans 863-870 MHz (36 channels, 100 scans/ch)     │
+│     └─ Dynamic scan range based on RF chain center frequency    │
 │                                                                 │
 │  4. Per-channel frequency matching                              │
 │     └─ Match scan freq to channel freq ± BW/2                   │
@@ -50,8 +51,8 @@ The `NoiseFloorMonitor` is the foundation for both LBT and CAD. It runs as a bac
 │  5. Feed RSSI values into rolling buffer (20 samples per ch)    │
 │     └─ Buffer provides avg, min, max noise floor                │
 │                                                                 │
-│  6. Release TX Hold                                             │
-│     └─ TX queues resume normal operation                        │
+│  6. 0% TX overhead — no TX queues paused at any point           │
+│     └─ TX queues continue normal operation throughout scan      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -60,7 +61,7 @@ The `NoiseFloorMonitor` is the foundation for both LBT and CAD. It runs as a bac
 | Parameter | Default | Source | Description |
 |-----------|---------|--------|-------------|
 | `noise_floor_interval_seconds` | 30 | `wm1303_ui.json` → `adv_config` | Interval between measurement cycles |
-| `noise_floor_tx_hold_seconds` | 4 | `wm1303_ui.json` → `adv_config` | TX pause duration during measurement |
+| `noise_floor_tx_hold_seconds` | ~~4~~ | `wm1303_ui.json` → `adv_config` | **Deprecated** — TX hold removed; spectral scan uses retry logic instead |
 | `noise_floor_buffer_size` | 20 | `wm1303_ui.json` → `adv_config` | Rolling buffer size (samples per channel) |
 
 ### SX1261 Spectral Scan
@@ -68,7 +69,7 @@ The `NoiseFloorMonitor` is the foundation for both LBT and CAD. It runs as a bac
 The SX1261 companion chip runs on a separate SPI bus (`/dev/spidev0.1`) and performs continuous spectral scanning independently of the SX1302 concentrator. This means:
 
 - **No RX interruption** — The SX1302 continues receiving on `/dev/spidev0.0` while the SX1261 scans on `/dev/spidev0.1`
-- **Band coverage** — Scans 863–870 MHz in 36 channels (~200 kHz steps)
+- **Band coverage** — Dynamic scan range based on RF chain center frequency (default covers 863–870 MHz)
 - **Scan pace** — 1 second per sweep, 100 scans per channel per sweep
 - **Result file** — HAL writes results to `/tmp/pymc_spectral_results.json`
 
@@ -91,20 +92,22 @@ See [Radio Configuration](radio.md) for details on the SX1261 hardware and [Conf
 
 ### TX Hold Mechanism
 
-The TX hold is a temporary pause on all TX queue processing. There are two types:
+The TX hold is a temporary pause on all TX queue processing. Only the **batch window** hold remains:
 
 | Type | Duration | Purpose |
 |------|----------|--------|
-| Noise floor scan | 4 seconds | Clean measurement window for SX1261 spectral scan |
+| ~~Noise floor scan~~ | ~~4 seconds~~ | **Removed** — spectral scan now uses retry logic for TX-free windows |
 | Batch window | 2 seconds | Collect bridge forwarding targets before sequential TX |
 
-During a noise floor TX hold:
-1. All TX queues stop dequeuing packets (packets remain queued)
-2. The SX1261 spectral scan thread gets an interference-free window
-3. Fresh RSSI values are harvested and fed into per-channel rolling buffers
-4. After the hold expires, queues resume and use the updated noise floor data
+The noise floor scan TX hold has been **eliminated**. Instead of pausing all TX queues for a measurement window, the `NoiseFloorMonitor` uses a retry mechanism:
 
-The 4-second default provides enough time for at least 4 complete SX1261 spectral sweeps, ensuring reliable measurements.
+1. Before harvesting spectral data, it checks whether any TX is currently in progress
+2. If TX is active, the scan attempt is retried after a short delay
+3. The mutex is released during retry, preserving RX availability
+4. Fresh RSSI values are harvested when a TX-free window is found
+5. This results in **0% TX overhead** from noise floor monitoring
+
+The batch window hold (2 seconds) is unaffected and continues to operate as before, collecting bridge forwarding targets before sequential TX.
 
 ## LBT — Listen Before Talk
 
@@ -164,7 +167,12 @@ CAD provides a second layer of spectrum sensing that detects whether a **LoRa si
 
 ### How It Works
 
-CAD uses spectral histogram analysis from the SX1261 scan data to identify LoRa signal patterns. This is a software implementation — not the hardware CAD mode of the SX1261.
+CAD uses two complementary detection methods:
+
+1. **Software CAD** — Spectral histogram analysis from SX1261 scan data to identify LoRa signal patterns based on energy distribution
+2. **Hardware CAD** — SX1261 hardware CAD with preamble correlation, providing more accurate detection than software spectral analysis alone
+
+The SX1261 hardware CAD capability is defined via CAD opcodes in `sx1261_defs.h`. CAD execution is integrated after each spectral sweep in the packet forwarder, with results written to the `spectral_results` JSON for backend consumption. Per-channel CAD is supported with configurable frequency and spreading factor parameters.
 
 The CAD check runs **after** the LBT check (if both are enabled):
 
@@ -191,13 +199,22 @@ Packet in TX queue
 
 | Counter | Description |
 |---------|-------------|
-| `cad_clear` | Channel was free — no LoRa activity detected |
-| `cad_detected` | LoRa activity detected — TX delayed |
+| `cad_clear` | Channel was free — no LoRa activity detected (combined total) |
+| `cad_detected` | LoRa activity detected — TX delayed (combined total) |
 | `cad_timeout` | CAD check timed out (inconclusive) |
+| `cad_hw_clear` | Hardware CAD reported channel clear (preamble correlation) |
+| `cad_hw_detected` | Hardware CAD detected LoRa preamble |
+| `cad_sw_clear` | Software CAD reported channel clear (spectral analysis) |
+| `cad_sw_detected` | Software CAD detected LoRa activity |
+| `cad_last_source` | Source of last CAD result: `"hw"` or `"sw"` |
 
 ### CAD Calibration Engine
 
 The system includes a CAD calibration engine (`cad_calibration_engine.py`) that helps tune detection sensitivity. Calibration data is collected over time and used to improve the distinction between noise and actual LoRa signals.
+
+### CAD / LBT Dependency
+
+CAD requires LBT to be enabled on the same channel. In the WM1303 Manager UI, the CAD toggle is **disabled (greyed out)** when LBT is not active for that channel. This is because CAD relies on the same SX1261 spectral scan data that LBT uses — without LBT enabled, there is no spectral data to analyze for LoRa patterns.
 
 ## Noise Floor Display
 
@@ -217,11 +234,21 @@ Per-channel noise floor data is available via the [API](api.md) at `/api/wm1303/
 
 | Field | Description |
 |-------|-------------|
-| `noise_floor` | Current noise floor (from LBT RSSI buffer or fallback) |
-| `noise_floor_lbt_avg` | Rolling average (20 samples) |
+| `noise_floor` | Current noise floor (best available from 3-tier fallback) |
+| `noise_floor_lbt_avg` | Rolling average (20 samples) from SX1261 spectral scan |
 | `noise_floor_lbt_min` | Minimum observed in buffer |
 | `noise_floor_lbt_max` | Maximum observed in buffer |
 | `noise_floor_lbt_samples` | Number of samples currently in buffer |
+
+### Noise Floor Estimation Fallback Chain
+
+The noise floor value is determined using a 3-tier fallback mechanism:
+
+1. **SX1261 spectral scan** (primary) — RSSI values from the SX1261 companion chip's spectral sweep, matched to each channel's frequency ± BW/2
+2. **CAD calibration data** (secondary) — If spectral scan data is unavailable, noise floor is estimated from CAD calibration measurements
+3. **RX packet estimation** (tertiary) — As a last resort, the noise floor is estimated from received packets using `RSSI - SNR`, providing a reasonable approximation even when spectral scan data is stale
+
+Per-channel noise floor values are maintained in the `_channel_noise_floors` dictionary, keyed by `channel_id` with direct mapping to UI channel names. This ensures consistent noise floor reporting across the backend, API, and UI layers.
 
 If noise floor consistently shows -120.0 dBm for all channels, the spectral scan data is not being collected. See [Troubleshooting](#troubleshooting) below.
 

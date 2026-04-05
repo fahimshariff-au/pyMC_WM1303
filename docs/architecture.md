@@ -66,7 +66,7 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 │  │  ┌──────────────┐  ┌─────────────────┐  ┌───────────────────┐   │    │
 │  │  │ UDP Handler  │  │ NoiseFloor      │  │   RX Watchdog     │   │    │
 │  │  │ _handle_udp()│  │ Monitor (30s)   │  │ (3 detect modes)  │   │    │
-│  │  │ RX dispatch  │  │ TX Hold (4s)    │  │ PUSH_DATA stats   │   │    │
+│  │  │ Retry TX-free   │  │ PUSH_DATA stats   │   │    │
 │  │  └──────┬───────┘  │ Spectral harvest│  │ RSSI spike detect │   │    │
 │  │         │          │ Rolling buffer  │  │ RX timeout (180s) │   │    │
 │  │         │          └────────┬────────┘  └───────────────────┘   │    │
@@ -186,25 +186,25 @@ RF Signal → Antenna → SX1250 Radio → SX1302 Baseband → IF Chain Demodula
 
 ```
 Bridge Engine decision → Repeater handler (hop +1, path update)
-    → TX batch window (2s) → Per-channel TX Queue
+    → TX batch window (2s) → Per-channel TX Queue (async)
+    → Fair round-robin scheduling (rotating start index)
     → TTL check (5s max) → Queue overflow check (15 max)
-    → TX Hold check (noise floor scan window)
     → LBT check (per-channel, if enabled)
-    → CAD check (per-channel, if enabled)
-    → PULL_RESP (UDP :1730) → Packet Forwarder
-    → HAL lgw_send() → SX1250 Radio → RF Transmission
+    → CAD check (per-channel, HW/SW source tracking)
+    → PULL_RESP (UDP :1730) → Socket auto-recovery on failure
+    → Packet Forwarder → HAL lgw_send() → SX1250 Radio → RF Transmission
     → TX_ACK feedback → Statistics update
 ```
 
 ### Spectral Scan Path
 
 ```
-NoiseFloorMonitor (every 30s) → TX Hold (4s pause)
-    → SX1261 spectral scan via spidev0.1 (863-870 MHz)
+NoiseFloorMonitor (every 30s) → Wait for TX-free window (retry logic)
+    → SX1261 spectral scan via spidev0.1 (dynamic range based on RF chain center freq)
     → Results to /tmp/pymc_spectral_results.json
     → Per-channel frequency matching (freq ± BW/2)
     → RSSI values → Rolling buffer (20 samples) per TX queue
-    → TX Hold release → TX queues resume
+    → Mutex released during retry (preserves RX availability)
     → WebSocket → Spectrum chart in UI
 ```
 
@@ -261,7 +261,8 @@ NoiseFloorMonitor (every 30s) → TX Hold (4s pause)
 
 /etc/pymc_repeater/                    # Configuration directory
 ├── config.yaml                        # Main service configuration
-└── wm1303_ui.json                     # UI/channel SSOT configuration
+├── wm1303_ui.json                     # UI/channel SSOT configuration
+└── version                            # Installed version tracking
 
 /etc/systemd/system/
 └── pymc-repeater.service              # Systemd service unit
@@ -283,6 +284,10 @@ NoiseFloorMonitor (every 30s) → TX Hold (4s pause)
 5. **Overlay modification approach**: Rather than modifying the forked repositories directly, changes are maintained as overlay files that are applied during installation. This keeps the forks clean and makes updates easier.
 
 6. **Dual SPI architecture**: The SX1302 (main concentrator) and SX1261 (companion chip) use separate SPI devices (spidev0.0 and spidev0.1), allowing simultaneous operation without bus contention.
+
+7. **Async-native TX architecture**: The TX path uses native asyncio primitives (`asyncio.Lock`, `asyncio.sleep`) instead of threading, eliminating zombie-thread deadlocks and simplifying concurrency. Socket auto-recovery (`_recreate_socket()`) ensures resilience against transient UDP failures.
+
+8. **Version tracking**: A `VERSION` file in the repository root tracks semantic versioning. The installed version is written to `/etc/pymc_repeater/version` and exposed via the `/api/wm1303/version` endpoint for runtime version queries.
 
 ---
 

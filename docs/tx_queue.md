@@ -27,8 +27,8 @@ Every packet transmitted by the WM1303 system passes through a multi-stage pipel
 │  └──────┬───────┘  └────────┬────────┘  └──────────────────────┘    │
 │         │                   │                                       │
 │         │         ┌─────────▼──────────┐                            │
-│         │         │ TX Hold + Spectral │                            │
-│         │         │ Scan Harvest       │                            │
+│         │         │ Spectral Scan      │                            │
+│         │         │ Harvest (TX-free)  │                            │
 │         │         │ → feed noise floor │                            │
 │         │         │   to TX queues     │                            │
 │         │         └────────────────────┘                            │
@@ -114,6 +114,15 @@ See [Configuration Reference](configuration.md) for bridge rule configuration de
 
 Each channel has its own `ChannelTXQueue` instance. This is where most of the processing work happens.
 
+### Async TX Architecture
+
+The TX path is fully **asyncio-native**, using `asyncio.Lock` and `asyncio.sleep` instead of threading primitives. This eliminates zombie-thread deadlocks that could occur with the previous `run_in_executor` approach. Key characteristics:
+
+- **No threading** — All TX queue processing runs within the asyncio event loop
+- **Socket auto-recovery** — If the UDP socket fails, `_recreate_socket()` automatically creates a new socket and retries
+- **Fair round-robin scheduling** — A rotating start index (`_round_index`) ensures equal TX priority across channels, preventing any single channel from monopolizing the TX path
+- **Dynamic TX hold** — Batch window hold scales with queue depth: 0 pending = 0 ms, 1 pending = 100 ms, 2+ pending = 0 ms (immediate processing)
+
 ### Flow Diagram
 
 ```
@@ -133,8 +142,8 @@ Each channel has its own `ChannelTXQueue` instance. This is where most of the pr
 │       → NO:  proceed to TX preparation                  │
 │       ↓                                                 │
 │  3.4  TX HOLD CHECK                                     │
-│       Is a TX hold active?                              │
-│       (NoiseFloorMonitor 4s or batch window 2s)         │
+│       Is a batch window hold active?                     │
+│       (batch window 2s only — noise floor hold removed)  │
 │       → YES: wait until hold expires                    │
 │       → NO:  proceed                                    │
 │       ↓                                                 │
@@ -145,9 +154,10 @@ Each channel has its own `ChannelTXQueue` instance. This is where most of the pr
 │       → RSSI ≤ threshold: channel clear (lbt_passed +1) │
 │       ↓                                                 │
 │  3.6  CAD CHECK (if enabled per channel)                │
-│       Spectral histogram analysis                       │
-│       → LoRa activity detected: wait + retry            │
-│       → No activity: channel clear (cad_clear +1)       │
+│       HW CAD (SX1261 preamble correlation) + SW CAD      │
+│       → LoRa activity detected: wait + retry             │
+│       → No activity: channel clear (cad_clear +1)        │
+│       → Source tracked: cad_hw_* / cad_sw_* counters     │
 │       ↓                                                 │
 │  3.7  TX EXECUTE                                        │
 │       PULL_RESP to packet forwarder (UDP)               │
@@ -268,16 +278,17 @@ The system implements self-echo prevention using packet hashing:
 
 This prevents infinite forwarding loops where a bridged packet is received back on the original channel and forwarded again.
 
-## TX Hold During Noise Floor Measurements
+## Noise Floor Scan & TX Queue Interaction
 
-Every 30 seconds, the `NoiseFloorMonitor` triggers a 4-second TX hold:
+Every 30 seconds, the `NoiseFloorMonitor` harvests spectral scan data:
 
-1. All TX queues pause (packets accumulate but are not transmitted)
-2. The SX1261 spectral scan gets a clean measurement window
-3. Noise floor RSSI values are harvested and fed into per-channel rolling buffers
-4. After 4 seconds, queues resume and process any accumulated packets
+1. The monitor checks whether any TX is currently in progress
+2. If TX is active, the harvest is retried after a short delay (waiting for a TX-free window)
+3. The mutex is released during retry, preserving RX availability
+4. When a TX-free window is found, noise floor RSSI values are harvested into per-channel rolling buffers
+5. TX queues are **never paused** — this results in **0% TX overhead** from noise floor monitoring
 
-This creates a brief transmission gap but ensures accurate noise floor data for LBT decisions. See [LBT & CAD](lbt_cad.md) for full details.
+See [LBT & CAD](lbt_cad.md) for full details on noise floor measurement and the retry mechanism.
 
 ## SPI Bus Timing
 
@@ -322,9 +333,14 @@ Returns per-channel TX queue statistics:
 | LBT | `lbt_blocked` | TX blocked by LBT check |
 | LBT | `lbt_skipped` | TX where LBT was skipped (disabled) |
 | LBT | `lbt_last_rssi` | Last measured RSSI value |
-| CAD | `cad_clear` | Channel was clear at CAD check |
-| CAD | `cad_detected` | LoRa activity detected at CAD check |
+| CAD | `cad_clear` | Channel was clear at CAD check (combined total) |
+| CAD | `cad_detected` | LoRa activity detected at CAD check (combined total) |
 | CAD | `cad_timeout` | CAD check timed out |
+| CAD | `cad_hw_clear` | Hardware CAD (SX1261 preamble) reported channel clear |
+| CAD | `cad_hw_detected` | Hardware CAD detected LoRa preamble |
+| CAD | `cad_sw_clear` | Software CAD (spectral analysis) reported channel clear |
+| CAD | `cad_sw_detected` | Software CAD detected LoRa activity |
+| CAD | `cad_last_source` | Source of last CAD result: `"hw"` or `"sw"` |
 | Noise | `noise_floor_lbt_avg` | Average noise floor (20 samples) |
 | Noise | `noise_floor_lbt_min` | Minimum noise floor |
 | Noise | `noise_floor_lbt_max` | Maximum noise floor |

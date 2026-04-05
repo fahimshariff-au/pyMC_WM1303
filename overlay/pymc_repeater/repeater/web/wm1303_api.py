@@ -1747,7 +1747,10 @@ class WM1303API:
             note = ""
 
         result = {"status": "ok", "timestamp": time.time(), "scan_points": scan_points, "channels": channels, "note": note}
-        _SPECTRAL_RES.write_text(json.dumps(result))
+        try:
+            _SPECTRAL_RES.write_text(json.dumps(result))
+        except OSError as _e:
+            logger.debug("Failed to write spectral cache %s: %s", _SPECTRAL_RES, _e)
         return _j(result)
 
         # --- Priority 1: Read from spectrum_collector DB (HAL-driven scans) ---
