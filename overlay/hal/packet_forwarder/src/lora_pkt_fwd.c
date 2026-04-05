@@ -54,6 +54,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #include "loragw_aux.h"
 #include "loragw_reg.h"
 #include "loragw_gps.h"
+#include "loragw_sx1261.h"  /* for sx1261_cad_scan() */
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE MACROS ------------------------------------------------------- */
@@ -130,6 +131,106 @@ typedef struct spectral_scan_s {
     uint16_t nb_scan;       /* number of scan points for each frequency scan */
     uint32_t pace_s;        /* number of seconds between 2 scans in the thread */
 } spectral_scan_t;
+
+/* CAD (Channel Activity Detection) configuration for hardware CAD via SX1261 */
+#define CAD_MAX_CHANNELS 4
+typedef struct cad_channel_s {
+    uint32_t freq_hz;       /* channel center frequency in Hz */
+    uint8_t  sf;            /* spreading factor (7-12) */
+    uint8_t  bw;            /* bandwidth: 0=125kHz, 1=250kHz, 2=500kHz */
+    char     id[32];        /* channel identifier string */
+} cad_channel_t;
+
+typedef struct cad_config_s {
+    bool            enable;
+    int             nb_channels;
+    cad_channel_t   channels[CAD_MAX_CHANNELS];
+} cad_config_t;
+
+static cad_config_t cad_config = { .enable = false, .nb_channels = 0 };
+
+/* CAD results storage (written to JSON after each sweep) */
+static sx1261_cad_result_t cad_results[CAD_MAX_CHANNELS];
+
+/**
+ * @brief Read CAD channel configuration from /tmp/pymc_cad_config.json
+ * @return number of channels loaded, or 0 if no config
+ */
+static int cad_read_config(void) {
+    JSON_Value *root_val = NULL;
+    JSON_Object *root_obj = NULL;
+    JSON_Array *ch_array = NULL;
+    int nb_ch, i;
+
+    root_val = json_parse_file("/tmp/pymc_cad_config.json");
+    if (root_val == NULL) {
+        cad_config.enable = false;
+        cad_config.nb_channels = 0;
+        return 0;
+    }
+
+    root_obj = json_value_get_object(root_val);
+    if (root_obj == NULL) {
+        json_value_free(root_val);
+        cad_config.enable = false;
+        cad_config.nb_channels = 0;
+        return 0;
+    }
+
+    ch_array = json_object_get_array(root_obj, "channels");
+    if (ch_array == NULL) {
+        json_value_free(root_val);
+        cad_config.enable = false;
+        cad_config.nb_channels = 0;
+        return 0;
+    }
+
+    nb_ch = (int)json_array_get_count(ch_array);
+    if (nb_ch > CAD_MAX_CHANNELS) nb_ch = CAD_MAX_CHANNELS;
+
+    cad_config.nb_channels = 0;
+    for (i = 0; i < nb_ch; i++) {
+        JSON_Object *ch_obj = json_array_get_object(ch_array, i);
+        if (ch_obj == NULL) continue;
+
+        const char *id = json_object_get_string(ch_obj, "id");
+        double freq = json_object_get_number(ch_obj, "freq_hz");
+        double sf_val = json_object_get_number(ch_obj, "sf");
+        double bw_val = json_object_get_number(ch_obj, "bw");
+
+        if (freq < 800e6 || freq > 930e6 || sf_val < 7 || sf_val > 12) {
+            printf("WARNING: CAD config: skipping invalid channel %s (freq=%.0f, sf=%.0f)\n",
+                   id ? id : "?", freq, sf_val);
+            continue;
+        }
+
+        cad_config.channels[cad_config.nb_channels].freq_hz = (uint32_t)freq;
+        cad_config.channels[cad_config.nb_channels].sf = (uint8_t)sf_val;
+        cad_config.channels[cad_config.nb_channels].bw = (uint8_t)bw_val;
+        if (id != NULL) {
+            strncpy(cad_config.channels[cad_config.nb_channels].id, id, 31);
+            cad_config.channels[cad_config.nb_channels].id[31] = '\0';
+        } else {
+            snprintf(cad_config.channels[cad_config.nb_channels].id, 32, "ch_%d", i);
+        }
+        cad_config.nb_channels++;
+    }
+
+    cad_config.enable = (cad_config.nb_channels > 0);
+    json_value_free(root_val);
+
+    printf("INFO: CAD config loaded: %d channels\n", cad_config.nb_channels);
+    for (i = 0; i < cad_config.nb_channels; i++) {
+        printf("INFO:   CAD channel %s: freq=%u, SF%u, BW%u\n",
+               cad_config.channels[i].id,
+               cad_config.channels[i].freq_hz,
+               cad_config.channels[i].sf,
+               cad_config.channels[i].bw);
+    }
+
+    return cad_config.nb_channels;
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE VARIABLES (GLOBAL) ------------------------------------------- */
@@ -3582,6 +3683,29 @@ void thread_spectral_scan(void) {
     bool spectral_scan_started;
     bool exit_thread = false;
 
+    /* --- Accumulator for JSON output (one full sweep) --- */
+    /* Max 64 channels in a sweep (covers up to 12.8 MHz range) */
+    #define SPECTRAL_MAX_CHAN 64
+    static struct {
+        uint32_t freq_hz;
+        double   rssi_sum;
+        double   rssi_min;
+        double   rssi_max;
+        uint32_t sample_count;
+    } sweep_acc[SPECTRAL_MAX_CHAN];
+    int sweep_idx = 0;
+    int sweep_total = (int)spectral_scan_params.nb_chan;
+    if (sweep_total > SPECTRAL_MAX_CHAN) sweep_total = SPECTRAL_MAX_CHAN;
+    memset(sweep_acc, 0, sizeof(sweep_acc));
+
+    printf("INFO: Spectral scan thread started (freq_start=%u, freq_stop=%u, nb_chan=%d, nb_scan=%d)\n",
+           spectral_scan_params.freq_hz_start, (uint32_t)freq_hz_stop,
+           spectral_scan_params.nb_chan, spectral_scan_params.nb_scan);
+
+    /* Load CAD channel configuration */
+    cad_read_config();
+
+
     /* main loop task */
     while (!exit_sig && !quit_sig) {
         /* Pace the scan thread (1 sec min), and avoid waiting several seconds when exit */
@@ -3598,31 +3722,51 @@ void thread_spectral_scan(void) {
 
         spectral_scan_started = false;
 
-        /* Start spectral scan (if no downlink programmed) */
+        /* Start spectral scan — wait for TX to finish (retry loop) */
         pthread_mutex_lock(&mx_concent);
-        /* -- Check if there is a downlink programmed */
-        for (i = 0; i < LGW_RF_CHAIN_NB; i++) {
-            if (tx_enable[i] == true) {
-                x = lgw_status((uint8_t)i, TX_STATUS, &tx_status);
-                if (x != LGW_HAL_SUCCESS) {
-                    printf("ERROR: failed to get TX status on chain %d\n", i);
-                } else {
-                    if (tx_status == TX_SCHEDULED || tx_status == TX_EMITTING) {
-                        printf("INFO: skip spectral scan (downlink programmed on RF chain %d)\n", i);
-                        break; /* exit for loop */
+
+        /* Retry loop: wait up to 500ms for TX to complete */
+        int scan_ready = 0;
+        int retries = 0;
+        int busy_chain = -1;
+        while (!scan_ready && retries < 50) {  /* max 50 x 10ms = 500ms */
+            int tx_busy = 0;
+            for (i = 0; i < LGW_RF_CHAIN_NB; i++) {
+                if (tx_enable[i] == true) {
+                    x = lgw_status((uint8_t)i, TX_STATUS, &tx_status);
+                    if (x == LGW_HAL_SUCCESS && (tx_status == TX_SCHEDULED || tx_status == TX_EMITTING)) {
+                        tx_busy = 1;
+                        busy_chain = i;
+                        break;
                     }
                 }
             }
-        }
-        if (tx_status != TX_SCHEDULED && tx_status != TX_EMITTING) {
-            x = lgw_spectral_scan_start(freq_hz, spectral_scan_params.nb_scan);
-            if (x != 0) {
-                printf("ERROR: spectral scan start failed\n");
-                pthread_mutex_unlock(&mx_concent);
-                continue; /* main while loop */
+            if (!tx_busy) {
+                scan_ready = 1;
+            } else {
+                pthread_mutex_unlock(&mx_concent);  /* release so RX/TX threads can work */
+                wait_ms(10);
+                pthread_mutex_lock(&mx_concent);    /* re-acquire for next check */
+                retries++;
             }
-            spectral_scan_started = true;
         }
+        if (!scan_ready) {
+            printf("INFO: skip spectral scan after %d retries (TX busy on RF chain %d)\n", retries, busy_chain);
+            pthread_mutex_unlock(&mx_concent);
+            continue; /* main while loop */
+        }
+        if (retries > 0) {
+            printf("INFO: spectral scan waited %d ms for TX to finish\n", retries * 10);
+        }
+
+        /* TX is free — start the spectral scan */
+        x = lgw_spectral_scan_start(freq_hz, spectral_scan_params.nb_scan);
+        if (x != 0) {
+            printf("ERROR: spectral scan start failed\n");
+            pthread_mutex_unlock(&mx_concent);
+            continue; /* main while loop */
+        }
+        spectral_scan_started = true;
         pthread_mutex_unlock(&mx_concent);
 
         if (spectral_scan_started == true) {
@@ -3661,17 +3805,155 @@ void thread_spectral_scan(void) {
                     continue; /* main while loop */
                 }
 
-                /* print results */
+                /* print raw results (original format for log parsing) */
                 printf("SPECTRAL SCAN - %u Hz: ", freq_hz);
                 for (i = 0; i < LGW_SPECTRAL_SCAN_RESULT_SIZE; i++) {
                     printf("%u ", results[i]);
                 }
                 printf("\n");
 
+                /* Compute RSSI statistics from histogram */
+                double rssi_sum = 0.0;
+                double rssi_min = 0.0;
+                double rssi_max = -200.0;
+                uint32_t total_samples = 0;
+                bool first_sample = true;
+                for (i = 0; i < LGW_SPECTRAL_SCAN_RESULT_SIZE; i++) {
+                    if (results[i] > 0) {
+                        double rssi_val = (double)levels[i];
+                        rssi_sum += rssi_val * results[i];
+                        total_samples += results[i];
+                        if (first_sample || rssi_val < rssi_min) rssi_min = rssi_val;
+                        if (first_sample || rssi_val > rssi_max) rssi_max = rssi_val;
+                        first_sample = false;
+                    }
+                }
+
+                /* Store in sweep accumulator */
+                if (sweep_idx < sweep_total) {
+                    sweep_acc[sweep_idx].freq_hz = freq_hz;
+                    if (total_samples > 0) {
+                        sweep_acc[sweep_idx].rssi_sum = rssi_sum / total_samples;
+                    } else {
+                        sweep_acc[sweep_idx].rssi_sum = -120.0; /* default if no samples */
+                    }
+                    sweep_acc[sweep_idx].rssi_min = first_sample ? -120.0 : rssi_min;
+                    sweep_acc[sweep_idx].rssi_max = first_sample ? -120.0 : rssi_max;
+                    sweep_acc[sweep_idx].sample_count = total_samples;
+                }
+                sweep_idx++;
+
                 /* Next frequency to scan */
                 freq_hz += 200000; /* 200kHz channels */
                 if (freq_hz >= freq_hz_stop) {
+                    /* Full sweep completed */
+
+                    /* --- Run hardware CAD on configured channels --- */
+                    if (cad_config.enable) {
+                        /* Re-read config each sweep (allows runtime changes) */
+                        cad_read_config();
+
+                        for (i = 0; i < cad_config.nb_channels; i++) {
+                            /* Acquire concentrator mutex for SX1261 access */
+                            pthread_mutex_lock(&mx_concent);
+
+                            /* Check TX not in progress before CAD */
+                            int tx_busy = 0;
+                            int rf_chain;
+                            for (rf_chain = 0; rf_chain < LGW_RF_CHAIN_NB; rf_chain++) {
+                                if (tx_enable[rf_chain] == true) {
+                                    x = lgw_status((uint8_t)rf_chain, TX_STATUS, &tx_status);
+                                    if (x == LGW_HAL_SUCCESS && (tx_status == TX_SCHEDULED || tx_status == TX_EMITTING)) {
+                                        tx_busy = 1;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (tx_busy) {
+                                /* TX active — skip CAD for this channel */
+                                pthread_mutex_unlock(&mx_concent);
+                                cad_results[i].detected = false;
+                                cad_results[i].rssi_dbm = -128;
+                                cad_results[i].status = 2; /* skipped */
+                                printf("INFO: CAD skipped on %s (TX busy)\n", cad_config.channels[i].id);
+                                continue;
+                            }
+
+                            /* Perform hardware CAD scan */
+                            x = sx1261_cad_scan(
+                                cad_config.channels[i].freq_hz,
+                                cad_config.channels[i].sf,
+                                cad_config.channels[i].bw,
+                                &cad_results[i]);
+
+                            pthread_mutex_unlock(&mx_concent);
+
+                            if (x != LGW_REG_SUCCESS) {
+                                printf("ERROR: CAD scan failed on %s\n", cad_config.channels[i].id);
+                                cad_results[i].status = 2;
+                            } else {
+                                printf("INFO: CAD %s: %s (rssi=%d, status=%u)\n",
+                                       cad_config.channels[i].id,
+                                       cad_results[i].detected ? "DETECTED" : "clear",
+                                       cad_results[i].rssi_dbm,
+                                       cad_results[i].status);
+                            }
+                        }
+                    }
+
+                    /* --- Write JSON results file (spectral + CAD) --- */
+                    FILE *fp = fopen("/tmp/pymc_spectral_results.json.tmp", "w");
+                    if (fp != NULL) {
+                        fprintf(fp, "{\n  \"timestamp\": %ld,\n  \"channels\": {\n",
+                                (long)time(NULL));
+                        int written = 0;
+                        for (i = 0; i < sweep_idx && i < sweep_total; i++) {
+                            if (written > 0) fprintf(fp, ",\n");
+                            fprintf(fp, "    \"%u\": {\"rssi_avg\": %.1f, \"rssi_min\": %.1f, "
+                                        "\"rssi_max\": %.1f, \"samples\": %u}",
+                                    sweep_acc[i].freq_hz,
+                                    sweep_acc[i].rssi_sum,
+                                    sweep_acc[i].rssi_min,
+                                    sweep_acc[i].rssi_max,
+                                    sweep_acc[i].sample_count);
+                            written++;
+                        }
+                        fprintf(fp, "\n  }");
+
+                        /* Append CAD results if available */
+                        if (cad_config.enable && cad_config.nb_channels > 0) {
+                            fprintf(fp, ",\n  \"cad\": {\n");
+                            for (i = 0; i < cad_config.nb_channels; i++) {
+                                if (i > 0) fprintf(fp, ",\n");
+                                fprintf(fp, "    \"%s\": {\"freq_hz\": %u, \"sf\": %u, "
+                                            "\"detected\": %s, \"rssi\": %d, \"status\": %u}",
+                                        cad_config.channels[i].id,
+                                        cad_config.channels[i].freq_hz,
+                                        cad_config.channels[i].sf,
+                                        cad_results[i].detected ? "true" : "false",
+                                        cad_results[i].rssi_dbm,
+                                        cad_results[i].status);
+                            }
+                            fprintf(fp, "\n  }");
+                        }
+
+                        fprintf(fp, "\n}\n");
+                        fclose(fp);
+                        /* Atomic rename to avoid partial reads */
+                        rename("/tmp/pymc_spectral_results.json.tmp",
+                               "/tmp/pymc_spectral_results.json");
+                        printf("INFO: spectral sweep complete (%d channels%s), results written\n",
+                               written,
+                               cad_config.enable ? " + CAD" : "");
+                    } else {
+                        printf("ERROR: could not open /tmp/pymc_spectral_results.json.tmp for writing\n");
+                    }
+
+                    /* Reset sweep accumulator */
                     freq_hz = spectral_scan_params.freq_hz_start;
+                    sweep_idx = 0;
+                    memset(sweep_acc, 0, sizeof(sweep_acc));
                 }
             } else if (status == LGW_SPECTRAL_SCAN_STATUS_ABORTED) {
                 printf("INFO: %s: spectral scan has been aborted\n", __FUNCTION__);
