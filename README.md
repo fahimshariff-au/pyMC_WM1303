@@ -178,6 +178,8 @@ Go back to the **Status** tab to verify everything is running:
 
 See [docs/installation.md](docs/installation.md) for detailed installation instructions and troubleshooting.
 
+> 💡 **Tip:** After installation, do a **hard refresh** in your browser (`Ctrl + Shift + R` or `Cmd + Shift + R` on Mac) when opening the WM1303 Manager for the first time to ensure the latest UI is loaded.
+
 ## Upgrading
 
 **One-line upgrade** (recommended):
@@ -209,6 +211,8 @@ The upgrade script:
 - Backwards compatible with all previous installed versions
 
 Verbose output is written to `/tmp/wm1303_upgrade.log`. The console shows step summaries with ✓/✗ status indicators.
+
+> 💡 **Tip:** After upgrading, do a **hard refresh** in your browser (`Ctrl + Shift + R` or `Cmd + Shift + R` on Mac) to ensure the latest UI changes are loaded.
 
 ## WM1303 Manager UI
 
