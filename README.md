@@ -26,32 +26,38 @@ The system uses an **overlay approach**: unmodified forks of the upstream reposi
 ### Radio & Hardware
 - Dual RF chain support (RF0 + RF1) with independent frequency and spreading factor configuration
 - Up to 8 IF demodulators (4 per RF chain) for multi-SF reception
-- SX1261 companion chip integration for spectral scanning and noise floor monitoring
+- SX1261 companion chip integration for spectral scanning, noise floor monitoring, and **hardware CAD** (preamble correlation)
 - Dynamic spectral scan range — automatically follows RF chain center frequency (±800 kHz)
-- No TX hold overhead — spectral scan runs opportunistically without pausing TX/RX
-- Software LBT/CAD (Listen Before Talk / Channel Activity Detection) per channel
-- GPIO-based hardware control (power, reset, SX1261, AD5338R) with configurable pin mapping
+- Spectral scan retry mechanism — waits for TX-free windows, zero TX overhead (0% vs 13% with old TX hold approach)
+- Hardware + Software LBT/CAD (Listen Before Talk / Channel Activity Detection) per channel with HW/SW source tracking
+- IF range validation (±730 kHz) with graceful degradation — out-of-range channels auto-disabled with warnings
+- GPIO-based hardware control (power, reset, SX1261, AD5338R) with configurable pin mapping via UI
 - Automatic AGC management with debounce protection
 - FEM (Front-End Module) LNA/PA register management
 
 ### Software
+- Fully async TX architecture (asyncio-native, no threading) with UDP socket auto-recovery
 - Bridge engine with configurable rules (Single Source of Truth) for inter-channel packet forwarding
-- Global TX scheduler with round-robin queuing, batch windows, and echo prevention
+- Fair round-robin TX scheduler with per-channel HW/SW CAD counters and batch windows
+- Dynamic TX hold — scales with queue depth: 0 pending = 0 ms, 1 pending = 100 ms, 2+ pending = 0 ms
 - RX watchdog with 3 automatic detection modes and packet forwarder recovery
 - Packet deduplication with configurable TTL
+- Noise floor estimation with 3-tier fallback: spectral scan → LBT RSSI → RX packet estimation (RSSI-SNR)
 - SQLite database for metrics, signal quality history, noise floor history, and dashboard data
 - TX echo detection — automatically filters unrealistic RSSI values (> -50 dBm)
+- Safe file write handling — prevents data corruption from permission errors or unexpected failures
 - JWT-based authentication for API and web interface
 - Systemd service with security hardening and auto-restart
 - Semantic version tracking via `/etc/pymc_repeater/version` and REST API
 
 ### Management Interface
 - **WM1303 Manager** — Single-page web application for real-time gateway management
-- **Channels tab** — Per-channel status, statistics, and configuration
-- **Spectrum tab** — Real-time spectral scan visualization, noise floor per channel, channel activity monitor with per-channel noise floor values
+- **Channels tab** — Per-channel status, statistics, configuration, and CAD/LBT dependency management
+- **Spectrum tab** — Real-time spectral scan visualization, noise floor per channel, channel activity monitor with per-channel noise floor values and color coding
 - **Bridge tab** — Visual bridge rule configuration between channels
 - **Signal Quality** — RSSI/SNR charts with per-channel historical data, TX echo filtering
 - **Noise Floor** — Global noise floor indicator, per-channel noise floor cards, historical graph with distinct line styles per channel
+- **CAD Activity** — HW/SW CAD event charts with 5 datasets per channel (HW Clear, SW Clear, HW Detected, SW Detected, Skipped)
 - **Advanced Config** — GPIO pins, IF chains, RF chain parameters
 
 ## Hardware Requirements
@@ -69,7 +75,12 @@ The system uses an **overlay approach**: unmodified forks of the upstream reposi
 
 ### 1. Prepare Raspberry Pi
 
-Install **Raspberry Pi OS Lite** (64-bit preferred) on your SenseCAP M1 or Raspberry Pi.
+1. Flash **Raspberry Pi OS Lite** (64-bit preferred, Bookworm or newer) onto your SD card using [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
+2. Boot the SenseCAP M1 or Raspberry Pi and connect via SSH
+3. Ensure the WM1303 Pi HAT is properly seated on the GPIO header
+4. Verify internet connectivity (`ping google.com`)
+
+> 💡 **Note:** SPI and I2C are enabled automatically by the install script — no manual configuration needed.
 
 ### 2. Install
 
