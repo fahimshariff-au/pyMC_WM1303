@@ -560,7 +560,6 @@ for tmpf in /tmp/pymc_spectral_results.json /tmp/pymc_wm1303_bridge_conf.json /t
     chown ${PI_USER}:${PI_USER} "$tmpf" 2>/dev/null || true
     chmod 664 "$tmpf" 2>/dev/null || true
 done
-log "Pre-created runtime /tmp files with correct ownership"
 ok "Cleaned"
 
 
