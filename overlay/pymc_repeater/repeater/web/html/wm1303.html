@@ -2205,8 +2205,7 @@ function renderPerChannelNfChart(channels) {
       backgroundColor: 'transparent',
       borderWidth: 2,
       borderDash: getChDash(idx),
-      pointRadius: pts.length > 100 ? 0 : 3,
-      pointStyle: getChPointStyle(idx),
+      pointRadius: 0,
       tension: 0.3
     });
   });
