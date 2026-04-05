@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import json
 import logging
 import os
@@ -391,7 +392,15 @@ class WM1303Backend:
         self._channel_noise_floors: dict[str, float] = {}  # ui_config_name -> noise_floor_dbm
         self._nf_lock = threading.Lock()  # protects _channel_noise_floors and _freq_to_ui_name
         self._freq_to_ui_name: dict[int, str] = {}  # freq_hz -> ui_config_name (e.g. 869461000 -> 'SF8')
+        self._ch_id_to_ui_name: dict[str, str] = {}  # channel_a -> ui_config_name (supports same-freq channels)
         self._nf_interval = 30  # seconds between noise floor updates
+
+        # RX-based noise floor estimation (fallback when spectral scan and LBT unavailable)
+        # Stores per-channel_id deques of (timestamp, nf_estimate) tuples
+        self._rx_nf_estimates: dict[str, collections.deque] = {}
+        self._rx_nf_lock = threading.Lock()
+        self._rx_nf_max_age = 300.0  # seconds to keep RX NF estimates
+        self._rx_nf_max_samples = 100  # max samples per channel
 
         # CAD config cache
         self._cad_config_cache: dict[str, bool] = {}  # channel_id -> cad_enabled
@@ -947,8 +956,17 @@ class WM1303Backend:
                 n = ch.get('name', '')
                 if f and n:
                     new_map[int(f)] = n
+            # Build channel_id -> ui_config_name mapping (supports same-frequency channels)
+            _CHID = ['channel_a', 'channel_b', 'channel_c', 'channel_d']
+            new_id_map = {}
+            idx = 0
+            for ch in ui.get('channels', []):
+                if ch.get('active', False) and idx < len(_CHID):
+                    new_id_map[_CHID[idx]] = ch.get('name', '')
+                    idx += 1
             with self._nf_lock:
                 self._freq_to_ui_name = new_map
+                self._ch_id_to_ui_name = new_id_map
         except Exception as e:
             logger.debug('NoiseFloorMonitor: cannot read UI config: %s', e)
             return
@@ -962,7 +980,8 @@ class WM1303Backend:
         if not scan_data:
             scan_data = self._read_spectrum_from_db(max_age=86400.0)
         if not scan_data:
-            logger.debug('NoiseFloorMonitor: no spectral scan data available (JSON or DB)')
+            # Fallback: use LBT RSSI from TX queues as noise floor estimate
+            self._update_noise_floors_from_lbt(channels)
             return
 
         now = time.time()
@@ -1054,6 +1073,131 @@ class WM1303Backend:
                     {ch['name']: self._channel_noise_floors.get(ch['name'])
                      for ch in channels})
 
+    def _update_noise_floors_from_lbt(self, channels: list) -> None:
+        """Fallback: derive per-channel noise floor from TX queue LBT RSSI buffers.
+
+        Called when the HAL spectral scan produces no data (e.g. because TX
+        activity on RF chain 0 prevents the SX1261 from scanning).  The TX
+        queues may still contain RSSI measurements from actual LBT checks
+        performed before each transmission.
+        """
+        if not self._tx_queue_manager:
+            logger.debug('NoiseFloorMonitor: no TX queue manager, cannot use LBT fallback')
+            return
+
+        _DB_PATH = '/var/lib/pymc_repeater/repeater.db'
+        now = time.time()
+        updated = {}
+
+        with self._nf_lock:
+            freq_map = dict(self._freq_to_ui_name)
+
+        for ch_id, queue in self._tx_queue_manager.queues.items():
+            lbt_avg = queue.stats.get('noise_floor_lbt_avg')
+            if lbt_avg is None:
+                continue
+
+            # Map queue's channel_id -> freq -> UI name
+            ui_name = freq_map.get(int(queue.freq_hz))
+            if ui_name is None:
+                continue
+
+            # Use LBT avg as noise floor estimate
+            new_nf = round(lbt_avg, 1)
+            with self._nf_lock:
+                current_nf = self._channel_noise_floors.get(ui_name)
+                if current_nf is None or abs(current_nf - new_nf) > 0.5:
+                    self._channel_noise_floors[ui_name] = new_nf
+                    updated[ui_name] = new_nf
+
+            # Write to noise_floor_history DB
+            lbt_min = queue.stats.get('noise_floor_lbt_min')
+            try:
+                with sqlite3.connect(_DB_PATH) as conn:
+                    conn.execute(
+                        """INSERT INTO noise_floor_history
+                        (timestamp, channel_id, noise_floor_dbm,
+                         samples_collected, samples_accepted, min_rssi, max_rssi)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (now, ui_name, new_nf,
+                         len(queue._lbt_rssi_buffer),
+                         len(queue._lbt_rssi_buffer),
+                         lbt_min, lbt_avg))
+                    conn.commit()
+            except Exception as e:
+                logger.debug('NoiseFloorMonitor: failed to write LBT noise floor to DB: %s', e)
+
+        if updated:
+            logger.info('NoiseFloorMonitor: noise floor from LBT fallback: %s', updated)
+        else:
+            # No LBT data available, try RX-based estimation
+            self._update_noise_floors_from_rx(channels)
+
+
+    def _update_noise_floors_from_rx(self, channels: list) -> None:
+        """Fallback: estimate per-channel noise floor from RX packet RSSI/SNR.
+
+        For each received LoRa packet: noise_floor ≈ RSSI - SNR (when SNR > 0).
+        This provides a reasonable estimate when both spectral scan and LBT
+        RSSI data are unavailable (e.g., heavy TX activity blocks the SX1261
+        spectral scan and LBT is disabled).
+        """
+        _DB_PATH = '/var/lib/pymc_repeater/repeater.db'
+        now = time.time()
+        cutoff = now - self._rx_nf_max_age
+        updated = {}
+
+        # Build channel_id -> UI name mapping
+        _CHID = ['channel_a', 'channel_b', 'channel_c', 'channel_d']
+        ch_id_to_ui_name = {}
+        idx = 0
+        for ch in channels:
+            if ch.get('active', False) and idx < len(_CHID):
+                ch_id_to_ui_name[_CHID[idx]] = ch.get('name', '')
+                idx += 1
+
+        with self._rx_nf_lock:
+            for ch_id, estimates in self._rx_nf_estimates.items():
+                # Filter out old samples
+                recent = [(ts, nf) for ts, nf in estimates if ts > cutoff]
+                if not recent:
+                    continue
+
+                ui_name = ch_id_to_ui_name.get(ch_id)
+                if not ui_name:
+                    continue
+
+                # Use 10th percentile of NF estimates (lower values = quieter = true noise floor)
+                nf_values = sorted([nf for _, nf in recent])
+                p10_idx = max(0, int(len(nf_values) * 0.1))
+                new_nf = round(nf_values[p10_idx], 1)
+
+                with self._nf_lock:
+                    current_nf = self._channel_noise_floors.get(ui_name)
+                    if current_nf is None or abs(current_nf - new_nf) > 0.5:
+                        self._channel_noise_floors[ui_name] = new_nf
+                        updated[ui_name] = new_nf
+
+                # Write to noise_floor_history DB
+                try:
+                    with sqlite3.connect(_DB_PATH) as conn:
+                        conn.execute(
+                            """INSERT INTO noise_floor_history
+                            (timestamp, channel_id, noise_floor_dbm,
+                             samples_collected, samples_accepted, min_rssi, max_rssi)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (now, ui_name, new_nf,
+                             len(recent), len(recent),
+                             nf_values[0], nf_values[-1]))
+                        conn.commit()
+                except Exception as e:
+                    logger.debug('NoiseFloorMonitor: failed to write RX noise floor to DB: %s', e)
+
+        if updated:
+            logger.info('NoiseFloorMonitor: noise floor from RX estimation: %s', updated)
+        else:
+            logger.debug('NoiseFloorMonitor: no RX RSSI data available for noise floor estimation')
+
     def get_channel_noise_floors(self) -> dict:
         """Get current per-channel noise floor values (thread-safe)."""
         with self._nf_lock:
@@ -1065,25 +1209,23 @@ class WM1303Backend:
         Called after every _update_channel_noise_floors() cycle so the
         per-channel rolling buffers (and consequently noise_floor_lbt_avg/
         min/max exposed via the channels/live API) reflect real measurements
-        from the SX1261 spectral scan rather than staying at the default
-        None/-120 fallback.
+        rather than staying at the default None/-120 fallback.
 
-        Note: TX queues use internal IDs (channel_a, channel_b, ...) while
-        _channel_noise_floors uses UI config names (SF8, SF-test, SF7, ...).
-        We bridge the gap via self._freq_to_ui_name (built by _update_channel_noise_floors).
+        Uses _ch_id_to_ui_name for direct channel_id -> UI name mapping,
+        which correctly handles multiple channels on the same frequency.
         """
         if not self._tx_queue_manager:
             return
         with self._nf_lock:
             nf_copy = dict(self._channel_noise_floors)
-            freq_map = dict(self._freq_to_ui_name)
-        if not nf_copy or not freq_map:
+            id_map = dict(self._ch_id_to_ui_name)
+        if not nf_copy or not id_map:
             return
 
         fed = 0
         mapping_info = {}
         for ch_id, queue in self._tx_queue_manager.queues.items():
-            ui_name = freq_map.get(int(queue.freq_hz))
+            ui_name = id_map.get(ch_id)
             if ui_name is None:
                 continue
             nf_val = nf_copy.get(ui_name)
@@ -2311,6 +2453,20 @@ class WM1303Backend:
         s["last_rx_time"] = time.time()
         s["freq_hz"] = freq_hz
 
+        # RX-based noise floor estimation: NF ≈ RSSI - SNR (when SNR > 0)
+        # For negative SNR the signal is below the noise, so RSSI itself
+        # is already close to the noise floor.
+        if snr > 0:
+            nf_est = rssi - snr
+        else:
+            nf_est = rssi
+        now = time.time()
+        with self._rx_nf_lock:
+            if channel_id not in self._rx_nf_estimates:
+                self._rx_nf_estimates[channel_id] = collections.deque(
+                    maxlen=self._rx_nf_max_samples)
+            self._rx_nf_estimates[channel_id].append((now, round(nf_est, 1)))
+
     def _init_channel_stats_db(self) -> None:
         """Create channel_stats_history table if it doesn't exist."""
         try:
@@ -2367,17 +2523,27 @@ class WM1303Backend:
             if not ch_stats:
                 return
 
-            # Get latest noise floor
-            nf_dbm = None
+            # Get per-channel noise floors from NoiseFloorMonitor
+            # Build channel_id -> UI config name mapping for noise floor lookup
+            _ch_id_to_ui_name = {}
             try:
-                with sqlite3.connect(_DB_PATH) as conn:
-                    row = conn.execute(
-                        "SELECT noise_floor_dbm FROM noise_floor ORDER BY timestamp DESC LIMIT 1"
-                    ).fetchone()
-                    if row:
-                        nf_dbm = row[0]
+                import json as _json2
+                with open("/etc/pymc_repeater/wm1303_ui.json") as _uf2:
+                    _ui2 = _json2.load(_uf2)
+                _CHID = ['channel_a', 'channel_b', 'channel_c', 'channel_d']
+                _aidx = 0
+                for _uch in _ui2.get('channels', []):
+                    if _uch.get('active', False) and _aidx < len(_CHID):
+                        _ch_id_to_ui_name[_CHID[_aidx]] = _uch.get('name', '')
+                        _aidx += 1
             except Exception:
                 pass
+            with self._nf_lock:
+                _nf_by_ch_id = {}
+                for _cid, _uname in _ch_id_to_ui_name.items():
+                    nf_val = self._channel_noise_floors.get(_uname)
+                    if nf_val is not None:
+                        _nf_by_ch_id[_cid] = nf_val
 
             with sqlite3.connect(_DB_PATH) as conn:
                 # Load LBT thresholds from UI config as fallback
@@ -2427,7 +2593,7 @@ class WM1303Backend:
                         (now, ch_id, rx_count, avg_rssi, avg_snr,
                          tx_count, tx_failed, tx_airtime, tx_bytes,
                          lbt_blocked, lbt_passed, lbt_last_rssi, lbt_threshold,
-                         nf_dbm))
+                         _nf_by_ch_id.get(ch_id)))
                 conn.commit()
             logger.debug("Channel stats snapshot: %d channels recorded", len(ch_stats))
         except Exception as e:

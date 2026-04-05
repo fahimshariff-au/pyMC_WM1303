@@ -1928,9 +1928,8 @@ class WM1303API:
                         "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
                         (ch_id, cutoff)
                     ).fetchall()
-                    # NOTE: noise_floor_history uses friendly names not channel IDs,
-                    # and noise_floor_dbm in channel_stats_history is a global value.
-                    # Use lbt_last_rssi which has actual per-channel values.
+                    # noise_floor_dbm now contains per-channel values (spectral scan or LBT fallback).
+                    # Use noise_floor_dbm as primary, lbt_last_rssi as secondary fallback.
                     timeseries = []
                     if len(rows) >= 2:
                         buckets = {}
@@ -1947,9 +1946,11 @@ class WM1303API:
                             tx_delta = max(0, (last["tx_count"] or 0) - (first["tx_count"] or 0))
                             blocked_delta = max(0, (last["lbt_blocked"] or 0) - (first["lbt_blocked"] or 0))
                             passed_delta = max(0, (last["lbt_passed"] or 0) - (first["lbt_passed"] or 0))
-                            # Use lbt_last_rssi for per-channel noise floor
-                            lbt_rssi_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
-                            avg_nf = round(sum(lbt_rssi_vals)/len(lbt_rssi_vals), 1) if lbt_rssi_vals else None
+                            # Prefer per-channel noise_floor_dbm, fall back to lbt_last_rssi
+                            nf_vals = [r["noise_floor_dbm"] for r in bk_rows if r["noise_floor_dbm"] is not None]
+                            if not nf_vals:
+                                nf_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
+                            avg_nf = round(sum(nf_vals)/len(nf_vals), 1) if nf_vals else None
                             timeseries.append({
                                 "timestamp": bk_ts,
                                 "noise_floor_dbm": avg_nf,
