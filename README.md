@@ -43,22 +43,26 @@ The system uses an **overlay approach**: unmodified forks of the upstream reposi
 - RX watchdog with 3 automatic detection modes and packet forwarder recovery
 - Packet deduplication with configurable TTL
 - Noise floor estimation with 3-tier fallback: spectral scan → LBT RSSI → RX packet estimation (RSSI-SNR)
-- SQLite database for metrics, signal quality history, noise floor history, and dashboard data
+- ADVERT neighbor tracking with packet logging to SQLite
+- Automatic mesh `identity_key` generation on install/upgrade
+- SQLite database for metrics, signal quality history, noise floor history, CAD events, and dashboard data
 - TX echo detection — automatically filters unrealistic RSSI values (> -50 dBm)
 - Safe file write handling — prevents data corruption from permission errors or unexpected failures
 - JWT-based authentication for API and web interface
 - Systemd service with security hardening and auto-restart
 - Semantic version tracking via `/etc/pymc_repeater/version` and REST API
+- One-line install and upgrade via bootstrap scripts
+- NTP synchronization verification during installation
 
 ### Management Interface
-- **WM1303 Manager** — Single-page web application for real-time gateway management
-- **Channels tab** — Per-channel status, statistics, configuration, and CAD/LBT dependency management
-- **Spectrum tab** — Real-time spectral scan visualization, noise floor per channel, channel activity monitor with per-channel noise floor values and color coding
-- **Bridge tab** — Visual bridge rule configuration between channels
-- **Signal Quality** — RSSI/SNR charts with per-channel historical data, TX echo filtering
-- **Noise Floor** — Global noise floor indicator, per-channel noise floor cards, historical graph with distinct line styles per channel
-- **CAD Activity** — HW/SW CAD event charts with 5 datasets per channel (HW Clear, SW Clear, HW Detected, SW Detected, Skipped)
-- **Advanced Config** — GPIO pins, IF chains, RF chain parameters
+- **WM1303 Manager** — Single-page web application at `http://<pi-ip>:8000/wm1303.html`
+- **Status tab** — Service health (lora_pkt_fwd + pymc-repeater), packet activity chart, per-channel summary cards with live RX/TX counts, RSSI, SNR, noise floor, and uptime
+- **Channels tab** — Per-channel configuration (frequency, SF, bandwidth), CAD/LBT dependency management, IF chain visualization
+- **Spectrum tab** — Real-time SX1261 spectral scan, signal quality (RSSI/SNR) charts, noise floor per channel with color coding, CAD activity timeline (HW/SW), LBT history
+- **Bridge tab** — Visual bridge rule editor for inter-channel and repeater forwarding with packet type filtering
+- **Dedup tab** — Packet deduplication event log with hash, timestamps, and source/target channels
+- **Logs tab** — Live service log viewer
+- **Advanced Config** — GPIO pin mapping, IF chain parameters, RF chain settings, noise floor monitor configuration
 
 ## Hardware Requirements
 
