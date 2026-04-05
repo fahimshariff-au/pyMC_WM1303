@@ -2007,6 +2007,8 @@ class WM1303API:
                 conn.row_factory = sqlite3.Row
                 ch_id_map = _get_ui_channel_id_map()
                 for idx, ch_cfg in enumerate(ui_chs):
+                    if not ch_cfg.get('active', False):
+                        continue
                     ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
                     letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
                     rows = conn.execute(
@@ -2072,26 +2074,19 @@ class WM1303API:
                         },
                         "timeseries": timeseries
                     })
-                # Noise floor from noise_floor_history table (aggregated across channels)
+                # Noise floor from noise_floor_history table - individual per-channel data points
                 nf_rows = conn.execute("""
-                    SELECT
-                        CAST((timestamp / 600) AS INTEGER) * 600 as bucket_ts,
-                        AVG(noise_floor_dbm) as avg_nf,
-                        MIN(noise_floor_dbm) as min_nf,
-                        MAX(noise_floor_dbm) as max_nf,
-                        COUNT(*) as cnt
+                    SELECT timestamp, channel_id, noise_floor_dbm
                     FROM noise_floor_history
                     WHERE timestamp > ?
-                    GROUP BY bucket_ts
-                    ORDER BY bucket_ts
+                    ORDER BY timestamp ASC
                 """, (cutoff,)).fetchall()
                 noise_floor_ts = []
                 for row in nf_rows:
                     noise_floor_ts.append({
-                        "timestamp": row["bucket_ts"],
-                        "avg_nf": round(row["avg_nf"], 1) if row["avg_nf"] else None,
-                        "min_nf": round(row["min_nf"], 1) if row["min_nf"] else None,
-                        "max_nf": round(row["max_nf"], 1) if row["max_nf"] else None
+                        "timestamp": row["timestamp"],
+                        "channel_id": row["channel_id"],
+                        "noise_floor_dbm": round(row["noise_floor_dbm"], 1) if row["noise_floor_dbm"] else None
                     })
                 # Get current noise floor: latest average across all channels
                 current_nf = conn.execute("""
@@ -2106,7 +2101,6 @@ class WM1303API:
                 """).fetchone()
                 return {
                     "hours": h,
-                    "bucket_minutes": 10,
                     "channels": result_channels,
                     "noise_floor": {
                         "current": round(current_nf["avg_nf"], 1) if current_nf and current_nf["avg_nf"] else None,
@@ -2136,14 +2130,14 @@ class WM1303API:
         range_str = params.get('range', '1h')
         channel_filter = params.get('channel', None)
 
-        AUTO_BUCKETS = {
-            '1h':  (3600,       1),
-            '6h':  (6*3600,     5),
-            '24h': (24*3600,   15),
-            '3d':  (3*24*3600, 60),
-            '7d':  (7*24*3600, 120),
+        RANGE_SECS = {
+            '1h':  3600,
+            '6h':  6*3600,
+            '24h': 24*3600,
+            '3d':  3*24*3600,
+            '7d':  7*24*3600,
         }
-        span_secs, bucket_min = AUTO_BUCKETS.get(range_str, (3600, 1))
+        span_secs = RANGE_SECS.get(range_str, 3600)
         since_ts = now - span_secs
 
         db_path = "/var/lib/pymc_repeater/repeater.db"
@@ -2152,11 +2146,10 @@ class WM1303API:
         try:
             import os as _os
             if not _os.path.exists(db_path):
-                return _j({"channels": {}, "error": "database not found"})
+                return _j({"channels": {}, "range": range_str,
+                           "error": "database not found"})
 
-            bucket_secs = bucket_min * 60
-
-            with _sqlite3.connect(db_path) as conn:
+            with _sqlite3.connect(db_path, timeout=5) as conn:
                 conn.row_factory = _sqlite3.Row
 
                 # Get current noise floor per channel
@@ -2182,7 +2175,7 @@ class WM1303API:
                         "stats": {}
                     }
 
-                # Get history buckets
+                # Get all individual data points (no bucketing)
                 where = ["timestamp >= ?"]
                 qparams = [since_ts]
                 if channel_filter:
@@ -2193,16 +2186,15 @@ class WM1303API:
                 hist_rows = conn.execute(f"""
                     SELECT
                         channel_id,
-                        CAST((timestamp / {bucket_secs}) AS INTEGER) * {bucket_secs} AS bucket_ts,
-                        AVG(noise_floor_dbm) as avg_nf,
-                        MIN(noise_floor_dbm) as min_nf,
-                        MAX(noise_floor_dbm) as max_nf,
-                        SUM(samples_collected) as total_samples,
-                        SUM(samples_accepted) as total_accepted
+                        timestamp as ts,
+                        noise_floor_dbm as avg_nf,
+                        min_rssi as min_nf,
+                        max_rssi as max_nf,
+                        samples_collected,
+                        samples_accepted
                     FROM noise_floor_history
                     WHERE {where_str}
-                    GROUP BY channel_id, bucket_ts
-                    ORDER BY channel_id, bucket_ts ASC
+                    ORDER BY channel_id, timestamp ASC
                 """, qparams).fetchall()
 
                 for row in hist_rows:
@@ -2213,11 +2205,11 @@ class WM1303API:
                             "history": [], "stats": {}
                         }
                     result_channels[ch_id]["history"].append({
-                        "ts": int(row["bucket_ts"]),
+                        "ts": row["ts"],
                         "avg_nf": round(row["avg_nf"], 1) if row["avg_nf"] else None,
                         "min_nf": round(row["min_nf"], 1) if row["min_nf"] else None,
                         "max_nf": round(row["max_nf"], 1) if row["max_nf"] else None,
-                        "samples": row["total_samples"] or 0,
+                        "samples": row["samples_collected"] or 0,
                     })
 
                 # Get per-channel stats
@@ -2243,18 +2235,33 @@ class WM1303API:
                         }
 
             # Also get in-memory noise floors from backend
+            # Map live keys to DB-style keys to avoid duplicates
             try:
                 _bk = _get_backend()
                 if _bk and hasattr(_bk, 'get_channel_noise_floors'):
                     live_nf = _bk.get_channel_noise_floors()
+                    # Build reverse map: 'Channel A' -> 'channel_a', etc.
+                    _CHID = ['channel_a', 'channel_b', 'channel_c', 'channel_d']
+                    _label_to_dbid = {}
+                    try:
+                        ui_chs = _load_ui().get("channels", [])
+                        _aidx = 0
+                        for _idx, _ch in enumerate(ui_chs):
+                            _label = "Channel " + chr(65 + _idx)
+                            _label_to_dbid[_label] = _CHID[_aidx] if _ch.get("active", False) and _aidx < len(_CHID) else None
+                            _label_to_dbid[_ch.get("name", "")] = _label_to_dbid[_label]
+                            if _ch.get("active", False) and _aidx < len(_CHID):
+                                _aidx += 1
+                    except Exception:
+                        pass
                     for ch_id, nf_val in live_nf.items():
-                        if ch_id not in result_channels:
-                            result_channels[ch_id] = {
-                                "current": nf_val, "last_update": now,
-                                "history": [], "stats": {}
-                            }
-                        else:
+                        # Try to map live key to DB key
+                        db_key = _label_to_dbid.get(ch_id, ch_id)
+                        if db_key and db_key in result_channels:
+                            result_channels[db_key]["current_live"] = nf_val
+                        elif ch_id in result_channels:
                             result_channels[ch_id]["current_live"] = nf_val
+                        # Don't create new entries - DB data is the source of truth
             except Exception:
                 pass
 
@@ -2263,31 +2270,44 @@ class WM1303API:
             logging.getLogger("WM1303API").warning("noise_floor endpoint error: %s", e)
             return _j({"channels": {}, "error": str(e)})
 
-        # Filter to only active channels
-        # NOTE: noise_floor_history stores friendly names (e.g. 'SF8') as channel_id,
-        # not internal IDs (e.g. 'channel_a'), so we must match using ch_cfg['name'].
+        # Filter to only active channels using position-based channel IDs
         try:
             ui_chs = _load_ui().get("channels", [])
+            _CHID = ['channel_a', 'channel_b', 'channel_c', 'channel_d']
+            active_ch_ids = set()
+            aidx = 0
+            for ch_cfg in ui_chs:
+                if ch_cfg.get("active", False) and aidx < len(_CHID):
+                    active_ch_ids.add(_CHID[aidx])
+                    aidx += 1
+            # Also accept old-style friendly names for backward compatibility with existing DB rows
             active_ch_names = set()
             for ch_cfg in ui_chs:
                 if ch_cfg.get("active", False):
                     active_ch_names.add(ch_cfg.get("name", ""))
-            if active_ch_names:
-                result_channels = {k: v for k, v in result_channels.items() if k in active_ch_names}
+            if active_ch_ids:
+                result_channels = {k: v for k, v in result_channels.items()
+                                   if k in active_ch_ids or k in active_ch_names}
         except Exception:
             pass
 
-        # Convert friendly channel names to 'Channel A', 'Channel B', etc.
+        # Convert channel IDs to 'Channel A', 'Channel B', etc.
         try:
             ui_cfg = _load_ui()
+            _CHID = ['channel_a', 'channel_b', 'channel_c', 'channel_d']
+            id_to_label = {}
             name_to_label = {}
+            aidx = 0
             for idx, ch_cfg in enumerate(ui_cfg.get("channels", [])):
                 ch_name = ch_cfg.get("name", "")
                 label = "Channel " + chr(65 + idx)  # A, B, C, D
                 name_to_label[ch_name] = label
+                if ch_cfg.get("active", False) and aidx < len(_CHID):
+                    id_to_label[_CHID[aidx]] = label
+                    aidx += 1
             converted = {}
             for k, v in result_channels.items():
-                new_key = name_to_label.get(k, k)
+                new_key = id_to_label.get(k, name_to_label.get(k, k))
                 converted[new_key] = v
             result_channels = converted
         except Exception:
@@ -2296,7 +2316,6 @@ class WM1303API:
         return _j({
             "channels": result_channels,
             "range": range_str,
-            "bucket_minutes": bucket_min,
         })
 
     # ---- CAD Stats ----
@@ -2361,6 +2380,10 @@ class WM1303API:
                             SUM(cad_clear) as total_clear,
                             SUM(cad_detected) as total_detected,
                             SUM(cad_skipped) as total_skipped,
+                            SUM(cad_hw_clear) as total_hw_clear,
+                            SUM(cad_hw_detected) as total_hw_detected,
+                            SUM(cad_sw_clear) as total_sw_clear,
+                            SUM(cad_sw_detected) as total_sw_detected,
                             COUNT(*) as sample_count
                         FROM cad_events
                         WHERE {where_str}
@@ -2372,11 +2395,19 @@ class WM1303API:
                         t_clear = row["total_clear"] or 0
                         t_det = row["total_detected"] or 0
                         t_skip = row["total_skipped"] or 0
+                        t_hw_clear = row["total_hw_clear"] or 0
+                        t_hw_det = row["total_hw_detected"] or 0
+                        t_sw_clear = row["total_sw_clear"] or 0
+                        t_sw_det = row["total_sw_detected"] or 0
                         channels[ch_id] = {
                             "clear": t_clear,
                             "detected": t_det,
                             "skipped": t_skip,
                             "total": t_clear + t_det + t_skip,
+                            "hw_clear": t_hw_clear,
+                            "hw_detected": t_hw_det,
+                            "sw_clear": t_sw_clear,
+                            "sw_detected": t_sw_det,
                         }
 
                     # Time-bucketed aggregation
@@ -2386,7 +2417,11 @@ class WM1303API:
                             CAST((timestamp / {bucket_secs}) AS INTEGER) * {bucket_secs} AS bucket_ts,
                             SUM(cad_clear) as sum_clear,
                             SUM(cad_detected) as sum_detected,
-                            SUM(cad_skipped) as sum_skipped
+                            SUM(cad_skipped) as sum_skipped,
+                            SUM(cad_hw_clear) as sum_hw_clear,
+                            SUM(cad_hw_detected) as sum_hw_detected,
+                            SUM(cad_sw_clear) as sum_sw_clear,
+                            SUM(cad_sw_detected) as sum_sw_detected
                         FROM cad_events
                         WHERE {where_str}
                         GROUP BY channel_id, bucket_ts
@@ -2402,11 +2437,16 @@ class WM1303API:
                             "clear": row["sum_clear"] or 0,
                             "detected": row["sum_detected"] or 0,
                             "skipped": row["sum_skipped"] or 0,
+                            "hw_clear": row["sum_hw_clear"] or 0,
+                            "hw_detected": row["sum_hw_detected"] or 0,
+                            "sw_clear": row["sum_sw_clear"] or 0,
+                            "sw_detected": row["sum_sw_detected"] or 0,
                         })
 
                     # Recent rows (last 100)
                     recent_rows = conn.execute(f"""
-                        SELECT timestamp, channel_id, cad_clear, cad_detected, cad_skipped
+                        SELECT timestamp, channel_id, cad_clear, cad_detected, cad_skipped,
+                               cad_hw_clear, cad_hw_detected, cad_sw_clear, cad_sw_detected
                         FROM cad_events
                         WHERE {where_str}
                         ORDER BY timestamp DESC
@@ -2419,6 +2459,10 @@ class WM1303API:
                         "clear": row["cad_clear"] or 0,
                         "detected": row["cad_detected"] or 0,
                         "skipped": row["cad_skipped"] or 0,
+                        "hw_clear": row["cad_hw_clear"] or 0,
+                        "hw_detected": row["cad_hw_detected"] or 0,
+                        "sw_clear": row["cad_sw_clear"] or 0,
+                        "sw_detected": row["cad_sw_detected"] or 0,
                     } for row in recent_rows]
 
         except Exception as e:
@@ -2437,7 +2481,12 @@ class WM1303API:
                         "cad_clear": q.stats.get("cad_clear", 0),
                         "cad_detected": q.stats.get("cad_detected", 0),
                         "cad_skipped": q.stats.get("cad_skipped", 0),
+                        "cad_hw_clear": q.stats.get("cad_hw_clear", 0),
+                        "cad_hw_detected": q.stats.get("cad_hw_detected", 0),
+                        "cad_sw_clear": q.stats.get("cad_sw_clear", 0),
+                        "cad_sw_detected": q.stats.get("cad_sw_detected", 0),
                         "cad_last_result": q.stats.get("cad_last_result"),
+                        "cad_last_source": q.stats.get("cad_last_source"),
                     }
         except Exception:
             pass
@@ -2460,26 +2509,23 @@ class WM1303API:
         try:
             with sqlite3.connect(db_path) as conn:
                 conn.row_factory = sqlite3.Row
+                # Return individual data points per channel (no bucketing)
                 rows = conn.execute("""
-                    SELECT
-                        CAST((timestamp / 300) AS INTEGER) * 300 as bucket_ts,
-                        AVG(noise_floor_dbm) as avg_nf,
-                        MIN(noise_floor_dbm) as min_nf,
-                        MAX(noise_floor_dbm) as max_nf,
-                        COUNT(*) as sample_count
+                    SELECT timestamp, channel_id, noise_floor_dbm,
+                           min_rssi, max_rssi, samples_collected
                     FROM noise_floor_history
                     WHERE timestamp > ?
-                    GROUP BY bucket_ts
-                    ORDER BY bucket_ts
+                    ORDER BY timestamp ASC
                 """, (cutoff,)).fetchall()
                 data = []
                 for row in rows:
                     data.append({
-                        "timestamp": row["bucket_ts"],
-                        "avg_nf": round(row["avg_nf"], 1) if row["avg_nf"] else None,
-                        "min_nf": round(row["min_nf"], 1) if row["min_nf"] else None,
-                        "max_nf": round(row["max_nf"], 1) if row["max_nf"] else None,
-                        "samples": row["sample_count"]
+                        "timestamp": row["timestamp"],
+                        "channel_id": row["channel_id"],
+                        "noise_floor_dbm": round(row["noise_floor_dbm"], 1) if row["noise_floor_dbm"] else None,
+                        "min_rssi": round(row["min_rssi"], 1) if row["min_rssi"] else None,
+                        "max_rssi": round(row["max_rssi"], 1) if row["max_rssi"] else None,
+                        "samples": row["samples_collected"] or 0
                     })
                 stats = conn.execute("""
                     SELECT
@@ -2836,8 +2882,18 @@ def _packet_activity_recorder():
                 channel_id TEXT NOT NULL,
                 cad_clear INTEGER DEFAULT 0,
                 cad_detected INTEGER DEFAULT 0,
-                cad_skipped INTEGER DEFAULT 0)""")
+                cad_skipped INTEGER DEFAULT 0,
+                cad_hw_clear INTEGER DEFAULT 0,
+                cad_hw_detected INTEGER DEFAULT 0,
+                cad_sw_clear INTEGER DEFAULT 0,
+                cad_sw_detected INTEGER DEFAULT 0)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_cadevt_ts ON cad_events(timestamp)")
+            # Add hw/sw columns to existing tables (idempotent)
+            for _col in ('cad_hw_clear', 'cad_hw_detected', 'cad_sw_clear', 'cad_sw_detected'):
+                try:
+                    conn.execute(f"ALTER TABLE cad_events ADD COLUMN {_col} INTEGER DEFAULT 0")
+                except Exception:
+                    pass  # Column already exists
             conn.commit()
     except Exception as _init_e:
         logger.debug("packet_activity_recorder init: %s", _init_e)
@@ -2891,26 +2947,35 @@ def _packet_activity_recorder():
                         cur_clear = q.stats.get("cad_clear", 0) or 0
                         cur_det = q.stats.get("cad_detected", 0) or 0
                         cur_skip = q.stats.get("cad_skipped", 0) or 0
+                        cur_hw_clear = q.stats.get("cad_hw_clear", 0) or 0
+                        cur_hw_det = q.stats.get("cad_hw_detected", 0) or 0
+                        cur_sw_clear = q.stats.get("cad_sw_clear", 0) or 0
+                        cur_sw_det = q.stats.get("cad_sw_detected", 0) or 0
                         prev_cad = _cad_last_counts.get(ch_id)
                         if prev_cad is not None:
                             d_clear = max(0, cur_clear - prev_cad["cad_clear"])
                             d_det = max(0, cur_det - prev_cad["cad_detected"])
                             d_skip = max(0, cur_skip - prev_cad["cad_skipped"])
-                            if d_clear > 0 or d_det > 0 or d_skip > 0:
-                                cad_inserts.append((now, ch_id, d_clear, d_det, d_skip))
-                            else:
-                                cad_inserts.append((now, ch_id, 0, 0, 0))
+                            d_hw_clear = max(0, cur_hw_clear - prev_cad.get("cad_hw_clear", 0))
+                            d_hw_det = max(0, cur_hw_det - prev_cad.get("cad_hw_detected", 0))
+                            d_sw_clear = max(0, cur_sw_clear - prev_cad.get("cad_sw_clear", 0))
+                            d_sw_det = max(0, cur_sw_det - prev_cad.get("cad_sw_detected", 0))
+                            cad_inserts.append((now, ch_id, d_clear, d_det, d_skip, d_hw_clear, d_hw_det, d_sw_clear, d_sw_det))
                         else:
-                            cad_inserts.append((now, ch_id, 0, 0, 0))
+                            cad_inserts.append((now, ch_id, 0, 0, 0, 0, 0, 0, 0))
                         _cad_last_counts[ch_id] = {
                             "cad_clear": cur_clear,
                             "cad_detected": cur_det,
                             "cad_skipped": cur_skip,
+                            "cad_hw_clear": cur_hw_clear,
+                            "cad_hw_detected": cur_hw_det,
+                            "cad_sw_clear": cur_sw_clear,
+                            "cad_sw_detected": cur_sw_det,
                         }
                 if cad_inserts:
                     with _sq3r.connect(_db) as conn:
                         conn.executemany(
-                            "INSERT INTO cad_events (timestamp, channel_id, cad_clear, cad_detected, cad_skipped) VALUES (?,?,?,?,?)",
+                            "INSERT INTO cad_events (timestamp, channel_id, cad_clear, cad_detected, cad_skipped, cad_hw_clear, cad_hw_detected, cad_sw_clear, cad_sw_detected) VALUES (?,?,?,?,?,?,?,?,?)",
                             cad_inserts
                         )
                         conn.commit()

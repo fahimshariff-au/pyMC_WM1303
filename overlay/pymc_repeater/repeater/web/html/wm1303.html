@@ -1747,7 +1747,7 @@ showTab = function(name, btn) {
   <!-- Channel Activity Monitor -->
   <div class="gl" style="padding:18px;margin-bottom:16px">
     <h3 style="margin:0 0 12px;font-size:14px;font-weight:600;color:var(--tx)">📡 Channel Activity Monitor</h3>
-    <div id="specChannelActivity" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px">
+    <div id="specChannelActivity" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
       <div style="text-align:center;color:var(--txm);padding:12px;font-size:13px">Loading channel data...</div>
     </div>
   </div>
@@ -1873,17 +1873,18 @@ showTab = function(name, btn) {
 var sigHours = 24;
 var sigRssiChart = null, sigSnrChart = null, sigNfChart = null;
 var sigRefreshInterval = null;
-var SIG_COLORS = {
-  'Channel A': '#3b82f6',
-  'Channel B': '#8b5cf6',
-  'Channel C': '#10b981',
-  'Channel D': '#f59e0b'
-};
 var SIG_COLOR_LIST = ['#3b82f6', '#8b5cf6', '#10b981', '#f59e0b', '#ec4899', '#06b6d4'];
+var SIG_DASH_LIST = [[], [6, 3], [2, 2], [8, 4, 2, 4], [4, 4], [1, 3]];
+var SIG_POINT_LIST = ['circle', 'rect', 'triangle', 'rectRot', 'star', 'crossRot'];
 
-function getChColor(idx, name) {
-  if (name && SIG_COLORS[name]) return SIG_COLORS[name];
+function getChColor(idx) {
   return SIG_COLOR_LIST[idx % SIG_COLOR_LIST.length];
+}
+function getChDash(idx) {
+  return SIG_DASH_LIST[idx % SIG_DASH_LIST.length];
+}
+function getChPointStyle(idx) {
+  return SIG_POINT_LIST[idx % SIG_POINT_LIST.length];
 }
 
 function setSigHours(h) {
@@ -1962,7 +1963,7 @@ function renderChannelActivity(channels, noiseFloor, liveChannels) {
   }
   var html = '';
   channels.forEach(function(ch, i) {
-    var color = getChColor(i, ch.friendly_name);
+    var color = getChColor(i);
     var isActive = ch.active;
     var stats = ch.stats || {};
     var pktCount = stats.pkt_count || 0;
@@ -1972,7 +1973,7 @@ function renderChannelActivity(channels, noiseFloor, liveChannels) {
     var sf = ch.spreading_factor || '—';
     var statusIcon = !isActive ? '⚪' : pktCount > 0 ? '🟢' : '🟡';
     var statusText = !isActive ? 'Inactive' : pktCount > 0 ? pktCount + ' pkts' : 'No packets';
-    html += '<div style="background:' + color + '10;border:1px solid ' + color + '40;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:6px">';
+    html += '<div style="background:' + color + '18;border:1px solid ' + color + '50;border-radius:10px;padding:14px;box-sizing:border-box;overflow:hidden">';
     html += '<div style="display:flex;justify-content:space-between;align-items:center">';
     html += '<span style="font-weight:600;font-size:13px;color:' + color + '">' + (ch.friendly_name || ch.name) + '</span>';
     html += '<span style="font-size:12px">' + statusIcon + ' ' + statusText + '</span>';
@@ -1999,10 +2000,11 @@ function renderRssiChart(channels, noiseFloor) {
   var totalPts = 0;
   channels.forEach(function(ch, i) {
     if (!ch.timeseries || ch.timeseries.length === 0) return;
-    var color = getChColor(i, ch.friendly_name);
-    var pts = ch.timeseries.map(function(pt) {
+    var color = getChColor(i);
+    var pts = ch.timeseries.filter(function(pt) { return pt.avg_rssi !== null && pt.avg_rssi !== undefined; }).map(function(pt) {
       return { x: new Date(pt.timestamp * 1000), y: pt.avg_rssi };
     });
+    if (pts.length === 0) return;
     totalPts += pts.length;
     datasets.push({
       label: (ch.friendly_name || ch.name) + ' RSSI',
@@ -2010,7 +2012,7 @@ function renderRssiChart(channels, noiseFloor) {
       borderColor: color,
       backgroundColor: 'transparent',
       borderWidth: 2,
-      pointRadius: pts.length > 100 ? 0 : 2,
+      pointRadius: 0,
       tension: 0.3
     });
   });
@@ -2041,7 +2043,7 @@ function renderSnrChart(channels) {
   var totalPts = 0;
   channels.forEach(function(ch, i) {
     if (!ch.timeseries || ch.timeseries.length === 0) return;
-    var color = getChColor(i, ch.friendly_name);
+    var color = getChColor(i);
     var pts = ch.timeseries.filter(function(pt) { return pt.avg_snr !== null; }).map(function(pt) {
       return { x: new Date(pt.timestamp * 1000), y: pt.avg_snr };
     });
@@ -2053,7 +2055,7 @@ function renderSnrChart(channels) {
       borderColor: color,
       backgroundColor: 'transparent',
       borderWidth: 2,
-      pointRadius: pts.length > 100 ? 0 : 2,
+      pointRadius: 0,
       tension: 0.3
     });
   });
@@ -2096,39 +2098,48 @@ function renderNfChart(data, stats) {
   if (sigNfChart) sigNfChart.destroy();
   var datasets = [];
   if (data && data.length > 0) {
-    var avgPts = data.map(function(pt) { return { x: new Date(pt.timestamp * 1000), y: pt.avg_nf }; });
-    var minPts = data.map(function(pt) { return { x: new Date(pt.timestamp * 1000), y: pt.min_nf }; });
-    var maxPts = data.map(function(pt) { return { x: new Date(pt.timestamp * 1000), y: pt.max_nf }; });
-    datasets.push({
-      label: 'Avg Noise Floor',
-      data: avgPts,
-      borderColor: '#fbbf24',
-      backgroundColor: 'rgba(251,191,36,0.1)',
-      borderWidth: 2,
-      pointRadius: 0,
-      tension: 0.3,
-      fill: false
+    // Group data by channel_id for per-channel rendering
+    var byChannel = {};
+    data.forEach(function(pt) {
+      var chId = pt.channel_id || 'unknown';
+      if (!byChannel[chId]) byChannel[chId] = [];
+      byChannel[chId].push(pt);
     });
-    datasets.push({
-      label: 'Min',
-      data: minPts,
-      borderColor: 'rgba(34,197,94,0.5)',
-      borderWidth: 1,
-      borderDash: [3, 3],
-      pointRadius: 0,
-      backgroundColor: 'transparent',
-      tension: 0.3
-    });
-    datasets.push({
-      label: 'Max',
-      data: maxPts,
-      borderColor: 'rgba(239,68,68,0.5)',
-      borderWidth: 1,
-      borderDash: [3, 3],
-      pointRadius: 0,
-      backgroundColor: 'transparent',
-      tension: 0.3
-    });
+    var chKeys = Object.keys(byChannel);
+    if (chKeys.length > 1) {
+      // Multiple channels: render per-channel lines
+      chKeys.forEach(function(chId, idx) {
+        var color = getChColor(idx);
+        var label = chId;
+        var m = chId.match(/^channel_([a-z])$/);
+        if (m) label = 'Channel ' + m[1].toUpperCase();
+        var pts = byChannel[chId].map(function(pt) {
+          return { x: new Date(pt.timestamp * 1000), y: pt.noise_floor_dbm || pt.avg_nf };
+        });
+        datasets.push({
+          label: label,
+          data: pts,
+          borderColor: color,
+          backgroundColor: 'transparent',
+          borderWidth: 2,
+          pointRadius: pts.length > 100 ? 0 : 2,
+          tension: 0.3
+        });
+      });
+    } else {
+      // Single channel or legacy format: render avg/min/max lines
+      var avgPts = data.map(function(pt) { return { x: new Date(pt.timestamp * 1000), y: pt.noise_floor_dbm || pt.avg_nf }; });
+      datasets.push({
+        label: 'Noise Floor',
+        data: avgPts,
+        borderColor: '#fbbf24',
+        backgroundColor: 'rgba(251,191,36,0.1)',
+        borderWidth: 2,
+        pointRadius: avgPts.length > 100 ? 0 : 2,
+        tension: 0.3,
+        fill: false
+      });
+    }
   } else {
     datasets.push({ label: 'No data', data: [{ x: new Date(), y: -120 }], borderColor: '#666', pointRadius: 3 });
   }
@@ -2183,7 +2194,7 @@ function renderPerChannelNfChart(channels) {
   chNames.forEach(function(chId, idx) {
     var ch = channels[chId];
     if (!ch.history || ch.history.length === 0) return;
-    var color = getChColor(idx, chId);
+    var color = getChColor(idx);
     var pts = ch.history.map(function(pt) {
       return { x: new Date(pt.ts * 1000), y: pt.avg_nf };
     });
@@ -2193,7 +2204,9 @@ function renderPerChannelNfChart(channels) {
       borderColor: color,
       backgroundColor: 'transparent',
       borderWidth: 2,
-      pointRadius: pts.length > 100 ? 0 : 2,
+      borderDash: getChDash(idx),
+      pointRadius: pts.length > 100 ? 0 : 3,
+      pointStyle: getChPointStyle(idx),
       tension: 0.3
     });
   });
@@ -2230,7 +2243,7 @@ function renderNfCards(channels) {
   var html = '';
   chNames.forEach(function(chId, idx) {
     var ch = channels[chId];
-    var color = getChColor(idx, chId);
+    var color = getChColor(idx);
     var current = ch.current !== null && ch.current !== undefined ? ch.current + ' dBm' : '—';
     var nfColor = ch.current < -100 ? '#22c55e' : ch.current < -85 ? '#f59e0b' : '#ef4444';
     var stats = ch.stats || {};
@@ -2238,7 +2251,7 @@ function renderNfCards(channels) {
     var min = stats.min !== null && stats.min !== undefined ? stats.min + ' dBm' : '—';
     var max = stats.max !== null && stats.max !== undefined ? stats.max + ' dBm' : '—';
 
-    html += '<div style="background:' + color + '10;border:1px solid ' + color + '40;border-radius:10px;padding:12px">';
+    html += '<div style="background:' + color + '18;border:1px solid ' + color + '40;border-radius:10px;padding:12px;box-sizing:border-box;overflow:hidden;min-height:0">';
     html += '<div style="font-weight:600;font-size:13px;color:' + color + ';margin-bottom:6px">' + chId + '</div>';
     html += '<div style="font-size:20px;font-weight:700;color:' + nfColor + ';margin-bottom:4px">' + current + '</div>';
     html += '<div style="font-size:11px;color:var(--txm);display:grid;grid-template-columns:1fr 1fr;gap:2px">';
@@ -2349,24 +2362,42 @@ function renderNfCards(channels) {
       var rgb = cadGetColor(chId, idx);
       var dataMap = {};
       (buckets[chId] || []).forEach(function(pt) { dataMap[pt.ts] = pt; });
-      var clearData = timestamps.map(function(ts) { return dataMap[ts] ? dataMap[ts].clear : 0; });
-      var detData = timestamps.map(function(ts) { return dataMap[ts] ? dataMap[ts].detected : 0; });
-      var skipData = timestamps.map(function(ts) { return dataMap[ts] ? dataMap[ts].skipped : 0; });
+      var hwClearData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].hw_clear || 0) : 0; });
+      var swClearData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].sw_clear || 0) : 0; });
+      var hwDetData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].hw_detected || 0) : 0; });
+      var swDetData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].sw_detected || 0) : 0; });
+      var skipData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].skipped || 0) : 0; });
       var label = chFriendly[chId] || formatChannelName(chId);
 
       datasets.push({
-        label: label + ' Clear',
-        data: clearData,
-        backgroundColor: 'rgba(' + rgb + ',0.9)',
+        label: label + ' HW Clear',
+        data: hwClearData,
+        backgroundColor: 'rgba(' + rgb + ',0.95)',
         borderColor: 'rgba(' + rgb + ',1)',
         borderWidth: 1, borderRadius: 2,
         stack: 'cad_' + chId
       });
       datasets.push({
-        label: label + ' Detected',
-        data: detData,
-        backgroundColor: 'rgba(' + rgb + ',0.45)',
+        label: label + ' SW Clear',
+        data: swClearData,
+        backgroundColor: 'rgba(' + rgb + ',0.5)',
         borderColor: 'rgba(' + rgb + ',0.7)',
+        borderWidth: 1, borderRadius: 2, borderDash: [2,2],
+        stack: 'cad_' + chId
+      });
+      datasets.push({
+        label: label + ' HW Detected',
+        data: hwDetData,
+        backgroundColor: 'rgba(239,68,68,0.9)',
+        borderColor: 'rgba(239,68,68,1)',
+        borderWidth: 1, borderRadius: 2,
+        stack: 'cad_' + chId
+      });
+      datasets.push({
+        label: label + ' SW Detected',
+        data: swDetData,
+        backgroundColor: 'rgba(239,68,68,0.45)',
+        borderColor: 'rgba(239,68,68,0.7)',
         borderWidth: 1, borderRadius: 2,
         stack: 'cad_' + chId
       });
@@ -2395,7 +2426,7 @@ function renderNfCards(channels) {
               color: "rgba(255,255,255,0.6)", padding: 10, usePointStyle: true,
               pointStyle: "rectRounded", font: { size: 10 },
               filter: function(item) {
-                return item.text.indexOf('Clear') >= 0;
+                return item.text.indexOf('HW Clear') >= 0;
               }
             }
           },
@@ -2404,14 +2435,20 @@ function renderNfCards(channels) {
             callbacks: {
               title: function(items) { return items[0].label; },
               footer: function(items) {
-                var sums = {};
+                var hw_clear=0, sw_clear=0, hw_det=0, sw_det=0, skip=0;
                 items.forEach(function(it) {
-                  var parts = it.dataset.label.split(' ');
-                  var type = parts[parts.length - 1];
-                  if (!sums[type]) sums[type] = 0;
-                  sums[type] += it.raw;
+                  var lbl = it.dataset.label;
+                  if (lbl.indexOf('HW Clear') >= 0) hw_clear += it.raw;
+                  else if (lbl.indexOf('SW Clear') >= 0) sw_clear += it.raw;
+                  else if (lbl.indexOf('HW Detected') >= 0) hw_det += it.raw;
+                  else if (lbl.indexOf('SW Detected') >= 0) sw_det += it.raw;
+                  else if (lbl.indexOf('Skipped') >= 0) skip += it.raw;
                 });
-                return 'Clear: ' + (sums['Clear']||0) + '  Det: ' + (sums['Detected']||0) + '  Skip: ' + (sums['Skipped']||0);
+                var lines = [];
+                lines.push('HW: Clear ' + hw_clear + ' / Det ' + hw_det);
+                lines.push('SW: Clear ' + sw_clear + ' / Det ' + sw_det);
+                if (skip > 0) lines.push('Skipped: ' + skip);
+                return lines.join('\n');
               }
             }
           }
@@ -2456,7 +2493,7 @@ function renderNfCards(channels) {
     var html = '';
     var idx = 0;
     Object.keys(allChIds).forEach(function(chId) {
-      var ch = channels[chId] || { clear: 0, detected: 0, skipped: 0, total: 0 };
+      var ch = channels[chId] || { clear: 0, detected: 0, skipped: 0, total: 0, hw_clear: 0, hw_detected: 0, sw_clear: 0, sw_detected: 0 };
       var txCad = txQueueCad[chId] || {};
       var rgb = cadGetColor(chId, idx);
       var color = 'rgb(' + rgb + ')';
@@ -2464,11 +2501,13 @@ function renderNfCards(channels) {
       var clearPct = total > 0 ? Math.round(ch.clear / total * 100) : 0;
       var detPct = total > 0 ? Math.round(ch.detected / total * 100) : 0;
       var statusIcon = (ch.detected || 0) > 0 ? '&#x1F534;' : '&#x1F7E2;';
+      var lastSrc = txCad.cad_last_source || '';
+      var srcBadge = lastSrc.indexOf('hardware') >= 0 ? '<span style="background:#22c55e;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;font-weight:600">HW</span>' : (lastSrc.indexOf('software') >= 0 ? '<span style="background:#f59e0b;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;font-weight:600">SW</span>' : '');
 
       html += '<div style="background:rgba(' + rgb + ',0.06);border:1px solid rgba(' + rgb + ',0.25);border-radius:10px;padding:10px">';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
       html += '<span style="font-weight:600;font-size:12px;color:' + color + '">' + (chFriendly[chId] || formatChannelName(chId)) + '</span>';
-      html += '<span style="font-size:11px">' + statusIcon + '</span>';
+      html += '<span style="font-size:11px;display:flex;gap:4px;align-items:center">' + srcBadge + ' ' + statusIcon + '</span>';
       html += '</div>';
       html += '<div style="font-size:11px;color:var(--txm);display:grid;grid-template-columns:1fr 1fr;gap:2px">';
       html += '<span>&#x2705; ' + (ch.clear||0) + ' (' + clearPct + '%)</span>';
@@ -2476,8 +2515,19 @@ function renderNfCards(channels) {
       html += '<span>&#x23E9; Skip: ' + (ch.skipped||0) + '</span>';
       html += '<span>Total: ' + total + '</span>';
       html += '</div>';
+      // HW/SW breakdown
+      var hwTotal = (ch.hw_clear||0) + (ch.hw_detected||0);
+      var swTotal = (ch.sw_clear||0) + (ch.sw_detected||0);
+      if (hwTotal > 0 || swTotal > 0) {
+        html += '<div style="font-size:10px;color:var(--txm);margin-top:4px;display:grid;grid-template-columns:1fr 1fr;gap:2px">';
+        html += '<span title="Hardware CAD (SX1261)">&#x1F4E1; HW: C:' + (ch.hw_clear||0) + ' D:' + (ch.hw_detected||0) + '</span>';
+        html += '<span title="Software CAD (pattern)">&#x1F4BB; SW: C:' + (ch.sw_clear||0) + ' D:' + (ch.sw_detected||0) + '</span>';
+        html += '</div>';
+      }
       if (txCad.cad_clear !== undefined) {
-        html += '<div style="font-size:10px;color:var(--txm);margin-top:4px;opacity:0.6">Cumulative: C:' + (txCad.cad_clear||0) + ' D:' + (txCad.cad_detected||0) + ' S:' + (txCad.cad_skipped||0) + '</div>';
+        html += '<div style="font-size:10px;color:var(--txm);margin-top:2px;opacity:0.5">Live: C:' + (txCad.cad_clear||0) + ' D:' + (txCad.cad_detected||0) + ' S:' + (txCad.cad_skipped||0);
+        html += ' (HW:' + ((txCad.cad_hw_clear||0)+(txCad.cad_hw_detected||0)) + ' SW:' + ((txCad.cad_sw_clear||0)+(txCad.cad_sw_detected||0)) + ')';
+        html += '</div>';
       }
       if (total > 0) {
         html += '<div style="margin-top:4px;height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;display:flex">';
