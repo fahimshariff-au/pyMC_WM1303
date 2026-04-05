@@ -209,7 +209,7 @@ Copies modified files from the `overlay/` directory on top of the cloned reposit
 
 | Overlay Source | Target | Files |
 |---------------|--------|-------|
-| `overlay/hal/` | `/home/pi/sx1302_hal/` | `loragw_hal.c`, `loragw_sx1302.c`, `loragw_sx1302.h`, `lora_pkt_fwd.c`, Makefiles |
+| `overlay/hal/` | `/home/pi/sx1302_hal/` | `loragw_hal.c`, `loragw_sx1302.c`, `loragw_sx1261.c`, `loragw_sx1302.h`, `loragw_sx1261.h`, `sx1261_defs.h`, `lora_pkt_fwd.c`, Makefiles |
 | `overlay/pymc_core/` | `/opt/pymc_repeater/repos/pyMC_core/` | `wm1303_backend.py`, `sx1302_hal.py`, `tx_queue.py`, `sx1261_driver.py`, `signal_utils.py`, `virtual_radio.py` |
 | `overlay/pymc_repeater/` | `/opt/pymc_repeater/repos/pyMC_Repeater/` | `bridge_engine.py`, `config_manager.py`, `engine.py`, `main.py`, `wm1303_api.py`, `wm1303.html`, and more |
 

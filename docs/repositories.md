@@ -83,7 +83,10 @@ During installation (`install.sh` Phase 4-5) or upgrade (`upgrade.sh` Phase 3-4)
    # HAL overlay (C source modifications)
    cp overlay/hal/libloragw/src/loragw_hal.c     → sx1302_hal/libloragw/src/
    cp overlay/hal/libloragw/src/loragw_sx1302.c   → sx1302_hal/libloragw/src/
+   cp overlay/hal/libloragw/src/loragw_sx1261.c   → sx1302_hal/libloragw/src/
    cp overlay/hal/libloragw/inc/loragw_sx1302.h   → sx1302_hal/libloragw/inc/
+   cp overlay/hal/libloragw/inc/loragw_sx1261.h   → sx1302_hal/libloragw/inc/
+   cp overlay/hal/libloragw/inc/sx1261_defs.h     → sx1302_hal/libloragw/inc/
    cp overlay/hal/packet_forwarder/src/lora_pkt_fwd.c → sx1302_hal/packet_forwarder/src/
    cp overlay/hal/libloragw/Makefile              → sx1302_hal/libloragw/
    cp overlay/hal/packet_forwarder/Makefile       → sx1302_hal/packet_forwarder/
@@ -126,13 +129,16 @@ overlay/
 │   ├── libloragw/
 │   │   ├── src/
 │   │   │   ├── loragw_hal.c          # Modified HAL main source
-│   │   │   └── loragw_sx1302.c       # Modified SX1302 driver
+│   │   │   ├── loragw_sx1302.c       # Modified SX1302 driver
+│   │   │   └── loragw_sx1261.c       # Modified SX1261 driver (CAD scan implementation)
 │   │   ├── inc/
-│   │   │   └── loragw_sx1302.h       # Modified SX1302 header
+│   │   │   ├── loragw_sx1302.h       # Modified SX1302 header
+│   │   │   ├── loragw_sx1261.h       # Modified SX1261 header (CAD scan declarations)
+│   │   │   └── sx1261_defs.h         # SX1261 register definitions and CAD opcodes
 │   │   └── Makefile                  # Modified build rules
 │   └── packet_forwarder/
 │       ├── src/
-│       │   └── lora_pkt_fwd.c        # Modified packet forwarder
+│       │   └── lora_pkt_fwd.c        # Modified packet forwarder (CAD integration)
 │       └── Makefile                  # Modified build rules
 ├── pymc_core/
 │   └── src/pymc_core/hardware/
