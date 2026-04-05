@@ -5,12 +5,12 @@
 # Updates the WM1303 installation with the latest code from the fork
 # repositories and re-applies overlay modifications.
 #
-# Usage: sudo bash upgrade.sh [--rebuild] [--force-config] [--skip-pull]
+# Usage: sudo bash upgrade.sh [--force-rebuild] [--force-config] [--skip-pull]
 #
 # Options:
-#   --rebuild       Force rebuild of HAL and packet forwarder
-#   --force-config  Overwrite existing config files with templates
-#   --skip-pull     Skip pulling from remote repositories
+#   --force-rebuild  Force rebuild of HAL and packet forwarder
+#   --force-config   Overwrite existing config files with templates
+#   --skip-pull      Skip pulling from remote repositories
 # =============================================================================
 
 set -euo pipefail
@@ -103,14 +103,14 @@ FORCE_CONFIG=false
 SKIP_PULL=false
 for arg in "$@"; do
     case "$arg" in
-        --rebuild)      FORCE_REBUILD=true ;;
+        --force-rebuild|--rebuild) FORCE_REBUILD=true ;;
         --force-config) FORCE_CONFIG=true ;;
         --skip-pull)    SKIP_PULL=true ;;
         --help|-h)
-            echo "Usage: sudo bash upgrade.sh [--rebuild] [--force-config] [--skip-pull]"
-            echo "  --rebuild       Force rebuild of HAL and packet forwarder"
-            echo "  --force-config  Overwrite existing config files with templates"
-            echo "  --skip-pull     Skip pulling from remote repositories"
+            echo "Usage: sudo bash upgrade.sh [--force-rebuild] [--force-config] [--skip-pull]"
+            echo "  --force-rebuild  Force rebuild of HAL and packet forwarder"
+            echo "  --force-config   Overwrite existing config files with templates"
+            echo "  --skip-pull      Skip pulling from remote repositories"
             exit 0
             ;;
     esac
@@ -407,7 +407,7 @@ if [ "$FORCE_REBUILD" = true ] || [ "$HAL_UPDATED" = true ] || [ "$HAL_OVERLAY_C
 
 else
     step "Skipping HAL rebuild (no changes detected)"
-    ok "Use --rebuild to force"
+    ok "Use --force-rebuild to force"
 fi
 
 # =============================================================================
