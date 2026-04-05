@@ -26,3 +26,4 @@ Thumbs.db
 *.o
 *.a
 *.so
+*.promptinclude.md
