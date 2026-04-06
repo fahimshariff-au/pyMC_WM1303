@@ -74,7 +74,7 @@ The system replaces the standard LoRaWAN packet forwarder stack with a custom in
 │  │         ▼                   ▼                                   │    │
 │  │  ┌──────────────────────────────────────────┐                   │    │
 │  │  │         VirtualLoRaRadio (per channel)   │                   │    │
-│  │  │  ch-1 (SF7) │ ch-2 (SF8) │ ch-3 │ ch-4   │                   │    │
+│  │  │  Channel A │ Channel B │ Channel C │ Channel D │                   │    │
 │  │  └──────────────────────┬───────────────────┘                   │    │
 │  └─────────────────────────┼───────────────────────────────────────┘    │
 │                            │                                            │
