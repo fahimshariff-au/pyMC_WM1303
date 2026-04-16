@@ -7,7 +7,7 @@
 
 ## Summary
 
-Version 2.0.1 is a patch release that adds **SPI optimizations from the SX1302 62.5 kHz Research project**, fixes the **spidev kernel buffer size configuration** for Debian Trixie compatibility, and adds **Channel E to all Spectrum tab charts**.
+Version 2.0.1 is a patch release that adds **SPI optimizations**, fixes the **spidev kernel buffer size configuration** for Debian Trixie compatibility, and adds **Channel E to all Spectrum tab charts**.
 
 ---
 
