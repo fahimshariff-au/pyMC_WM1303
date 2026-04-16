@@ -213,6 +213,20 @@ step "Verifying Python 3 version"
 PYTHON_VERSION=$(python3 --version 2>&1)
 ok "${PYTHON_VERSION}"
 
+step "Configuring passwordless sudo for ${PI_USER}"
+if [ ! -f /etc/sudoers.d/010_pi-nopasswd ]; then
+    echo "${PI_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/010_pi-nopasswd
+    chmod 440 /etc/sudoers.d/010_pi-nopasswd
+    ok "Configured"
+else
+    ok "Already configured"
+fi
+
+step "Adding ${PI_USER} to hardware access groups"
+usermod -aG spi,i2c,gpio,dialout ${PI_USER} 2>/dev/null || true
+ok "Done"
+
+
 # =============================================================================
 # Phase 2: SPI & I2C Configuration
 # =============================================================================
@@ -381,6 +395,9 @@ cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_hal.h"     "${HAL_DIR}/libloragw/inc
 cp "${OVERLAY_DIR}/hal/libloragw/inc/sx1261_defs.h"    "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/Makefile"             "${HAL_DIR}/libloragw/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/src/lora_pkt_fwd.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/packet_forwarder/src/capture_thread.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
+mkdir -p "${HAL_DIR}/packet_forwarder/inc" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/packet_forwarder/inc/capture_thread.h" "${HAL_DIR}/packet_forwarder/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/Makefile"      "${HAL_DIR}/packet_forwarder/" >> "${LOG_FILE}" 2>&1
 ok "HAL overlay applied"
 

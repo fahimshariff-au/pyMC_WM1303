@@ -287,6 +287,9 @@ cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_hal.h"     "${HAL_DIR}/libloragw/inc
 cp "${OVERLAY_DIR}/hal/libloragw/inc/sx1261_defs.h"    "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/Makefile"             "${HAL_DIR}/libloragw/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/src/lora_pkt_fwd.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/packet_forwarder/src/capture_thread.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
+mkdir -p "${HAL_DIR}/packet_forwarder/inc" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/packet_forwarder/inc/capture_thread.h" "${HAL_DIR}/packet_forwarder/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/Makefile"      "${HAL_DIR}/packet_forwarder/" >> "${LOG_FILE}" 2>&1
 ok "HAL overlay applied"
 
@@ -352,6 +355,8 @@ for overlay_file in \
     "libloragw/inc/sx1261_defs.h" \
     "libloragw/Makefile" \
     "packet_forwarder/src/lora_pkt_fwd.c" \
+    "packet_forwarder/src/capture_thread.c" \
+    "packet_forwarder/inc/capture_thread.h" \
     "packet_forwarder/Makefile"; do
     src="${OVERLAY_DIR}/hal/${overlay_file}"
     dst="${HAL_DIR}/${overlay_file}"

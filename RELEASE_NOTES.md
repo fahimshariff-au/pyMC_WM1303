@@ -90,6 +90,12 @@ This rename applies to:
 ### Spectrum Tab Chain Count
 - **Fixed:** The Spectrum tab incorrectly displayed "10 chains" instead of the actual number of active chains.
 
+### Missing Capture Thread Files
+- **Fixed:** HAL compilation failed on fresh installations because `capture_thread.c` and `capture_thread.h` were missing from the overlay. These files (for the CAPTURE_RAM streaming feature) have been added to the overlay and are now correctly copied during installation and upgrades.
+
+### Missing Sudoers Configuration
+- **Fixed:** After installation and reboot, the systemd service failed to execute `sudo` commands (GPIO reset, pkt_fwd) because the `pi` user lacked passwordless sudo privileges. The install script now creates `/etc/sudoers.d/010_pi-nopasswd` and adds the `pi` user to hardware groups (spi, i2c, gpio, dialout).
+
 ---
 
 ## UI Improvements
@@ -127,6 +133,8 @@ Updated overlay files for the SX1302 HAL (v2.10):
 
 ### New Files
 - `overlay/pymc_repeater/repeater/channel_e_bridge.py` — Channel E bridge module
+- `overlay/hal/packet_forwarder/src/capture_thread.c` — CAPTURE_RAM streaming thread
+- `overlay/hal/packet_forwarder/inc/capture_thread.h` — Capture thread header
 
 ### Modified Overlay Files
 - `overlay/hal/libloragw/src/loragw_hal.c`
@@ -146,8 +154,8 @@ Updated overlay files for the SX1302 HAL (v2.10):
 - `config/power_cycle_lgw.sh` — Updated power cycle script
 
 ### Modified Scripts
-- `install.sh` — Added Channel E overlay support, fixed HAL overlay (added `loragw_hal.h`)
-- `upgrade.sh` — Added Channel E overlay support, added `loragw_hal.h` to checksum list
+- `install.sh` — Added Channel E overlay support, fixed HAL overlay (added `loragw_hal.h`), added capture_thread overlay copies, added sudoers NOPASSWD configuration and hardware group membership (spi, i2c, gpio, dialout) for the pi user
+- `upgrade.sh` — Added Channel E overlay support, added `loragw_hal.h` to checksum list, added capture_thread overlay copies and file comparison entries
 
 ---
 
