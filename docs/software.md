@@ -1,458 +1,102 @@
 # Software Components
 
-> Backend architecture, pyMC modifications, and key subsystems
-
 ## Overview
 
-The software stack consists of two main Python packages with custom modifications (overlays) applied during installation:
+The WM1303 software stack combines modified upstream projects with this repository's overlay files, scripts, config, and documentation.
 
-- **pyMC_core** (dev branch) — MeshCore core library with WM1303-specific hardware drivers
-- **pyMC_Repeater** (dev branch) — MeshCore repeater application with bridge engine and web UI
+The current implementation supports a **5-channel runtime model** and includes dedicated handling for **Channel E / SX1261** behavior.
 
-Both run inside a Python virtual environment at `/opt/pymc_repeater/venv/` and are managed as a single systemd service (`pymc-repeater`).
+## Main backend components
 
-## pyMC_core Modifications
+| Component | Location | Role |
+|---|---|---|
+| `wm1303_backend.py` | overlay/pymc_core | Main backend coordinator |
+| `virtual_radio.py` | overlay/pymc_core | Per-channel radio abstraction |
+| `tx_queue.py` | overlay/pymc_core | Per-channel queued TX logic |
+| `bridge_engine.py` | overlay/pymc_repeater | Cross-channel routing and dedup |
+| `channel_e_bridge.py` | overlay/pymc_repeater | Channel E repeater-side integration |
+| `wm1303_api.py` | overlay/pymc_repeater | WM1303 REST API |
+| `spectrum_collector.py` | overlay/pymc_repeater | Spectrum/UI data collection |
+| `cad_calibration_engine.py` | overlay/pymc_repeater | CAD calibration support |
 
-The following files are added or modified in `pymc_core/hardware/` via overlay:
+## WM1303Backend
 
-### WM1303Backend (`wm1303_backend.py`)
+`WM1303Backend` is the core coordinator between Python, the packet forwarder, and the radio abstractions.
 
-The central backend component (~112 KB, largest file in the system). It manages all hardware interaction and serves as the bridge between the packet forwarder and the Python application.
+It is responsible for:
 
-**Key responsibilities:**
+- UDP handling towards `lora_pkt_fwd`
+- RX dispatch to logical channels
+- TX emission back to the forwarder
+- watchdog and runtime health logic
+- noise-floor collection integration
+- bridge-related packet entry/exit points
+- channel-specific runtime state
 
-| Function | Description |
-|----------|-------------|
-| Packet forwarder management | Start/stop/restart `lora_pkt_fwd` process |
-| UDP protocol handling | Parse PUSH_DATA (RX), send PULL_RESP (TX), handle TX_ACK. Auto-recovery via `_recreate_socket()` with retry on OSError |
-| Channel dispatch | Map received packets to channels via frequency + spreading factor matching |
-| Channel sourcing (`get_radios()`) | Read channel definitions primarily from `wm1303_ui.json` (SSOT); fall back to `config.yaml` only when no active SSOT channels exist |
-| Configuration sync | Generate `global_conf.json` and `bridge_conf.json` from SSOT. `_sync_config_yaml_channels()` syncs active channels to `config.yaml` on every save |
-| NoiseFloorMonitor | Periodic noise floor measurement via SX1261 spectral scan, with 3rd fallback using RX packets (RSSI−SNR). Per-channel noise floor stats from `_channel_noise_floors` dict with direct `channel_id` → UI name mapping |
-| RX Watchdog | 3-mode detection of RX failures with auto-recovery |
-| Statistics | Track per-channel RX/TX counts, RSSI, SNR, timing |
-| Database logging | Store channel stats history in SQLite for metrics/charts |
-| Self-echo detection | Discard own TX packets heard back on RX |
-| SSOT enforcement | `_channels_live_get()`, `_get_ui_channel_id_map()`, and `_tx_queues_get()` all read from `wm1303_ui.json` (SSOT) instead of `config.yaml` |
-| Version reporting | VERSION file with semantic versioning; exposed via `/api/wm1303/version` endpoint |
+## NoiseFloorMonitor
 
-**RF0-TX Architecture:**
+The current behavior is:
 
-The TX path uses an **async-native** design built on `asyncio.Lock` and `asyncio.sleep`. Earlier versions used `threading` with `run_in_executor` calls, which could cause zombie-thread deadlocks under sustained load. The refactor eliminates all thread-based TX operations, resulting in a fully cooperative async pipeline:
+- startup stabilization delay before first collection
+- periodic update every **30 seconds**
+- retry behavior for TX-free harvesting windows
+- no routine pausing of TX queues
+- persistence of history for API/UI use
 
-```python
-"""RF0-TX Architecture (async-native, no threading):
-  - SX1250_0 (RF0): RX + TX via SKY66420 FEM (PA + LNA + RF Switch)
-  - SX1250_1 (RF1): RX only (no PA, SAW filter path)
-  - IF chains 0-2 on RF0 for RX
-  - TX via PULL_RESP to lora_pkt_fwd -> HAL routes to RF0 (tx_enable=true)
-  - Direct TX: no stop/start cycle needed (RF0 has proper FEM for TX/RX switching)
-  - Self-echo detection discards own TX heard back on RX
-  - Per-channel TX queues serialize transmissions
-  - All TX locks and delays are asyncio-native (no run_in_executor)
-"""
-```
+## Metrics and persistence
 
-### SX1302HAL (`sx1302_hal.py`)
+Runtime metrics are not only kept in memory.
 
-Minimal Python ctypes wrapper for the libloragw shared library. Provides type definitions and function signatures for direct HAL access when needed. In normal operation, the packet forwarder handles HAL interaction; this module is used for diagnostics and configuration validation.
+Important persisted data includes:
 
-### TXQueue (`tx_queue.py`)
+- `noise_floor_history`
+- CAD-related events/history
+- bridge/dedup related runtime data
+- per-channel counters and snapshots
 
-Per-channel TX queue system with sophisticated flow control. See [TX Queue & Scheduling](tx_queue.md) for complete details.
+This persistence is important because several charts and API endpoints now read from the database-backed history instead of relying only on temporary in-memory buffers.
 
-**Key classes:**
+## Per-channel mapping
 
-| Class | Purpose |
-|-------|----------|
-| `ChannelTXQueue` | Per-channel queue with LBT/CAD checks, TTL, overflow management |
-| `TXQueueManager` | Manages all channel queues, provides unified statistics |
-| `GlobalTXScheduler` | Round-robin TX scheduling across channels with inter-packet gap |
+The software uses **channel ID keyed state** for important metrics, especially noise-floor and related chart data.
 
-**Queue parameters:**
+This prevents collisions when channels use:
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| Max queue size | 15 | Per channel (reduced from 50 to prevent overflow) |
-| TTL | 5 seconds | Packets older than 5s are dropped |
-| Overflow policy | Drop oldest | Oldest packet removed when queue is full |
-| Processing order | FIFO | First In, First Out |
-| Inter-packet gap | 50 ms | Minimum time between consecutive TX events |
+- the same frequency
+- different spreading factors
+- shared frontend/radio assumptions
 
-### SX1261Driver (`sx1261_driver.py`)
+## Channel E integration
 
-Driver for the SX1261 companion chip (~33 KB). Handles:
+Channel E is not just a note in the hardware layer anymore. The software stack includes explicit Channel E handling in:
 
-- SPI communication via spidev0.1
-- Spectral scan configuration and execution
-- RSSI point measurements for LBT
-- CAD (Channel Activity Detection) mode
-- Frequency and bandwidth configuration
-- Results parsing and per-channel mapping
+- backend radio behavior
+- repeater integration
+- UI/API exposure
+- spectrum and signal-quality presentation
 
-The SX1261 operates independently of the SX1302, allowing spectral analysis while the main concentrator continues RX/TX operations.
+## API and UI integration
 
-### SignalUtils (`signal_utils.py`)
+The software stack exposes WM1303-specific capabilities through:
 
-Utility module for signal processing:
+- `/api/wm1303/*`
+- WebSocket/live refresh paths
+- `wm1303.html`
+- integration into the existing pyMC repeater web server
 
-- RSSI averaging and filtering
-- SNR calculation helpers
-- dBm conversion functions
-- Rolling buffer statistics
+## SSOT behavior
 
-### VirtualLoRaRadio (`virtual_radio.py`)
+The effective operational source of truth for WM1303-specific UI/runtime state is:
 
-Abstraction layer that presents each configured channel as an independent "virtual radio" to the pyMC_core framework.
+- **`/etc/pymc_repeater/wm1303_ui.json`** at runtime
+- `config/wm1303_ui.json` as repository-managed source material
 
-**Concept:** The SX1302 concentrator is a single physical radio, but MeshCore expects each channel to behave like a separate radio interface. VirtualLoRaRadio bridges this gap:
+Save paths synchronize required channel/runtime data into `config.yaml` where compatibility with repeater startup requires it.
 
-```
-Physical Reality:          Virtual Abstraction:
-┌──────────────┐           ┌──────────────┐
-│   SX1302     │           │ VirtualRadio │  ← Channel A (SF8, 869.461 MHz)
-│  + SX1250_0  │    →      │ VirtualRadio │  ← Channel B (SF7, 869.588 MHz)
-│  + SX1250_1  │           │ VirtualRadio │  ← Channel D (SF7, 869.300 MHz)
-└──────────────┘           └──────────────┘
-```
+## Related documents
 
-Each VirtualLoRaRadio instance:
-- Has its own RX callback for received packets
-- Routes TX through the backend's UDP interface
-- Maintains per-channel statistics
-- Maps to a specific IF chain in the SX1302
-
-## pyMC_Repeater Modifications
-
-The following files are added or modified in the `repeater/` directory:
-
-### BridgeEngine (`bridge_engine.py`)
-
-Cross-channel packet bridge with rule-based forwarding and deduplication.
-
-**Packet processing flow:**
-
-1. **RX event** received from a VirtualLoRaRadio
-2. **Dedup check** — hash of packet payload compared against recently seen packets
-3. **Bridge rules evaluation** — which rules match this source channel?
-4. **Packet-type filtering** — per-rule filtering based on MeshCore header:
-   - Route types: TFLOOD, FLOOD, DIRECT, TDIRECT
-   - Payload types: REQ, RESP, TXT, ACK, ADVERT, GRP_TXT, etc.
-5. **Repeater handler** — MeshCore-specific processing:
-   - Hop count incremented by 1
-   - Path bytes updated
-   - Packet size adjusted
-6. **TX batch window** (2 seconds) — all target channels queued simultaneously
-7. **Fire sends** — concurrent TX to all target channel TX queues
-
-**Additional processing:**
-
-- **ADVERT neighbor tracking** — When a packet of type ADVERT (0x04) is received, the bridge engine extracts the sender information and logs it to the `adverts` table in SQLite. This provides a neighbor discovery mechanism, tracking which MeshCore nodes are visible on each channel.
-- **Packet logging** — All bridged packets (source channel, target channel, RSSI, SNR, payload type, timestamp) are stored in the `packets` table in SQLite. This data powers the recent packets API (`/api/recent_packets`) and the dashboard packet display.
-
-
-**MeshCore header parsing:**
-
-```
-Byte 0: [VER(2 bits) | TYPE(4 bits) | ROUTE(2 bits)]
-  bits 0-1  = route type (TFLOOD=0, FLOOD=1, DIRECT=2, TDIRECT=3)
-  bits 2-5  = payload type (REQ=0, RESP=1, TXT=2, ACK=3, ADVERT=4, ...)
-  bits 6-7  = protocol version
-```
-
-### ConfigManager (`config_manager.py`)
-
-Manages configuration loading, validation, and synchronization:
-
-- Loads `config.yaml` for service settings
-- Loads `wm1303_ui.json` for channel/bridge SSOT
-- 5-second cache TTL for hot-reload without restart
-- Validates configuration consistency
-- Generates derived configs (`global_conf.json`, `bridge_conf.json`)
-
-### Engine (`engine.py`)
-
-Core repeater engine modifications:
-
-- Integration with WM1303Backend as hardware driver
-- VirtualLoRaRadio instantiation per channel
-- Bridge Engine initialization and lifecycle management
-- Graceful shutdown handling
-
-### PacketRouter (`packet_router.py`)
-
-Packet routing between the repeater engine and the bridge:
-
-- Routes RX packets to the bridge engine
-- Handles MeshCore protocol specifics (route types, path tracking)
-- Manages the node identity for the repeater
-
-### IdentityManager (`identity_manager.py`)
-
-Manages the repeater's MeshCore node identity:
-
-- Auto-generates identity key on first run
-- Stores in `config.yaml` (persisted across restarts)
-- Provides the repeater's node name and address
-- Handles JWT token generation for API authentication
-
-### Additional Components
-
-| File | Purpose |
-|------|----------|
-| `main.py` | Application entry point — argument parsing, service initialization |
-| `config.py` | Configuration data classes and defaults |
-| `data_acquisition/sqlite_handler.py` | SQLite database handler for metrics storage |
-| `data_acquisition/storage_collector.py` | Background data collection for statistics |
-| `web/http_server.py` | HTTP and WebSocket server (port 8000) |
-| `web/wm1303_api.py` | REST API endpoints for WM1303 Manager |
-| `web/spectrum_collector.py` | Spectral scan data collection and processing |
-| `web/cad_calibration_engine.py` | CAD threshold calibration logic |
-| `web/html/wm1303.html` | WM1303 Manager UI (single-page application) |
-
-## WM1303 Backend — Role and Integration
-
-The WM1303 Backend serves as the integration layer between three components:
-
-```
-┌─────────────────┐     ┌────────────────┐     ┌──────────────────┐
-│  lora_pkt_fwd   │◄───►│ WM1303 Backend │◄───►│  pyMC_Repeater   │
-│  (C binary)     │ UDP │ (Python)       │     │  (Python)        │
-│                 │     │                │     │                  │
-│  HAL → Radio    │     │  UDP handler   │     │  Bridge Engine   │
-│  Spectral scan  │     │  Channel mgmt  │     │  Packet Router   │
-│  TX/RX          │     │  Noise floor   │     │  Config Manager  │
-│                 │     │  RX Watchdog   │     │  Web UI/API      │
-└─────────────────┘     └────────────────┘     └──────────────────┘
-```
-
-The Backend:
-1. **Starts** the packet forwarder as a subprocess
-2. **Listens** on UDP port 1730 for PUSH_DATA (RX packets)
-3. **Parses** the JSON payload and dispatches to the correct VirtualLoRaRadio
-4. **Sends** PULL_RESP (TX packets) when the bridge engine decides to forward
-5. **Monitors** the radio health via the RX Watchdog
-6. **Manages** noise floor measurements via the NoiseFloorMonitor
-
-## TX/RX Echo Prevention
-
-When the bridge forwards a packet from Channel A to Channel B, the transmitted packet on Channel B could be received back by the SX1302 ("self-echo"). This would create an infinite forwarding loop.
-
-**Prevention mechanism:**
-
-1. Before TX, compute SHA-256 hash of the packet payload
-2. Store hash in a "self-echo" set with timestamp
-3. When RX receives a packet, compute its hash
-4. If hash matches a recent self-echo entry → discard (it is our own TX)
-5. Self-echo entries expire after the dedup TTL window
-
-This is separate from the bridge dedup system, which prevents external duplicate packets from being forwarded multiple times.
-
-## Bridge Rules (SSOT)
-
-Bridge rules define which channels forward packets to which other channels. They are stored in `wm1303_ui.json` as the Single Source of Truth.
-
-### Rule Structure
-
-```json
-{
-    "bridge": {
-        "rules": [
-            {
-                "id": "r1774374816452",
-                "source": "channel_a",
-                "handler": "repeater",
-                "target": "channel_a",
-                "packet_types": ["all"]
-            },
-            {
-                "id": "r1774374817571",
-                "source": "channel_a",
-                "handler": "repeater",
-                "target": "channel_d",
-                "packet_types": ["FLOOD", "TFLOOD", "ADVERT"]
-            }
-        ]
-    }
-}
-```
-
-### Rule Fields
-
-| Field | Description |
-|-------|-------------|
-| `id` | Unique rule identifier (auto-generated) |
-| `source` | Source channel for matching RX packets |
-| `handler` | Processing mode — `repeater` (modify hop/path) or `direct` (pass-through) |
-| `target` | Destination channel for TX |
-| `packet_types` | Which MeshCore packet types to forward (`all` or specific list) |
-
-### Packet Type Selection
-
-Each rule can filter by MeshCore packet types:
-
-| Type | Code | Description |
-|------|------|-------------|
-| REQ | 0 | Request |
-| RESP | 1 | Response |
-| TXT | 2 | Text message |
-| ACK | 3 | Acknowledgment |
-| ADVERT | 4 | Node advertisement |
-| GRP_TXT | 5 | Group text |
-| GRP_DATA | 6 | Group data |
-| ANON | 7 | Anonymous |
-| PATH | 8 | Path discovery |
-| TRACE | 9 | Route trace |
-| MULTI | 10 | Multi-part |
-| CTRL | 11 | Control |
-| RAW | 15 | Raw data |
-
-## Deduplication System
-
-The dedup system prevents the same packet from being forwarded multiple times:
-
-1. **Hash computation:** SHA-256 of the full packet payload
-2. **Dedup window:** Configurable TTL (default 300 seconds in config.yaml)
-3. **Hash storage:** In-memory dictionary with timestamps
-4. **Check:** Before forwarding, check if hash exists in the dedup store
-5. **Expiry:** Old entries are periodically cleaned up
-6. **Statistics:** Dedup events are logged to SQLite for the dedup chart
-
-The dedup system was refined multiple times during development:
-- Initially too broad (rejected legitimate similar packets)
-- Then too narrow (missed actual duplicates)
-- Final tuning balances sensitivity with false positive prevention
-
-## Watchdog System (3-Mode Detection)
-
-The RX Watchdog continuously monitors radio health:
-
-| Detection Mode | Trigger Condition | Action |
-|---------------|-------------------|--------|
-| **PUSH_DATA statistics** | 2 consecutive intervals with `rxnb=0` while TX is active (~60s) | Restart packet forwarder |
-| **RSSI spike detection** | 5+ strong signals received but no successful RX decode (~60s) | Restart packet forwarder |
-| **RX timeout** | No RX packet received for 180 seconds | Restart packet forwarder |
-
-When triggered, the watchdog:
-1. Logs the detection event
-2. Stops the packet forwarder process
-3. Executes the GPIO reset script
-4. Restarts the packet forwarder
-5. Clears internal counters
-
-## Database Logging
-
-The system uses SQLite (`/var/lib/pymc_repeater/repeater.db`) for persistent data storage:
-
-| Table | Purpose |
-|-------|----------|
-| `packets` | Bridged packet log — source/target channel, RSSI, SNR, payload type. Powers the recent packets API and dashboard |
-| `adverts` | ADVERT packet tracking — neighbor node advertisements with sender info and timestamps |
-| `noise_floor` | Noise floor measurements from the SX1261 spectral scan (timestamp + dBm) |
-| `crc_errors` | CRC error event log with timestamps and counts |
-| `dedup_events` | Deduplication events for the dedup chart |
-| `noise_floor_history` | Per-channel noise floor history — powers the `signal_quality` API and noise floor trend charts |
-| `cad_events` | CAD event log with HW/SW breakdown — `hw_clear`, `hw_detected`, `sw_clear`, `sw_detected`, `skipped` counts per minute per channel |
-| `transport_keys` | Transport encryption key storage |
-| `api_tokens` | API authentication token storage |
-
-Data is used for:
-- Dashboard charts and graphs in the WM1303 Manager UI
-- Recent bridged packets display via `/api/recent_packets`
-- Noise floor history charts via `/api/wm1303/noise_floor_history`
-- Historical trend analysis
-- Signal quality monitoring over time
-- LBT/CAD decision visualization
-
-## JWT Token Authentication
-
-The pyMC_Repeater generates a JWT (JSON Web Token) secret on first run, stored in `config.yaml`:
-
-```yaml
-repeater:
-  security:
-    jwt_secret: <auto-generated>
-    jwt_expiry_minutes: 10080  # 7 days
-    admin_password: <set during install or auto-generated>
-```
-
-The JWT token is used for:
-- Authenticating REST API requests
-- WM1303 Manager UI login
-- Protecting configuration changes
-
-During installation, the JWT secret from the pyMC_Repeater setup is linked into the WM1303 configuration to enable seamless authentication between components.
-
----
-
-## Async TX Refactor
-
-The TX path was refactored from a `threading`-based design to a fully **async-native** architecture using `asyncio.Lock` and `asyncio.sleep`. The previous implementation used `run_in_executor` to bridge blocking thread operations into the async event loop, which under sustained TX load could leave zombie threads and cause deadlocks.
-
-Key changes:
-- All TX locking uses `asyncio.Lock` (no `threading.Lock`)
-- All TX delays use `asyncio.sleep` (no `time.sleep` in executor)
-- No `run_in_executor` calls remain in the TX pipeline
-- The `GlobalTXScheduler` round-robin loop is a native coroutine
-- UDP socket `sendto()` for PULL_RESP is non-blocking within the async context
-
-This eliminates an entire class of concurrency bugs and improves TX latency predictability.
-
-## UDP Socket Auto-Recovery
-
-The UDP socket used for packet forwarder communication (`PUSH_DATA` / `PULL_RESP`) now includes automatic recovery via `_recreate_socket()`:
-
-1. If any UDP `sendto()` or `recvfrom()` raises `OSError` (e.g., network interface reset, buffer overflow), the error is caught
-2. The existing socket is closed
-3. A new UDP socket is created and bound to the same port
-4. A configurable retry delay prevents tight reconnection loops
-5. Normal operation resumes transparently
-
-This prevents the service from entering a permanent failure state when transient network errors occur.
-
-## SSOT Consolidation
-
-Several internal methods were refactored to read exclusively from `wm1303_ui.json` (the Single Source of Truth) instead of `config.yaml`:
-
-| Method | Change |
-|--------|--------|
-| `_channels_live_get()` | Now reads channel definitions from SSOT instead of config.yaml |
-| `_get_ui_channel_id_map()` | Builds channel ID → UI name mapping from SSOT |
-| `_tx_queues_get()` | Reads channel config (frequency, SF, BW) from SSOT for TX queue initialization |
-| `_sync_config_yaml_channels()` | New method — syncs active SSOT channels back to config.yaml on every save, keeping config.yaml as a readable fallback |
-
-Additionally, stale overlay duplicates were removed:
-- Old `wm1303_api.py` overlay (superseded by the current version)
-- Old `wm1303.html` overlay (superseded by the current version)
-
-This ensures a single code path for channel configuration, eliminating subtle bugs caused by config.yaml and SSOT divergence.
-
-## Noise Floor Pipeline
-
-The noise floor measurement system was enhanced with multiple estimation sources and per-channel granularity:
-
-**Three-tier estimation:**
-
-1. **Primary** — SX1261 spectral scan (direct RSSI measurement at channel frequency)
-2. **Secondary** — SX1261 RSSI point measurement (single-frequency read)
-3. **Tertiary (new)** — RX packet estimation using `RSSI − SNR` from received packets. When no spectral scan or RSSI data is available, recent RX packets provide a noise floor approximation
-
-**Per-channel improvements:**
-
-- Noise floor stats stored in `_channel_noise_floors` dictionary, keyed by internal channel ID
-- Direct `channel_id` → UI name mapping fixes noise floor attribution for channels on the same frequency but different spreading factors
-- The `signal_quality` API now reads from the `noise_floor_history` database table instead of in-memory buffers, providing persistent historical data
-- Per-channel noise floor values are exposed in the status API and WebSocket push events
-
-## Version Tracking
-
-The system includes semantic versioning via a `VERSION` file:
-
-- **VERSION file** at the repository root (e.g., `0.10.5`)
-- Copied to `/etc/pymc_repeater/version` during install/upgrade
-- Exposed via the `/api/wm1303/version` REST endpoint
-- Displayed in the WM1303 Manager UI header
-- Format: `MAJOR.MINOR.PATCH` following semantic versioning conventions
-
-
-*See also: [TX Queue & Scheduling](tx_queue.md) | [WM1303 API](api.md) | [WM1303 Manager UI](ui.md)*
+- [`architecture.md`](./architecture.md)
+- [`configuration.md`](./configuration.md)
+- [`api.md`](./api.md)
+- [`ui.md`](./ui.md)
+- [`channel_e_sx1261.md`](./channel_e_sx1261.md)

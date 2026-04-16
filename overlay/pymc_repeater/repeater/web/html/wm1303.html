@@ -137,6 +137,12 @@ select.ci option{background:#1e293b}
       </div>
     </div>
   </div>
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+    <div class="gl p-3"><div class="text-xs mb-1" style="color:var(--txm)">Pi Model</div><div id="pi-model" class="font-semibold text-xs" style="word-break:break-word">&mdash;</div></div>
+    <div class="gl p-3"><div class="text-xs mb-1" style="color:var(--txm)">Memory</div><div id="pi-mem" class="font-semibold text-sm">&mdash;</div></div>
+    <div class="gl p-3"><div class="text-xs mb-1" style="color:var(--txm)">CPU</div><div id="pi-cpu" class="font-semibold text-sm">&mdash;</div></div>
+    <div class="gl p-3"><div class="text-xs mb-1" style="color:var(--txm)">Disk</div><div id="pi-disk" class="font-semibold text-sm">&mdash;</div></div>
+  </div>
   <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
     <div class="gl p-4 text-center"><div class="text-3xl font-bold" style="color:#818cf8" id="st-rx">0</div><div class="text-xs mt-1" style="color:var(--txm)">Packets RX</div></div>
     <div class="gl p-4 text-center"><div class="text-3xl font-bold" style="color:#34d399" id="st-tx">0</div><div class="text-xs mt-1" style="color:var(--txm)">Packets TX</div></div>
@@ -705,7 +711,13 @@ async function loadStatus(){
     txt('st-rx',rx.toLocaleString());txt('st-tx',tx.toLocaleString());var hv=G('hdr-version');if(hv&&d.version)hv.textContent='v'+d.version;
     txt('st-ch',d.active_channels??d.channels??0);
     txt('st-free', (d.total_channels||4) - (d.active_channels||0));
-  const nst=run?'running':'stopped';if(window._lss&&window._lss!==nst){toast('Service status changed: '+nst.toUpperCase(),'in');}window._lss=nst;
+    // ── Pi hardware info ──
+    var pi=d.pi_info||{};
+    txt('pi-model',pi.model||'—');
+    if(pi.mem_used_mb!=null&&pi.mem_total_mb!=null){var mp=Math.round(pi.mem_used_mb/pi.mem_total_mb*100);txt('pi-mem',pi.mem_used_mb+'MB / '+pi.mem_total_mb+'MB ('+mp+'%)');}else{txt('pi-mem','—');}
+    var cpuParts=[];if(pi.cpu_temp!=null)cpuParts.push(pi.cpu_temp.toFixed(1)+'°C');if(pi.cpu_usage!=null)cpuParts.push(pi.cpu_usage+'%');txt('pi-cpu',cpuParts.length?cpuParts.join(' / '):'—');
+    if(pi.disk_used_gb!=null&&pi.disk_total_gb!=null){var dp=Math.round(pi.disk_used_gb/pi.disk_total_gb*100);txt('pi-disk',pi.disk_used_gb+'GB / '+pi.disk_total_gb+'GB ('+dp+'%)');}else{txt('pi-disk','—');}
+    const nst=run?'running':'stopped';if(window._lss&&window._lss!==nst){toast('Service status changed: '+nst.toUpperCase(),'in');}window._lss=nst;
   }catch(e){console.error('Status:',e.message);if(!badgeSet){const sb=G('svc-bdg');if(sb){sb.className='bdg ber-b';sb.innerHTML='<span class=\"dot der\"></span>&nbsp;Error';}}setBdg('svc-pkt',false);setBdg('svc-rep',null);}
 }
 async function svcCtrl(a){
@@ -2136,6 +2148,13 @@ function setSigHours(h) {
 
 async function loadSignalData() {
   if (typeof Chart === 'undefined') { console.warn('Chart.js not loaded'); return; }
+  // Ensure channel data is loaded for friendly name resolution in all charts
+  if (!chData || !chData.length) {
+    try { var _cr = await fetch('/api/wm1303/channels'); var _cj = await _cr.json(); chData = Array.isArray(_cj) ? _cj : (_cj.channels || []); } catch(e) {}
+  }
+  if (!cheData || !cheData.frequency) {
+    try { cheData = await (await fetch('/api/wm1303/channel_e')).json(); } catch(e) {}
+  }
   await Promise.all([loadSignalQuality(), loadNoiseFloor(), loadLbtHistory(), loadTxActivity(), loadPerChannelNF(), cadChartLoad()]);
 }
 
@@ -2553,6 +2572,13 @@ function renderNfCards(channels) {
 
   window.cadChartLoad = async function() {
     try {
+      // Ensure channel data is loaded for friendly name resolution
+      if (!chData || !chData.length) {
+        try { var _cr = await fetch('/api/wm1303/channels'); var _cj = await _cr.json(); chData = Array.isArray(_cj) ? _cj : (_cj.channels || []); } catch(e) {}
+      }
+      if (!cheData || !cheData.frequency) {
+        try { cheData = await (await fetch('/api/wm1303/channel_e')).json(); } catch(e) {}
+      }
       var resp = await fetch("/api/wm1303/cad_stats?range=" + cadRange);
       var data = await resp.json();
       cadChartRender(data);
@@ -2610,7 +2636,16 @@ function renderNfCards(channels) {
     var chFriendly = {};
     try {
       if (typeof chData !== 'undefined' && chData) {
-        chData.forEach(function(c) { chFriendly[c.name] = c.name || c.friendly_name; });
+        var _aidx = 0;
+        chData.forEach(function(c) {
+          if (c.active !== false) {
+            chFriendly['channel_' + String.fromCharCode(97 + _aidx)] = c.name || c.friendly_name || ('Channel ' + String.fromCharCode(65 + _aidx));
+            _aidx++;
+          }
+        });
+      }
+      if (typeof cheData !== 'undefined' && cheData) {
+        chFriendly['channel_e'] = cheData.name || cheData.friendly_name || 'Channel E';
       }
     } catch(e) {}
 
@@ -2744,7 +2779,16 @@ function renderNfCards(channels) {
     var chFriendly = {};
     try {
       if (typeof chData !== 'undefined' && chData) {
-        chData.forEach(function(c) { chFriendly[c.name] = c.name || c.friendly_name; });
+        var _aidx = 0;
+        chData.forEach(function(c) {
+          if (c.active !== false) {
+            chFriendly['channel_' + String.fromCharCode(97 + _aidx)] = c.name || c.friendly_name || ('Channel ' + String.fromCharCode(65 + _aidx));
+            _aidx++;
+          }
+        });
+      }
+      if (typeof cheData !== 'undefined' && cheData) {
+        chFriendly['channel_e'] = cheData.name || cheData.friendly_name || 'Channel E';
       }
     } catch(e) {}
 

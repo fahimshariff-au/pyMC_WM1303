@@ -817,6 +817,73 @@ class WM1303API:
         _total_ch = 4 + 1  # 4 hardware IF slots (A-D) + Channel E always exists
         _active_ch = _if_active + _che_active
         _inactive_ch = _total_ch - _active_ch
+        # ── Raspberry Pi system info ──────────────────────────
+        _pi_info = {}
+        try:
+            # Pi Model
+            try:
+                with open('/proc/device-tree/model') as _mf:
+                    _pi_info['model'] = _mf.read().strip().rstrip('\x00')
+            except Exception:
+                try:
+                    with open('/proc/cpuinfo') as _cf:
+                        for _cl in _cf:
+                            if _cl.startswith('Model'):
+                                _pi_info['model'] = _cl.split(':', 1)[1].strip()
+                                break
+                except Exception:
+                    _pi_info['model'] = None
+            # Memory: MemTotal and MemAvailable from /proc/meminfo
+            try:
+                _mem_total = 0
+                _mem_avail = 0
+                with open('/proc/meminfo') as _mif:
+                    for _ml in _mif:
+                        if _ml.startswith('MemTotal:'):
+                            _mem_total = int(_ml.split()[1])  # kB
+                        elif _ml.startswith('MemAvailable:'):
+                            _mem_avail = int(_ml.split()[1])  # kB
+                _mem_used = _mem_total - _mem_avail
+                _pi_info['mem_total_mb'] = round(_mem_total / 1024)
+                _pi_info['mem_used_mb'] = round(_mem_used / 1024)
+            except Exception:
+                _pi_info['mem_total_mb'] = None
+                _pi_info['mem_used_mb'] = None
+            # CPU temperature (already read above as 'temperature', reuse)
+            _pi_info['cpu_temp'] = temperature
+            # CPU usage from /proc/stat (instant snapshot)
+            try:
+                with open('/proc/stat') as _sf:
+                    _cpu1 = _sf.readline().split()
+                import time as _ctime
+                _ctime.sleep(0.1)
+                with open('/proc/stat') as _sf:
+                    _cpu2 = _sf.readline().split()
+                _idle1 = int(_cpu1[4]) + int(_cpu1[5])
+                _idle2 = int(_cpu2[4]) + int(_cpu2[5])
+                _total1 = sum(int(x) for x in _cpu1[1:])
+                _total2 = sum(int(x) for x in _cpu2[1:])
+                _d_total = _total2 - _total1
+                _d_idle = _idle2 - _idle1
+                _pi_info['cpu_usage'] = round((1 - _d_idle / _d_total) * 100) if _d_total > 0 else 0
+            except Exception:
+                _pi_info['cpu_usage'] = None
+            # Disk usage of root filesystem
+            try:
+                _df = subprocess.run(
+                    ['df', '-B1', '/'],
+                    capture_output=True, text=True, timeout=5
+                )
+                _df_lines = _df.stdout.strip().splitlines()
+                if len(_df_lines) >= 2:
+                    _df_parts = _df_lines[1].split()
+                    _pi_info['disk_total_gb'] = round(int(_df_parts[1]) / (1024**3), 2)
+                    _pi_info['disk_used_gb'] = round(int(_df_parts[2]) / (1024**3), 2)
+            except Exception:
+                _pi_info['disk_total_gb'] = None
+                _pi_info['disk_used_gb'] = None
+        except Exception:
+            pass
         _r=_j({
             "version": _version,
             "service": "active" if svc_active else "inactive",
@@ -836,6 +903,7 @@ class WM1303API:
             "active_channels": _active_ch,
             "total_channels": _total_ch,
             "inactive_channels": _inactive_ch,
+            "pi_info": _pi_info,
             "timestamp": time.time(),
         })
         _STATUS_CACHE['data'] = _r

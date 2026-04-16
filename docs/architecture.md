@@ -1,294 +1,206 @@
 # System Architecture
 
-> pyMC WM1303 — LoRa Multi-Channel Bridge/Repeater for SenseCAP M1
+> pyMC WM1303 — Multi-channel MeshCore bridge/repeater for SenseCAP M1
 
 ## Overview
 
-The pyMC WM1303 system transforms a **SenseCAP M1** (Raspberry Pi 4 + WM1303 LoRa concentrator HAT) into a **MeshCore multi-channel bridge and repeater**. It enables up to 4 simultaneous LoRa channels with different frequency, bandwidth, and spreading factor configurations, bridging them together so MeshCore nodes on any channel can communicate through the repeater.
+pyMC WM1303 turns a **SenseCAP M1** into a **multi-channel MeshCore bridge and repeater** built around the **WM1303 concentrator** and an additional **SX1261-backed Channel E path**.
 
-The system replaces the standard LoRaWAN packet forwarder stack with a custom integration that combines the Semtech SX1302 HAL, a modified packet forwarder, and the pyMC (Python MeshCore) software stack.
+The system now operates as a **5-channel platform**:
 
-## Architecture Diagram
+- **Channel A-D** are the main logical radio channels exposed through the concentrator-backed `VirtualLoRaRadio` layer.
+- **Channel E** is the dedicated SX1261-backed path that grew from a helper/scanner role into a meaningful part of the radio story and therefore has its own document: [`channel_e_sx1261.md`](./channel_e_sx1261.md).
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           HARDWARE LAYER                                │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    WM1303 Pi HAT Module                         │    │
-│  │                                                                 │    │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐    │    │
-│  │  │ SX1302/03│  │ SX1250_0 │  │ SX1250_1 │  │    SX1261     │    │    │
-│  │  │ Baseband │  │ RF0 Radio│  │ RF1 Radio│  │ Companion Chip│    │    │
-│  │  │ Processor│  │ (TX+RX)  │  │ (RX only)│  │ (Spectral/LBT)│    │    │
-│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬────────┘    │    │
-│  │       │              │              │               │           │    │
-│  │       └──────────────┴──────────────┘               │           │    │
-│  │                      │ SPI bus                      │ SPI bus   │    │
-│  └──────────────────────┼──────────────────────────────┼───────────┘    │
-│                         │                              │                │
-│              /dev/spidev0.0                  /dev/spidev0.1             │
-│                    (2 MHz)                       (2 MHz)                │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                   Raspberry Pi 4 (SenseCAP M1)                  │    │
-│  │  GPIO: BCM17(reset) BCM18(power) BCM5(SX1261) BCM13(AD5338R)    │    │
-│  │  GPIO base offset: 512 (sysfs = BCM + 512)                      │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
-                         │
-                         │ SPI
-                         ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         HAL & FORWARDER LAYER                           │
-│                                                                         │
-│  ┌─────────────────────────────────────┐  ┌──────────────────────────┐  │
-│  │       libloragw.a (SX1302 HAL)      │  │   lora_pkt_fwd           │  │
-│  │                                     │  │   (Packet Forwarder)     │  │
-│  │  - Board/RF/IF chain configuration  │  │                          │  │
-│  │  - SX1250 radio control             │  │  - UDP server (:1730)    │  │
-│  │  - TX/RX packet handling            │  │  - PUSH_DATA (RX→UDP)    │  │
-│  │  - AGC management (debounced)       │  │  - PULL_RESP (UDP→TX)    │  │
-│  │  - FEM/LNA register control         │  │  - TX_ACK feedback       │  │
-│  │  - SX1261 spectral scan             │  │  - Spectral scan thread  │  │
-│  │  - Calibration routines             │  │  - JSON config loading   │  │
-│  └─────────────────────────────────────┘  └───────────┬──────────────┘  │
-│                                                       │                 │
-└───────────────────────────────────────────────────────┼─────────────────┘
-                                                        │ UDP :1730
-                                                        ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          BACKEND LAYER                                  │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    WM1303 Backend                               │    │
-│  │                                                                 │    │
-│  │  ┌──────────────┐  ┌─────────────────┐  ┌───────────────────┐   │    │
-│  │  │ UDP Handler  │  │ NoiseFloor      │  │   RX Watchdog     │   │    │
-│  │  │ _handle_udp()│  │ Monitor (30s)   │  │ (3 detect modes)  │   │    │
-│  │  │ Retry TX-free   │  │ PUSH_DATA stats   │   │    │
-│  │  └──────┬───────┘  │ Spectral harvest│  │ RSSI spike detect │   │    │
-│  │         │          │ Rolling buffer  │  │ RX timeout (180s) │   │    │
-│  │         │          └────────┬────────┘  └───────────────────┘   │    │
-│  │         │                   │                                   │    │
-│  │         ▼                   ▼                                   │    │
-│  │  ┌──────────────────────────────────────────┐                   │    │
-│  │  │         VirtualLoRaRadio (per channel)   │                   │    │
-│  │  │  Channel A │ Channel B │ Channel C │ Channel D │                   │    │
-│  │  └──────────────────────┬───────────────────┘                   │    │
-│  └─────────────────────────┼───────────────────────────────────────┘    │
-│                            │                                            │
-│  ┌─────────────────────────▼───────────────────────────────────────┐    │
-│  │                     Bridge Engine                               │    │
-│  │                                                                 │    │
-│  │  1. RX packet received on channel_x                             │    │
-│  │  2. Dedup check (hash + time window)                            │    │
-│  │  3. Bridge rules evaluation (source → target mapping)           │    │
-│  │  4. Repeater handler (hop count +1, path bytes update)          │    │
-│  │  5. Packet-type filtering (per rule)                            │    │
-│  │  6. TX batch window (2s) for concurrent queuing                 │    │
-│  │  7. Fire sends to all target channel TX queues                  │    │
-│  └───────────┬─────────────┬──────────────┬────────────────────────┘    │
-│              │             │              │                             │
-│       ┌──────▼──────┐ ┌───▼────────┐ ┌───▼────────┐                     │
-│       │ TX Queue    │ │ TX Queue   │ │ TX Queue   │  (per channel)      │
-│       │ LBT check   │ │ CAD check  │ │ TTL check  │                     │
-│       │ Overflow mgt│ │ FIFO order │ │ Hold check │                     │
-│       └──────┬──────┘ └───┬────────┘ └───┬────────┘                     │
-│              └────────────┴──────────────┘                              │
-│                           │ PULL_RESP (UDP)                             │
-│                           ▼                                             │
-│                    Packet Forwarder → Radio TX                          │
-└─────────────────────────────────────────────────────────────────────────┘
-                                                        │
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           WEB / API LAYER                               │
-│                                                                         │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────────────┐    │
-│  │  HTTP Server     │  │  REST API        │  │  WebSocket          │    │
-│  │  (port 8000)     │  │  /api/wm1303/*   │  │  Real-time updates  │    │
-│  │  Static files    │  │  JWT auth        │  │  Stats push         │    │
-│  └──────────────────┘  └──────────────────┘  └─────────────────────┘    │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │              WM1303 Manager UI (wm1303.html)                    │    │
-│  │                                                                 │    │
-│  │  Tabs: Status | Channels | Bridge | Spectrum | Adv. Config      │    │
-│  │  Charts: Signal Quality, LBT, CAD, Dedup, Spectrum              │    │
-│  │  Real-time: WebSocket-driven auto-refresh                       │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │              pyMC Console (Vue.js app)                          │    │
-│  │  Existing MeshCore functionality: nodes, mesh, messaging        │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+The implementation combines:
 
-## Component Relationships
+- a modified **SX1302 HAL**
+- a modified **`lora_pkt_fwd`** packet forwarder
+- overlay-based integration in **pyMC_core** and **pyMC_Repeater**
+- a dedicated **WM1303 Manager UI** and API
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                      Component Dependency Graph                  │
-│                                                                  │
-│   libloragw.a ◄── lora_pkt_fwd ◄── WM1303 Backend                │
-│       │                │                    │                    │
-│       │           UDP :1730            ┌────┴────────┐           │
-│       │                                │             │           │
-│   SX1302/SX1261                   pymc_core    pymc_repeater     │
-│   (hardware)                      (library)    (application)     │
-│                                       │             │            │
-│                                       │        Bridge Engine     │
-│                                       │        Config Manager    │
-│                                       │        Packet Router     │
-│                                       │             │            │
-│                                  VirtualLoRaRadio   │            │
-│                                  TXQueue            │            │
-│                                  SX1261Driver       │            │
-│                                       │             │            │
-│                                       └──────┬──────┘            │
-│                                              │                   │
-│                                         WM1303 API               │
-│                                         HTTP Server              │
-│                                         WebSocket                │
-│                                              │                   │
-│                                      WM1303 Manager UI           │
-│                                      pyMC Console UI             │
-└──────────────────────────────────────────────────────────────────┘
-```
+## Design priorities
 
-## Programming Languages
+The project is designed around these principles:
 
-| Layer | Language | Components |
-|-------|----------|------------|
-| HAL / Concentrator | **C** | libloragw (SX1302 HAL), lora_pkt_fwd (packet forwarder) |
-| Backend / Logic | **Python 3** | WM1303 Backend, Bridge Engine, TX Queue, pymc_core, pymc_repeater |
-| Web UI | **HTML / JavaScript / CSS** | WM1303 Manager (wm1303.html), pyMC Console (Vue.js) |
-| Configuration | **JSON / YAML** | global_conf.json, wm1303_ui.json, config.yaml |
-| System Scripts | **Shell (sh)** | install.sh, upgrade.sh, reset_lgw.sh, power_cycle_lgw.sh |
-| Build System | **Make** | HAL and packet forwarder compilation |
+1. **RX availability has priority**.
+2. **TX should happen as fast as possible** once queued.
+3. Monitoring tasks such as spectral scan and noise-floor collection must **not unnecessarily block RX/TX**.
+4. Documentation, install, and upgrade flow must match the actual deployed system.
 
-## Data Flow
+## 5-channel architecture
 
-### RX Path (Radio → User Interface)
+### Logical channels
 
-```
-RF Signal → Antenna → SX1250 Radio → SX1302 Baseband → IF Chain Demodulation
-    → HAL lgw_receive() → Packet Forwarder → PUSH_DATA (UDP :1730)
-    → WM1303 Backend _handle_udp() → Parse rxpk JSON
-    → Frequency-to-channel mapping → VirtualLoRaRadio dispatch
-    → Bridge Engine → Dedup check → Bridge rules evaluation
-    → Statistics update → SQLite logging
-    → WebSocket push → WM1303 Manager UI update
-```
+| Channel | Main role | Notes |
+|---|---|---|
+| Channel A | VirtualLoRaRadio | Normal mesh traffic path |
+| Channel B | VirtualLoRaRadio | Normal mesh traffic path |
+| Channel C | VirtualLoRaRadio | Normal mesh traffic path |
+| Channel D | VirtualLoRaRadio | Normal mesh traffic path |
+| Channel E | SX1261-backed path | See dedicated Channel E document |
 
-### TX Path (Bridge Decision → Radio Transmission)
+The main bridge/repeater logic is aware of multiple channels and uses **per-channel configuration, metrics, queueing, and UI/API exposure**.
 
-```
-Bridge Engine decision → Repeater handler (hop +1, path update)
-    → TX batch window (2s) → Per-channel TX Queue (async)
-    → Fair round-robin scheduling (rotating start index)
-    → TTL check (5s max) → Queue overflow check (15 max)
-    → LBT check (per-channel, if enabled)
-    → CAD check (per-channel, HW/SW source tracking)
-    → PULL_RESP (UDP :1730) → Socket auto-recovery on failure
-    → Packet Forwarder → HAL lgw_send() → SX1250 Radio → RF Transmission
-    → TX_ACK feedback → Statistics update
-```
+## Hardware responsibility split
 
-### Spectral Scan Path
+### SX1302 / SX1250 side
+The concentrator side is responsible for the primary multi-channel receive/transmit pipeline used by Channels A-D.
 
-```
-NoiseFloorMonitor (every 30s) → Wait for TX-free window (retry logic)
-    → SX1261 spectral scan via spidev0.1 (dynamic range based on RF chain center freq)
-    → Results to /tmp/pymc_spectral_results.json
-    → Per-channel frequency matching (freq ± BW/2)
-    → RSSI values → Rolling buffer (20 samples) per TX queue
-    → Mutex released during retry (preserves RX availability)
-    → WebSocket → Spectrum chart in UI
-```
+### SX1261 side
+The SX1261 side is used for **Channel E-related behavior** and for **radio-management functions** such as spectral scan, LBT-related measurement support, and CAD-related support where applicable.
 
-## Directory Structure (Installed System)
+## SPI split
 
-```
-/opt/pymc_repeater/                    # Main installation directory
-├── repos/
-│   ├── pyMC_core/                     # MeshCore core library (dev branch)
-│   │   └── src/pymc_core/
-│   │       └── hardware/
-│   │           ├── wm1303_backend.py  # WM1303 concentrator backend
-│   │           ├── tx_queue.py        # Per-channel TX queue system
-│   │           ├── sx1261_driver.py   # SX1261 companion chip driver
-│   │           ├── virtual_radio.py   # VirtualLoRaRadio abstraction
-│   │           ├── signal_utils.py    # Signal processing utilities
-│   │           ├── sx1302_hal.py      # HAL ctypes wrapper
-│   │           └── __init__.py        # Hardware module init
-│   └── pyMC_Repeater/                 # MeshCore repeater app (dev branch)
-│       └── repeater/
-│           ├── main.py                # Application entry point
-│           ├── engine.py              # Core repeater engine
-│           ├── bridge_engine.py       # Cross-channel bridge logic
-│           ├── packet_router.py       # Packet routing system
-│           ├── config_manager.py      # Configuration management
-│           ├── config.py              # Config data classes
-│           ├── identity_manager.py    # Node identity handling
-│           ├── data_acquisition/
-│           │   ├── sqlite_handler.py  # SQLite database handler
-│           │   └── storage_collector.py # Data collection
-│           └── web/
-│               ├── http_server.py     # HTTP/WebSocket server
-│               ├── wm1303_api.py      # REST API endpoints
-│               ├── spectrum_collector.py # Spectral scan collector
-│               ├── cad_calibration_engine.py # CAD calibration
-│               └── html/
-│                   └── wm1303.html    # WM1303 Manager UI
-└── venv/                              # Python virtual environment
+The system uses a split SPI model:
 
-/home/pi/
-├── sx1302_hal/                        # Semtech SX1302 HAL (v2.10)
-│   ├── libloragw/                     # HAL library source
-│   │   ├── src/                       # C source files
-│   │   ├── inc/                       # Header files
-│   │   └── libloragw.a                # Compiled static library
-│   └── packet_forwarder/              # Packet forwarder source
-│       └── lora_pkt_fwd               # Compiled binary
-└── wm1303_pf/                         # Packet forwarder runtime directory
-    ├── lora_pkt_fwd                   # Packet forwarder binary (copy)
-    ├── global_conf.json               # HAL configuration
-    ├── bridge_conf.json               # Runtime bridge config (auto-generated)
-    ├── reset_lgw.sh                   # GPIO reset script
-    └── power_cycle_lgw.sh             # Full power cycle script
+| Device | Purpose |
+|---|---|
+| `/dev/spidev0.0` | SX1302 / SX1250 concentrator path |
+| `/dev/spidev0.1` | SX1261 path |
 
-/etc/pymc_repeater/                    # Configuration directory
-├── config.yaml                        # Main service configuration
-├── wm1303_ui.json                     # UI/channel SSOT configuration
-└── version                            # Installed version tracking
+This separation is important because it allows **SX1261 operations to run independently** from the main concentrator path, which helps protect RX availability and keeps TX delays low.
 
-/etc/systemd/system/
-└── pymc-repeater.service              # Systemd service unit
+The implementation has evolved beyond the early “2 MHz only” assumptions. The overlay and runtime behavior were optimized so that SPI traffic is handled more efficiently while keeping the architecture safe for the current implementation.
 
-/var/lib/pymc_repeater/
-└── repeater.db                        # SQLite database (metrics, stats)
-```
+## Layered architecture
 
-## Key Architectural Decisions
+### 1. Hardware layer
 
-1. **Packet Forwarder as TX/RX proxy**: Rather than driving the SX1302 directly from Python, the system uses the C-based packet forwarder as an intermediary. This leverages the well-tested HAL implementation while allowing Python-based bridge logic via UDP.
+- SenseCAP M1 (Raspberry Pi based)
+- WM1303 HAT
+- SX1302/SX1250 concentrator radio path
+- SX1261 companion radio path
+- board-specific GPIO reset/power helpers
 
-2. **Single Source of Truth (SSOT)**: `wm1303_ui.json` serves as the central configuration file for channel definitions, bridge rules, GPIO pins, and advanced HAL settings. Changes in the UI are written to this file and automatically picked up by the backend (5-second cache TTL).
+### 2. HAL / packet forwarder layer
 
-3. **Per-channel TX queues**: Each channel has its own TX queue with independent LBT/CAD settings, overflow management, and statistics. This prevents one busy channel from blocking others.
+- modified `libloragw`
+- modified `lora_pkt_fwd`
+- spectral scan support
+- SX1261 integration
+- custom JSON-driven configuration
+- UDP server on **`:1730`**
 
-4. **Software LBT over HAL LBT**: The HAL's built-in LBT was replaced with a software implementation using SX1261 spectral scan data. This provides per-channel control and avoids conflicts with the multi-channel setup.
+### 3. Backend layer
 
-5. **Overlay modification approach**: Rather than modifying the forked repositories directly, changes are maintained as overlay files that are applied during installation. This keeps the forks clean and makes updates easier.
+Core backend components include:
 
-6. **Dual SPI architecture**: The SX1302 (main concentrator) and SX1261 (companion chip) use separate SPI devices (spidev0.0 and spidev0.1), allowing simultaneous operation without bus contention.
+| Component | Role |
+|---|---|
+| `WM1303Backend` | Main radio/backend coordinator |
+| `VirtualLoRaRadio` | Per-channel LoRaRadio abstraction |
+| `TXQueue` | Per-channel queued TX scheduling |
+| `NoiseFloorMonitor` | Periodic spectral/noise-floor collection |
+| `BridgeEngine` | Packet routing between channels and repeater logic |
+| `channel_e_bridge.py` | Channel E integration path in repeater side |
 
-7. **Async-native TX architecture**: The TX path uses native asyncio primitives (`asyncio.Lock`, `asyncio.sleep`) instead of threading, eliminating zombie-thread deadlocks and simplifying concurrency. Socket auto-recovery (`_recreate_socket()`) ensures resilience against transient UDP failures.
+## Runtime data flow
 
-8. **Version tracking**: A `VERSION` file in the repository root tracks semantic versioning. The installed version is written to `/etc/pymc_repeater/version` and exposed via the `/api/wm1303/version` endpoint for runtime version queries.
+### RX path
 
----
+1. RF is received by concentrator or SX1261-backed path.
+2. HAL / forwarder converts receive events into UDP traffic.
+3. `WM1303Backend` parses incoming packets.
+4. Packets are mapped to the correct logical channel.
+5. `VirtualLoRaRadio` exposes them to the repeater/bridge stack.
+6. `BridgeEngine` evaluates rules, deduplication, and packet-type routing.
+7. Runtime statistics are persisted and exposed to the UI/API.
 
-*See also: [Hardware & HAL](hardware.md) | [Software Components](software.md) | [Configuration](configuration.md)*
+### TX path
+
+1. A packet is accepted by bridge/repeater logic.
+2. It is placed into the correct **per-channel TX queue**.
+3. The queue applies TTL, queue-depth, LBT, and CAD-related logic as configured.
+4. TX is emitted via UDP `PULL_RESP` towards `lora_pkt_fwd`.
+5. Forwarder and HAL transmit the frame and provide TX acknowledgement feedback.
+
+### Spectral scan / noise-floor path
+
+There are **two different cadences** involved:
+
+| Layer | Interval | Purpose |
+|---|---|---|
+| HAL / forwarder scan pacing | about **1 second** | Try to perform scan work when TX allows it |
+| Python `NoiseFloorMonitor` | every **30 seconds** | Harvest results and update runtime noise-floor state |
+
+Important behavior:
+
+- routine noise-floor monitoring **must not pause TX queues**
+- the old separate noise-floor TX hold was removed
+- the remaining intentional TX hold is the **2-second batch window**
+
+## Bridge engine role
+
+The bridge layer is responsible for:
+
+- source-to-target packet routing
+- packet-type filtering
+- deduplication / echo suppression
+- calling repeater logic where required
+- feeding packets into the correct TX queues
+
+Although implemented here as part of the WM1303 integration, the bridge concept itself is largely generic and can also be applied beyond this specific hardware integration.
+
+## SSOT configuration model
+
+The current project uses **`wm1303_ui.json` as the main source of truth** for UI/runtime-oriented WM1303 state.
+
+### Practical meaning
+
+- API/UI helper paths read from `wm1303_ui.json`
+- channel and runtime-oriented settings are persisted there first
+- compatibility/runtime synchronization into `config.yaml` is done where needed
+- save operations trigger channel synchronization so runtime and repeater integration stay aligned
+
+This is important for:
+
+- active/inactive channel selection
+- LBT/CAD behavior
+- channel-specific settings
+- UI consistency after reloads
+
+## Per-channel metrics and mapping
+
+Per-channel runtime metrics are tracked using **direct channel identifiers**, which is especially important when channels share a frequency but differ in spreading factor.
+
+This avoids incorrect merging of statistics and ensures:
+
+- correct noise-floor association
+- correct CAD/LBT history
+- correct chart rendering
+- correct API exposure per channel
+
+## Web / API layer
+
+The web layer consists of:
+
+- **WM1303 Manager UI** (`wm1303.html`)
+- WM1303 REST API under **`/api/wm1303/*`**
+- WebSocket/live updates for charts and status
+- integration with the existing pyMC repeater UI/server stack
+
+Main user-facing areas include:
+
+- Status
+- Channels
+- Bridge
+- Spectrum
+- Advanced configuration
+
+## Installed structure
+
+Typical runtime layout:
+
+- `/opt/pymc_repeater/` — main runtime installation
+- `/etc/pymc_repeater/` — config files including synced runtime config
+- `/tmp/` — runtime-generated files, metrics, scan output, and transient state
+
+## Related documents
+
+- [`channel_e_sx1261.md`](./channel_e_sx1261.md)
+- [`radio.md`](./radio.md)
+- [`software.md`](./software.md)
+- [`lbt_cad.md`](./lbt_cad.md)
+- [`configuration.md`](./configuration.md)
+- [`api.md`](./api.md)
+- [`ui.md`](./ui.md)
