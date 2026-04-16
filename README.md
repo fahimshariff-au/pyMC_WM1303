@@ -12,7 +12,7 @@ A complete installation and management system for running a [WM1303 LoRa concent
 
 This project integrates the Semtech SX1302/SX1303-based WM1303 LoRa concentrator HAT with the MeshCore mesh networking stack, providing:
 
-- **Multi-channel LoRa gateway** — Up to 4 simultaneous receive channels across 2 RF chains
+- **Multi-channel LoRa gateway** — Up to 4 simultaneous receive channels across 2 RF chains + 1 dedicated SX1261 channel with **sub-125 kHz bandwidth support** (e.g. 62.5 kHz)
 - **MeshCore mesh repeater** — Bridge packets between channels, forward across the mesh network
 - **Web-based management UI** — Real-time monitoring, channel configuration, spectrum analysis, noise floor tracking
 - **REST API** — Full programmatic control of all gateway functions
@@ -87,13 +87,15 @@ The system uses an **overlay approach**: unmodified forks of the upstream reposi
 
 > 💡 **Note:** SPI and I2C are enabled automatically by the install script — no manual configuration needed.
 
-### 2. Install
+### 2. Install or Upgrade
 
-**One-line installer** (recommended):
+**One-line bootstrap** (recommended — automatically detects new install vs. existing installation):
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
 ```
+
+> 💡 **Note:** This single command handles both **fresh installations** and **upgrades**. It detects whether pyMC_WM1303 is already installed and runs the appropriate script automatically.
 
 **Or manually**:
 
@@ -198,7 +200,13 @@ See [docs/installation.md](docs/installation.md) for detailed installation instr
 
 ## Upgrading
 
-**One-line upgrade** (recommended):
+The same bootstrap command used for installation also handles upgrades:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
+```
+
+Alternatively, use the dedicated upgrade bootstrap:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/upgrade_bootstrap.sh | sudo bash
