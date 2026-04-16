@@ -496,17 +496,34 @@ ok "Caches cleaned"
 # =============================================================================
 phase "Update Configuration Files"
 
-step "Checking SPI buffer size (spidev bufsiz)"
+step "Checking SPI buffer size (spidev bufsiz=32768)"
 SPIDEV_CONF="/etc/modprobe.d/spidev.conf"
+CMDLINE_FILE="/boot/firmware/cmdline.txt"
+SPIDEV_PARAM="spidev.bufsiz=32768"
+
+# Method 1: modprobe.d (works on older kernels)
 if [ -f "$SPIDEV_CONF" ] && grep -q "bufsiz=32768" "$SPIDEV_CONF"; then
-    ok "spidev bufsiz already configured (32768)"
+    ok "modprobe.d spidev bufsiz already configured"
 else
     echo "options spidev bufsiz=32768" > "$SPIDEV_CONF"
-    ok "spidev bufsiz set to 32768"
-    if [ "$(cat /sys/module/spidev/parameters/bufsiz 2>/dev/null)" != "32768" ]; then
-        warn "Reboot required for spidev bufsiz change to take effect"
-        REBOOT_REQUIRED=true
+    ok "modprobe.d spidev bufsiz set to 32768"
+fi
+
+# Method 2: kernel cmdline (required for Debian Trixie+ where spidev loads before modprobe.d)
+if [ -f "$CMDLINE_FILE" ]; then
+    if grep -q "$SPIDEV_PARAM" "$CMDLINE_FILE"; then
+        ok "Kernel cmdline spidev.bufsiz already configured"
+    else
+        sudo sed -i "s/$/ ${SPIDEV_PARAM}/" "$CMDLINE_FILE"
+        ok "Added spidev.bufsiz=32768 to kernel cmdline"
     fi
+else
+    warn "$CMDLINE_FILE not found — skipping kernel cmdline method"
+fi
+
+if [ "$(cat /sys/module/spidev/parameters/bufsiz 2>/dev/null)" != "32768" ]; then
+    warn "Reboot required for spidev bufsiz change to take effect"
+    REBOOT_REQUIRED=true
 fi
 
 if [ "$FORCE_CONFIG" = true ]; then
