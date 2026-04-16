@@ -351,7 +351,7 @@ clone_or_update_repo() {
     fi
 }
 
-step "Cloning sx1302_hal (HAL v2.1.0)"
+step "Cloning sx1302_hal (HAL v2.10)"
 clone_or_update_repo "${HAL_REPO}" "${HAL_DIR}" "${HAL_BRANCH}"
 
 step "Cloning pyMC_core (dev branch)"
@@ -377,6 +377,7 @@ cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1302.c"  "${HAL_DIR}/libloragw/src
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1261.c"  "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1302.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1261.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_hal.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/sx1261_defs.h"    "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/Makefile"             "${HAL_DIR}/libloragw/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/src/lora_pkt_fwd.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
@@ -396,7 +397,7 @@ step "Applying pyMC_Repeater overlay"
 RPT_DIR="${REPO_DIR}/pyMC_Repeater"
 
 # repeater/ level files
-for f in bridge_engine.py config_manager.py engine.py main.py identity_manager.py config.py packet_router.py; do
+for f in bridge_engine.py channel_e_bridge.py config_manager.py engine.py main.py identity_manager.py config.py packet_router.py; do
     if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_repeater/repeater/${f}" "${RPT_DIR}/repeater/" >> "${LOG_FILE}" 2>&1
     fi
@@ -560,7 +561,7 @@ step "Cleaning Python bytecode caches"
 find ${INSTALL_BASE} -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 find ${VENV_DIR} -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 # Pre-create runtime /tmp files with correct ownership to prevent permission issues
-for tmpf in /tmp/pymc_spectral_results.json /tmp/pymc_wm1303_bridge_conf.json /tmp/pymc_cad_config.json; do
+for tmpf in /tmp/pymc_spectral_results.json /tmp/pymc_wm1303_bridge_conf.json /tmp/pymc_cad_config.json /tmp/pymc_channel_e_bridge_conf.json; do
     touch "$tmpf" 2>/dev/null || true
     chown ${PI_USER}:${PI_USER} "$tmpf" 2>/dev/null || true
     chmod 664 "$tmpf" 2>/dev/null || true

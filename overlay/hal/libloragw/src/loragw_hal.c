@@ -229,6 +229,7 @@ int32_t lgw_bw_getval(int x) {
         case BW_500KHZ: return 500000;
         case BW_250KHZ: return 250000;
         case BW_125KHZ: return 125000;
+        case BW_62K5HZ: return 62500;
         default: return -1;
     }
 }
@@ -814,6 +815,13 @@ int lgw_sx1261_setconf(struct lgw_conf_sx1261_s * conf) {
         CONTEXT_SX1261.lbt_conf.channels[i] = conf->lbt_conf.channels[i];
     }
 
+    /* Set the LoRa RX (Channel F) conf */
+    CONTEXT_SX1261.lora_rx_enable = conf->lora_rx_enable;
+    CONTEXT_SX1261.lora_rx_freq = conf->lora_rx_freq;
+    CONTEXT_SX1261.lora_rx_bw = conf->lora_rx_bw;
+    CONTEXT_SX1261.lora_rx_sf = conf->lora_rx_sf;
+    CONTEXT_SX1261.lora_rx_cr = conf->lora_rx_cr;
+
     return LGW_HAL_SUCCESS;
 }
 
@@ -1171,6 +1179,22 @@ int lgw_start(void) {
             printf("ERROR: failed to setup sx1261 radio\n");
             return LGW_HAL_ERROR;
         }
+
+        /* Configure and start SX1261 LoRa RX for Channel F */
+        if (CONTEXT_SX1261.lora_rx_enable) {
+            err = sx1261_lora_rx_configure(CONTEXT_SX1261.lora_rx_freq,
+                                            CONTEXT_SX1261.lora_rx_bw,
+                                            CONTEXT_SX1261.lora_rx_sf,
+                                            CONTEXT_SX1261.lora_rx_cr);
+            if (err == LGW_REG_SUCCESS) {
+                err = sx1261_lora_rx_start();
+                if (err != LGW_REG_SUCCESS) {
+                    printf("WARNING: failed to start SX1261 LoRa RX\n");
+                }
+            } else {
+                printf("WARNING: failed to configure SX1261 LoRa RX\n");
+            }
+        }
     }
 
     /* Set CONFIG_DONE GPIO to 1 (turn on the corresponding LED) */
@@ -1303,10 +1327,17 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
         return LGW_HAL_ERROR;
     }
 
-    /* Exit now if no packet fetched */
+    /* Exit now if no packet fetched from SX1302 (but still check SX1261 below) */
     if (nb_pkt_fetched == 0) {
+        /* Check SX1261 for LoRa RX packets (Channel F) even if SX1302 has none */
+        if (sx1261_lora_rx_active() && nb_pkt_found < max_pkt) {
+            int sx1261_pkt = sx1261_lora_rx_fetch(&pkt_data[nb_pkt_found], max_pkt - nb_pkt_found);
+            if (sx1261_pkt > 0) {
+                nb_pkt_found += sx1261_pkt;
+            }
+        }
         _meas_time_stop(1, tm, __FUNCTION__);
-        return 0;
+        return nb_pkt_found;
     }
     if (nb_pkt_fetched > max_pkt) {
         nb_pkt_left = nb_pkt_fetched - max_pkt;
@@ -1340,6 +1371,14 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
         pkt_data[nb_pkt_found].rssic += rssi_temperature_offset;
         pkt_data[nb_pkt_found].rssis += rssi_temperature_offset;
         DEBUG_PRINTF("INFO: RSSI temperature offset applied: %.3f dB (current temperature %.1f C)\n", rssi_temperature_offset, current_temperature);
+    }
+
+    /* Check SX1261 for LoRa RX packets (Channel F) */
+    if (sx1261_lora_rx_active() && nb_pkt_found < max_pkt) {
+        int sx1261_pkt = sx1261_lora_rx_fetch(&pkt_data[nb_pkt_found], max_pkt - nb_pkt_found);
+        if (sx1261_pkt > 0) {
+            nb_pkt_found += sx1261_pkt;
+        }
     }
 
     DEBUG_PRINTF("INFO: nb pkt found:%u left:%u\n", nb_pkt_found, nb_pkt_left);

@@ -208,9 +208,9 @@ select.ci option{background:#1e293b}
       </div>
     </div>
 
-    <!-- IF Chain Mapping Table -->
+    <!-- Channel Mapping Table -->
     <div class="mb-4">
-      <div class="text-xs font-medium mb-2" style="color:var(--txm)">IF Chain &harr; RF Chain &harr; Channel Mapping</div>
+      <div class="text-xs font-medium mb-2" style="color:var(--txm)">Channel &harr; RF Chain Mapping</div>
       <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:48px 66px 90px 100px 74px 66px 1fr;color:var(--txm)">
         <span>IF#</span><span>RF</span><span>Role</span><span>Offset (kHz)</span><span>Freq (MHz)</span><span>Type</span><span>BW</span><span>Bridge Channel</span>
       </div>
@@ -228,7 +228,7 @@ select.ci option{background:#1e293b}
 
   <div class="gl p-5 mb-4">
     <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
-      <div><div class="stl mb-0">IF Chain Configuration</div><p class="text-xs mt-1" style="color:var(--txm)">Configure WM1303 IF chains &mdash; Save &amp; restart to apply.</p></div>
+      <div><div class="stl mb-0">IF Channel Configuration</div><p class="text-xs mt-1" style="color:var(--txm)">Configure WM1303 IF channels &mdash; Save &amp; restart to apply.</p></div>
       <div class="flex gap-2 flex-wrap">
         <button class="btn sec sm" onclick="loadCh()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9H3"/><path d="M3 3v6h6"/></svg>Reload</button>
         <button class="btn sec sm" onclick="addCh()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add</button>
@@ -236,11 +236,62 @@ select.ci option{background:#1e293b}
         <button class="btn sec sm" onclick="saveCh(true)" title="Save and restart service"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>Save &amp; Restart</button>
       </div>
     </div>
-    <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 44px 32px;color:var(--txm)">
-      <span>Channel</span><span>Channel Name</span><span>Freq (MHz)</span><span>BW (kHz)</span><span>SF</span><span>CR</span><span>Preamble</span><span>LBT (dBm)</span><span>LBT</span><span>CAD</span><span>TX (dBm)</span><span>Active</span><span></span>
+    <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 52px 44px 32px;color:var(--txm)">
+      <span>Channel</span><span>Channel Name</span><span>Freq (MHz)</span><span>BW (kHz)</span><span>SF</span><span>CR</span><span>Preamble</span><span>LBT (dBm)</span><span>LBT</span><span>CAD</span><span>TX (dBm)</span><span></span><span>Active</span><span></span>
     </div>
     <div id="ch-list"><div class="text-center py-8" style="color:var(--txm)"><div class="spn mx-auto mb-2"></div>Loading...</div></div>
   </div>
+
+  <!-- Channel E Configuration (Channel E / LoRa RX) -->
+  <div class="gl p-5 mb-4" id="ch-e-section" style="border-left:4px solid #ef4444">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div><div class="stl mb-0">SX1261 Channel Configuration</div><p class="text-xs mt-1" style="color:var(--txm)">Configure the SX1261 radio for dedicated LoRa receive &mdash; RX only, no TX on this radio.</p></div>
+      <div class="flex gap-2">
+        <button class="btn sec sm" onclick="loadChE()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9H3"/><path d="M3 3v6h6"/></svg>Reload</button>
+        <button class="btn pri sm" onclick="saveChE(false)"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>
+        <button class="btn sec sm" onclick="saveChE(true)" title="Save and restart service"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>Save &amp; Restart</button>
+      </div>
+    </div>
+    <!-- Column headers matching Channel Configuration -->
+    <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 52px 44px 32px;color:var(--txm)">
+      <span>Channel</span><span>Channel Name</span><span>Freq (MHz)</span><span>BW (kHz)</span><span>SF</span><span>CR</span><span>Preamble</span><span>LBT (dBm)</span><span>LBT</span><span>CAD</span><span>TX (dBm)</span><span>RX Boost</span><span>Active</span>
+    </div>
+    <!-- Single row for Channel E -->
+    <div class="crow con" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 52px 44px 32px">
+      <span class="bdg text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;white-space:nowrap;text-align:center;padding:6px 4px;text-transform:none;">Channel E</span>
+      <input class="ci" id="che-friendly-name" type="text" value="Channel E" style="width:100%">
+      <input class="ci" id="che-frequency" type="text" lang="en" pattern="[0-9]*[.]?[0-9]*" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" style="width:100%">
+      <select class="ci" id="che-bandwidth" style="width:100%">
+        <option value="62500">62.5</option>
+        <option value="125000" selected>125</option>
+        <option value="250000">250</option>
+        <option value="500000">500</option>
+      </select>
+      <select class="ci" id="che-sf" style="width:100%">
+        <option value="7">7</option>
+        <option value="8" selected>8</option>
+        <option value="9">9</option>
+        <option value="10">10</option>
+        <option value="11">11</option>
+        <option value="12">12</option>
+      </select>
+      <select class="ci" id="che-cr" style="width:100%">
+        <option value="4/5" selected>4/5</option>
+        <option value="4/6">4/6</option>
+        <option value="4/7">4/7</option>
+        <option value="4/8">4/8</option>
+      </select>
+      <input class="ci" id="che-preamble" type="number" min="6" max="65535" value="17" style="width:100%">
+      <input class="ci" id="che-lbt-rssi" type="number" min="-120" max="0" value="-80" style="width:100%">
+      <label class="tgl"><input type="checkbox" id="che-lbt-enabled" checked onchange="var c=G('che-cad-enabled');var l=c.closest('label');if(!this.checked){c.checked=false;c.disabled=true;l.style.opacity='0.35';l.style.pointerEvents='none';}else{c.disabled=false;l.style.opacity='1';l.style.pointerEvents='auto';}" ><span class="tsl"></span></label>
+      <label class="tgl"><input type="checkbox" id="che-cad-enabled"><span class="tsl"></span></label>
+      <input class="ci" id="che-tx-power" type="number" min="0" max="27" value="14" style="width:100%">
+      <label class="tgl"><input type="checkbox" id="che-boosted-rx"><span class="tsl"></span></label>
+      <label class="tgl"><input type="checkbox" id="che-enable" checked><span class="tsl"></span></label>
+    </div>
+    <div class="mt-2 text-xs" style="color:var(--txm)"><span style="color:#ef4444">&#9679;</span> Channel E &mdash; Dedicated LoRa RX radio. TX uses RF1 (SX1250) via pkt_fwd.</div>
+  </div>
+
 
   <div id="tx-summary-bar" class="gl p-4 mb-4" style="background:rgba(99,102,241,0.06);border:1px solid var(--acc);border-radius:8px;">
     <div class="flex items-center justify-between flex-wrap gap-3">
@@ -274,7 +325,7 @@ select.ci option{background:#1e293b}
   </div>
   </div>
 
-  <!-- IF Chain Layout Section -->
+  <!-- Channel Layout Section -->
 </div>
   
 
@@ -617,7 +668,7 @@ function toast(msg,type,dur){
   G('toasts').appendChild(e);
   setTimeout(()=>{e.style.animation='sOut .3s ease forwards';setTimeout(()=>e.remove(),300);},dur);
 }
-const TABS={status:function(){try{loadStatus();}catch(e){console.error('loadStatus err:',e);}},dedup:function(){try{dedupLoad();}catch(e){console.error('dedupLoad err:',e);}},channels:function(){try{loadCh();loadTxQueues();}catch(e){console.error('loadCh err:',e);G('tab-channels').innerHTML='<h3 style="color:red">Error: '+e.message+'</h3>';}},ifchains:function(){try{renderIfChains(true);}catch(e){console.error('renderIfChains err:',e);}},bridge:function(){try{loadBr();}catch(e){console.error('loadBr err:',e);}},logs:function(){try{startLogs();}catch(e){console.error('startLogs err:',e);}},spectrum:function(){try{specLoad();}catch(e){console.error('specLoad err:',e);}},'adv-config':function(){try{loadAdvConfig();}catch(e){console.error('loadAdvConfig err:',e);}}};
+const TABS={status:function(){try{loadStatus();}catch(e){console.error('loadStatus err:',e);}},dedup:function(){try{dedupLoad();}catch(e){console.error('dedupLoad err:',e);}},channels:function(){try{loadCh();loadChE();loadTxQueues();}catch(e){console.error('loadCh err:',e);G('tab-channels').innerHTML='<h3 style="color:red">Error: '+e.message+'</h3>';}},ifchains:function(){try{renderIfChains(true);}catch(e){console.error('renderIfChains err:',e);}},bridge:function(){try{loadBr();}catch(e){console.error('loadBr err:',e);}},logs:function(){try{startLogs();}catch(e){console.error('startLogs err:',e);}},spectrum:function(){try{specLoad();}catch(e){console.error('specLoad err:',e);}},'adv-config':function(){try{loadAdvConfig();}catch(e){console.error('loadAdvConfig err:',e);}}};
 function showTab(name,btn){
   console.log('showTab called:',name);
   document.querySelectorAll('.tp').forEach(p=>p.classList.remove('active'));
@@ -739,7 +790,7 @@ function renderRfInfoBlock(d) {
   if (rf0Tx) rf0Extra.push('TX Enabled');
   var rf0ChainDesc = 'No IF chains';
   if (rf0Chains !== 'none') {
-    rf0ChainDesc = 'IF Chains ' + rf0Chains + ' (multi-SF RX)';
+    rf0ChainDesc = 'Channels ' + rf0Chains + ' (multi-SF RX)';
     if (rf0Role === 'rx_only') rf0ChainDesc += ' \u00b7 LNA always-on (0x0F)';
   }
   var rf1Extra = [];
@@ -747,7 +798,7 @@ function renderRfInfoBlock(d) {
   if (rf1Role === 'rx_only' || rf1Role === 'rx_tx') rf1Extra.push('RX Active');
   var rf1ChainDesc = 'No IF chains';
   if (rf1Chains !== 'none') {
-    rf1ChainDesc = 'IF Chains ' + rf1Chains;
+    rf1ChainDesc = 'Channels ' + rf1Chains;
     if (rf1Role === 'rx_tx') rf1ChainDesc += ' (RX+TX)';
   }
   if (rf1Gain) rf1ChainDesc += ' \u00b7 TX Gain: ' + rf1Gain.min + '\u2013' + rf1Gain.max + ' dBm';
@@ -785,7 +836,7 @@ function renderRfInfoBlock(d) {
       '<div>\u2022 <b>RF1 (SX1250_1)</b>: ' + r1i.label + ' \u2014 ' + (rf1Chains !== 'none' ? 'IF chains ' + rf1Chains : 'no IF chains') + (rf1Tx ? ', via PULL_RESP' : '') + '</div>' +
       '<div>\u2022 Both radios share the same center frequency (set above)</div>' +
       (rf1Gain ? '<div>\u2022 TX power controlled by RF1 gain LUT (<b>' + rf1Gain.min + '\u2013' + rf1Gain.max + ' dBm</b>). LNA patch keeps RX sensitive after TX.</div>' : '') +
-      '<div>\u2022 <b>SX1261</b> is NOT used for TX \u2014 only LBT, CAD, and Spectrum Analysis</div>' +
+      '<div>\u2022 <b>Channel E</b> (SX1261) is NOT used for TX \u2014 only LBT, CAD, and Spectrum Analysis</div>' +
       '<div>\u2022 Each SX1250 has ~<b>925 kHz analog bandwidth</b> (\u00b1500 kHz from center)</div>';
   }
 }
@@ -870,7 +921,7 @@ function loadTxQueues(){
     var totalRx=0,totalTx=0,totalAirtimeMs=0,totalDutySum=0,activeCh=0;
     for(var i=0;i<chData.length;i++){
       var ch=chData[i];
-      var friendlyName=ch.friendly_name||ch.name||('Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[i]);
+      var friendlyName=ch.friendly_name||ch.name||('IF'+i);
       var freqMhz=(ch.frequency||0)/1e6;
       var bwKhz=(ch.bandwidth||125000)/1000;
       var sf=ch.spreading_factor||'?';
@@ -1007,6 +1058,120 @@ function loadTxQueues(){
       }
       html+='</div>';
     }
+    // --- Channel E card if enabled ---
+    for(var ei=0;ei<liveChs.length;ei++){
+      var eLive=liveChs[ei];
+      if(!eLive.is_sx1261)continue;
+      var eName=eLive.friendly_name||'Channel E';
+      var eFreq=(eLive.frequency||0)/1e6;
+      var eBw=(eLive.bandwidth||125000)/1000;
+      var eSf=eLive.spreading_factor||8;
+      var eCr=eLive.coding_rate||'4/5';
+      var eCol='#ef4444';
+      var eTxtC='var(--tx)';
+      // RX metrics
+      var eRxPkts=eLive.rx_packets||0;
+      var eRssi=eLive.rssi_last!=null?eLive.rssi_last:-120;
+      var eSnr=eLive.snr_last!=null?eLive.snr_last:0;
+      var eNfLbtAvg=eLive.noise_floor_lbt_avg;
+      var eNf=(eNfLbtAvg!=null)?eNfLbtAvg:((eLive.noise_floor!=null&&eLive.noise_floor!==-120)?eLive.noise_floor:null);
+      // TX metrics from live API
+      var eTxPkts=eLive.tx_packets||0;
+      var eDutyPct=eLive.tx_duty_pct||0;
+      // TX queue metrics - match from queues object
+      var eQ=queues['channel_e']||{};
+      var ePending=eQ.pending||eLive.queue_pending||0;
+      var eSent=eQ.total_sent||eTxPkts;
+      var eFailed=eQ.total_failed||eLive.tx_failed||0;
+      var eAvgAirtime=eQ.avg_airtime_ms||eLive.avg_tx_airtime_ms||0;
+      var eAvgSend=eQ.avg_send_ms||eLive.avg_tx_send_ms||0;
+      var eAvgWait=eQ.avg_wait_ms||eLive.avg_tx_wait_ms||0;
+      var eTotalAir=eQ.total_airtime_ms||eLive.total_tx_airtime_ms||0;
+      // Accumulate totals
+      totalRx+=eRxPkts;
+      totalTx+=eTxPkts;
+      totalAirtimeMs+=eTotalAir;
+      totalDutySum+=eDutyPct;
+      activeCh++;
+      // RSSI/SNR/Noise display
+      var eRssiStr,eSnrStr,eNoiseStr,eNoiseColor,eRssiC,eSnrC;
+      if(eRxPkts===0){
+        eRssiStr='--'; eSnrStr='--';
+        eRssiC='var(--txm)'; eSnrC='var(--txm)';
+      } else {
+        eRssiStr=eRssi.toFixed(1)+' dBm';
+        eSnrStr=eSnr.toFixed(1)+' dB';
+        eRssiC=eRssi>-90?'#22c55e':eRssi>-110?'#f59e0b':'#ef4444';
+        eSnrC=eSnr>5?'#22c55e':eSnr>0?'#f59e0b':'#ef4444';
+      }
+      if(eNf!=null){
+        eNoiseStr=eNf.toFixed(1)+' dBm';
+        eNoiseColor=eNf<-110?'#22c55e':eNf<-90?'#f59e0b':'#ef4444';
+      } else {
+        eNoiseStr='--'; eNoiseColor='var(--txm)';
+      }
+      // --- Start card ---
+      html+='<div style="border:1px solid '+eCol+';border-radius:8px;padding:14px;background:rgba(239,68,68,0.06);">';
+      html+='<div class="flex items-center justify-between mb-2">';
+      html+='<span style="font-weight:600;color:'+eCol+';font-size:13px;">'+esc(eName)+'</span>';
+      html+='<span style="background:rgba(239,68,68,0.15);color:#ef4444;font-size:10px;padding:2px 6px;border-radius:4px;">SX1261</span>';
+      html+='</div>';
+      html+='<div style="font-size:11px;color:var(--txm);margin-bottom:10px;">'+eFreq.toFixed(3)+' MHz &middot; SF'+eSf+' &middot; BW'+eBw+'kHz &middot; CR'+esc(eCr)+'</div>';
+      // --- Consolidated 2-column metrics grid (matching channels A-D) ---
+      html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:12px;">';
+      // Row: RX Packets / TX Packets
+      html+='<div style="color:var(--txm)">RX Packets</div><div style="color:#22c55e;font-weight:500;">'+eRxPkts+'</div>';
+      html+='<div style="color:var(--txm)">TX Packets</div><div style="color:'+eCol+';font-weight:500;">'+eTxPkts+'</div>';
+      // Row: Pending / Sent
+      html+='<div style="color:var(--txm)">Pending</div><div style="color:'+eTxtC+';font-weight:500;">'+ePending+'</div>';
+      html+='<div style="color:var(--txm)">Sent</div><div style="color:#22c55e;font-weight:500;">'+eSent+'</div>';
+      // Row: Failed / TX Duty
+      html+='<div style="color:var(--txm)">Failed</div><div style="color:'+(eFailed>0?'#ef4444':'var(--txm)')+';font-weight:500;">'+eFailed+'</div>';
+      html+='<div style="color:var(--txm)" title="TX duty cycle">TX Duty</div><div style="font-weight:600;color:'+_dutyColor(eDutyPct)+';">'+(eDutyPct).toFixed(3)+' %</div>';
+      // Row: RSSI / SNR
+      html+='<div style="color:var(--txm)">RSSI</div><div style="color:'+eRssiC+';font-weight:500;">'+eRssiStr+'</div>';
+      html+='<div style="color:var(--txm)">SNR</div><div style="color:'+eSnrC+';font-weight:500;">'+eSnrStr+'</div>';
+      // Row: Noise Floor
+      html+='<div style="color:var(--txm)">Noise Floor</div><div style="color:'+eNoiseColor+';font-weight:500;">'+eNoiseStr+'</div>';
+      // Row: Avg Airtime / Avg Send
+      html+='<div style="color:var(--txm)" title="LoRa time-on-air">Avg Airtime</div>';
+      html+='<div style="color:#a78bfa;font-weight:500;">'+_fmtMs(eAvgAirtime)+' ms</div>';
+      html+='<div style="color:var(--txm)" title="Wall-clock send time">Avg Send</div>';
+      html+='<div style="color:'+eTxtC+'">'+_fmtMs(eAvgSend)+' ms</div>';
+      // Row: Avg Wait / Total Airtime
+      html+='<div style="color:var(--txm)" title="Queue wait time">Avg Wait</div>';
+      html+='<div style="color:'+eTxtC+'">'+_fmtMs(eAvgWait)+' ms</div>';
+      html+='<div style="color:var(--txm)">Total Airtime</div>';
+      html+='<div style="color:#a78bfa;font-weight:500;">'+_fmtAirtimeTotal(eTotalAir)+'</div>';
+      // Software LBT stats (if applicable)
+      var eLbtBlocked=eLive.lbt_blocked||0;
+      var eLbtPassed=eLive.lbt_passed||0;
+      var eLbtSkipped=eLive.lbt_skipped||0;
+      var eLbtLastRssi=eLive.lbt_last_rssi;
+      var eLbtEnabled=(eLbtBlocked+eLbtPassed)>0;
+      if(eLbtEnabled){
+        var eLbtColor=eLbtBlocked>0?'#f59e0b':'#22c55e';
+        var eLbtText=eLbtBlocked>0?(eLbtBlocked+' blocked / '+eLbtPassed+' passed'):(eLbtPassed>0?eLbtPassed+' passed':'--');
+        if(eLbtSkipped>0&&eLbtPassed===0&&eLbtBlocked===0)eLbtText='skipped ('+eLbtSkipped+')';
+        html+='<div style="color:var(--txm)" title="Software LBT (Listen Before Talk)">LBT</div>';
+        html+='<div style="color:'+eLbtColor+';font-weight:500;">'+eLbtText+'</div>';
+        if(eLbtLastRssi!==null&&eLbtLastRssi!==undefined){
+          html+='<div style="color:var(--txm)">LBT RSSI</div>';
+          html+='<div style="color:var(--txm);font-weight:500;">'+eLbtLastRssi.toFixed(1)+' dBm</div>';
+        }
+      }
+      html+='</div>';
+      // Footer: Last RX / Last TX
+      var eLastParts=[];
+      if(eLive.last_rx){eLastParts.push('Last RX: '+_fmtAgo(eLive.last_rx));}
+      if(eLive.last_tx){eLastParts.push('Last TX: '+_fmtAgo(eLive.last_tx));}
+      if(eLastParts.length){
+        html+='<div style="font-size:10px;color:var(--txm);margin-top:6px;border-top:1px solid var(--brd);padding-top:6px;">'+eLastParts.join(' &middot; ')+'</div>';
+      } else {
+        html+='<div style="font-size:10px;color:var(--txm);margin-top:6px;border-top:1px solid var(--brd);padding-top:6px;">Channel E &mdash; SX1261 Dedicated LoRa Radio</div>';
+      }
+      html+='</div>';
+    }
     g.innerHTML=html||'<div class="text-sm" style="color:var(--txm)">No channels</div>';
     // Update totals
     var eRx=document.getElementById('live-total-rx');
@@ -1028,7 +1193,7 @@ function loadTxQueues(){
     if(eSR)eSR.textContent=totalRx;
     var eDC=document.getElementById('sum-duty-cycle');
     if(eDC){
-      var avgDuty=activeCh>0?(totalDutySum/activeCh):0;
+      var avgDuty=totalDutySum;  // Sum of all channel TX duties (shared RF chain)
       eDC.textContent=avgDuty.toFixed(3)+' %';
       eDC.style.color=_dutyColor(avgDuty);
     // Total TX Packets
@@ -1037,7 +1202,7 @@ function loadTxQueues(){
     // RX Duty Cycle
     var eRD=document.getElementById('sum-rx-duty');
     if(eRD){
-      var rxDuty=activeCh>0?(100.0-totalDutySum/activeCh):100;
+      var rxDuty=100.0-totalDutySum;  // RX = 100% minus total TX duty
       eRD.textContent=rxDuty.toFixed(1)+' %';
       eRD.style.color=rxDuty>95?'#22c55e':rxDuty>80?'#f59e0b':'#ef4444';
     }
@@ -1048,7 +1213,7 @@ function loadTxQueues(){
     var html='';
     for(var i=0;i<chData.length;i++){
       var ch=chData[i];
-      var friendlyName=ch.friendly_name||ch.name||('Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[i]);
+      var friendlyName=ch.friendly_name||ch.name||('IF'+i);
       var freqMhz=(ch.frequency||0)/1e6;
       var bwKhz=(ch.bandwidth||125000)/1000;
       var sf=ch.spreading_factor||'?';
@@ -1195,6 +1360,14 @@ function renderRfBwDiagram(rf0en, rf0f, rf1en, rf1f){
       freqs.push(mhz + bwMhz); 
     });
   }
+  // Include Channel E in scale calculation
+  var cheActive = (typeof cheData !== 'undefined' && cheData && cheData.enable);
+  if(cheActive){
+    var eMhz0 = cheData.frequency / 1e6;
+    var eBwMhz0 = (cheData.bandwidth || 125000) / 1e6;
+    freqs.push(eMhz0 - eBwMhz0);
+    freqs.push(eMhz0 + eBwMhz0);
+  }
   if(freqs.length < 2){ el.innerHTML='<div class="text-center py-6 text-xs" style="color:var(--txm)">Configure RF chains to see bandwidth diagram</div>'; G('rf-bw-min').textContent='--'; G('rf-bw-max').textContent='--'; return; }
   var minF = Math.min.apply(null, freqs);
   var maxF = Math.max.apply(null, freqs);
@@ -1230,6 +1403,23 @@ function renderRfBwDiagram(rf0en, rf0f, rf1en, rf1f){
       html += '<div style="position:absolute;left:'+pct(mhz)+'%;top:58px;transform:translateX(-50%);font-size:8px;color:'+chCol+';white-space:nowrap;font-weight:600">'+esc(friendlyName)+'</div>';
     }
   }
+  // Channel E bandwidth block (if active)
+  if(cheActive){
+    var eMhz = cheData.frequency / 1e6;
+    var eBwMhz = (cheData.bandwidth || 125000) / 1e6;
+    var eHalfBw = eBwMhz / 2;
+    var eCol = '#ef4444'; // red for Channel E
+    var eName = cheData.friendly_name || 'Channel E';
+    var eLPct = pct(eMhz - eHalfBw);
+    var eRPct = pct(eMhz + eHalfBw);
+    var eWPct = eRPct - eLPct;
+    // Colored block for Channel E bandwidth (dashed border to distinguish from IF channels)
+    html += '<div style="position:absolute;left:'+eLPct+'%;width:'+eWPct+'%;top:24px;height:32px;background:'+eCol+'22;border:1.5px dashed '+eCol+'66;border-radius:3px" title="'+esc(eName)+': '+eMhz.toFixed(3)+' MHz \u00B1 '+(eHalfBw*1000).toFixed(1)+' kHz (Channel E)"></div>';
+    // Center line
+    html += '<div style="position:absolute;left:'+pct(eMhz)+'%;top:24px;width:1.5px;height:32px;background:'+eCol+';transform:translateX(-50%)"></div>';
+    // Label
+    html += '<div style="position:absolute;left:'+pct(eMhz)+'%;top:58px;transform:translateX(-50%);font-size:8px;color:'+eCol+';white-space:nowrap;font-weight:600">'+esc(eName)+'</div>';
+  }
   // Also show IF chain markers from ifChainData if available
   if(ifChainData && ifChainData.length){
     ifChainData.forEach(function(ic){
@@ -1246,16 +1436,12 @@ function renderRfBwDiagram(rf0en, rf0f, rf1en, rf1f){
 function renderRfIfChainMap(rf0f, rf1f){
   var el = G('rf-ifchain-map');
   if(!el) return;
-  // Build full 10 IF chain list
+  // Build channel list — only Channel A-D (the active multi-SF channels)
   var allChains = [];
-  for(var i=0;i<8;i++){
+  for(var i=0;i<4;i++){
     var found = ifChainData ? ifChainData.find(function(c){return c.if_chain===i;}) : null;
     allChains.push(found || {if_chain:i,type:'multi_sf',frequency_mhz:0,radio:0,offset_hz:0,bandwidth_khz:125,_inactive:true});
   }
-  var stdCh = ifChainData ? ifChainData.find(function(c){return c.if_chain===8;}) : null;
-  allChains.push(stdCh || {if_chain:8,type:'lora_std',frequency_mhz:0,radio:0,offset_hz:0,bandwidth_khz:250,_inactive:true});
-  var fskCh = ifChainData ? ifChainData.find(function(c){return c.if_chain===9;}) : null;
-  allChains.push(fskCh || {if_chain:9,type:'fsk',frequency_mhz:0,radio:0,offset_hz:0,bandwidth_khz:125,_inactive:true});
 
   var typeLabel={multi_sf:'Multi-SF',lora_std:'LoRa Std',fsk:'FSK'};
   // Build bridge channel mapping from chData (source of truth)
@@ -1271,7 +1457,7 @@ function renderRfIfChainMap(rf0f, rf1f){
       if(d < bd){bd=d; best=bridgeFreqs[bi];}
     }
     if(best) return best;
-    // Fallback: map by IF chain index (IF0->ch0, IF1->ch1, IF2->ch2, IF4->ch0 mirror, etc.)
+    // Fallback: map by channel index (ChA->ch0, ChB->ch1, ChC->ch2, ChD->ch3, etc.)
     var chIdx = ifIdx < 4 ? ifIdx : (ifIdx >= 4 && ifIdx < 8 ? ifIdx - 4 : -1);
     if(chIdx >= 0 && chIdx < bridgeFreqs.length) return bridgeFreqs[chIdx];
     return null;
@@ -1315,7 +1501,7 @@ async function loadCh(){
     ifChainData=sd.channels||[];
     rfCenterData={rf0:sd.radio_0_freq_mhz,rf1:sd.radio_1_freq_mhz};
   }catch(e){ifChainData=[];}
-  var _abc='ABCDEFGHIJKLMNOPQRSTUVWXYZ';chData.forEach(function(c,i){if(c.lbt_enabled===undefined)c.lbt_enabled=false;if(c.cad_enabled===undefined)c.cad_enabled=false;if(!c.lbt_enabled)c.cad_enabled=false;if(!c.friendly_name)c.friendly_name='Channel '+(_abc[i]||(i+1));});
+  chData.forEach(function(c,i){if(c.lbt_enabled===undefined)c.lbt_enabled=false;if(c.cad_enabled===undefined)c.cad_enabled=false;if(!c.lbt_enabled)c.cad_enabled=false;if(!c.friendly_name)c.friendly_name='IF'+i;});
   renderCh();
   renderIfChains();
 }
@@ -1328,7 +1514,7 @@ function buildChDropdown(i,ch){
 function renderCh(){
   const l=G('ch-list');
   if(!chData.length){l.innerHTML='<div class="text-center py-8" style="color:var(--txm)">No channels. Add one or apply a preset.</div>';return;}
-  l.innerHTML=chData.map((ch,i)=>`<div class="crow${ch.active?' con':''}" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 44px 32px">
+  l.innerHTML=chData.map((ch,i)=>`<div class="crow${ch.active?' con':''}" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 52px 44px 32px">
     <select class="ci" style="font-weight:500" onchange="chData[${i}].friendly_name=this.value;renderCh()">${buildChDropdown(i,ch)}</select>
     <input class="ci" value="${esc(ch.name)}" onchange="chData[${i}].name=this.value" placeholder="name">
     <input class="ci" lang="en" type="text" pattern="[0-9]*[.]?[0-9]*" value="${(ch.frequency/1e6).toFixed(3)}" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" onchange="chData[${i}].frequency=Math.round(parseFloat(this.value.replace(/,/g,'.'))*1e6)">
@@ -1340,11 +1526,62 @@ function renderCh(){
     <div style="display:flex;align-items:center;justify-content:center"><label class="tgl"><input type="checkbox" ${ch.lbt_enabled?' checked':''} onchange="chData[${i}].lbt_enabled=this.checked;if(!this.checked){chData[${i}].cad_enabled=false;}renderCh()"><span class="tsl"></span></label></div>
     <div style="display:flex;align-items:center;justify-content:center"><label class="tgl" ${!ch.lbt_enabled?'style="opacity:0.35;pointer-events:none"':''}><input type="checkbox" ${ch.cad_enabled?' checked':''} ${!ch.lbt_enabled?'disabled':''} onchange="chData[${i}].cad_enabled=this.checked"><span class="tsl"></span></label></div>
     <select class="ci" onchange="chData[${i}].tx_power=parseInt(this.value)"><option value='12' ${(ch.tx_power||14)==12?'selected':''}>12</option><option value='14' ${(ch.tx_power||14)==14?'selected':''}>14</option><option value='17' ${(ch.tx_power||14)==17?'selected':''}>17</option><option value='20' ${(ch.tx_power||14)==20?'selected':''}>20</option><option value='27' ${(ch.tx_power||14)==27?'selected':''}>27</option></select>
+    <div></div>
     <div style="display:flex;align-items:center;justify-content:center"><label class="tgl"><input type="checkbox" ${ch.active?'checked':''}  onchange="chData[${i}].active=this.checked;renderCh()"><span class="tsl"></span></label></div>
     <button class="btn ber ic" onclick="chData.splice(${i},1);renderCh()" title="Delete"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
   </div>`).join('');
 }
-function addCh(){var _l='ABCDEFGHIJKLMNOPQRSTUVWXYZ';var _fn='Channel '+(_l[chData.length]||(chData.length+1));chData.push({name:'ch-new',friendly_name:_fn,frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,tx_power:14,lbt_rssi_target:-80,lbt_enabled:false,cad_enabled:false,active:false});renderCh();G('ch-list').lastElementChild?.scrollIntoView({behavior:'smooth'});}
+function addCh(){var _fn='IF'+chData.length;chData.push({name:'ch-new',friendly_name:_fn,frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,tx_power:14,lbt_rssi_target:-80,lbt_enabled:false,cad_enabled:false,active:false});renderCh();G('ch-list').lastElementChild?.scrollIntoView({behavior:'smooth'});}
+// -- Channel E load/save --
+let cheData={};
+async function loadChE(){
+  try{
+    var d=await api('GET','/api/wm1303/channel_e');
+    cheData=d;
+    G('che-enable').checked=!!d.enable;
+    G('che-friendly-name').value=d.friendly_name||'Channel E';
+    G('che-frequency').value=(d.frequency/1e6).toFixed(3);
+    G('che-bandwidth').value=String(d.bandwidth||125000);
+    G('che-sf').value=String(d.spreading_factor||8);
+    G('che-cr').value=d.coding_rate||'4/5';
+    G('che-preamble').value=d.preamble_length||17;
+    G('che-lbt-rssi').value=d.lbt_rssi_target||-80;
+    G('che-lbt-enabled').checked=!!d.lbt_enabled;
+    G('che-cad-enabled').checked=!!d.cad_enabled;
+    var _cadEl=G('che-cad-enabled'),_cadLbl=_cadEl.closest('label');
+    if(!d.lbt_enabled){_cadEl.disabled=true;_cadLbl.style.opacity='0.35';_cadLbl.style.pointerEvents='none';}
+    else{_cadEl.disabled=false;_cadLbl.style.opacity='1';_cadLbl.style.pointerEvents='auto';}
+    G('che-tx-power').value=d.tx_power||14;
+    G('che-boosted-rx').checked=d.boosted_rx!==false;
+  }catch(e){console.error('loadChE err:',e);}
+}
+async function saveChE(restart){
+  var body={
+    enable:G('che-enable').checked,
+    friendly_name:G('che-friendly-name').value||'Channel E',
+    frequency:Math.round(parseFloat(G('che-frequency').value.replace(/,/g,'.'))*1e6),
+    bandwidth:parseInt(G('che-bandwidth').value),
+    spreading_factor:parseInt(G('che-sf').value),
+    coding_rate:G('che-cr').value,
+    preamble_length:parseInt(G('che-preamble').value)||17,
+    lbt_rssi_target:parseInt(G('che-lbt-rssi').value)||-80,
+    lbt_enabled:G('che-lbt-enabled').checked,
+    cad_enabled:G('che-cad-enabled').checked,
+    tx_power:parseInt(G('che-tx-power').value)||14,
+    boosted_rx:G('che-boosted-rx').checked,
+    restart:!!restart
+  };
+  try{
+    var r=await api('POST','/api/wm1303/channel_e',body);
+    toast(r.status==='ok'?'Channel E config saved'+(restart?' — restarting...':''):'Save failed: '+(r.reason||'unknown'),r.status==='ok'?'ok':'err');
+    if(restart){
+      var overlay=document.createElement('div');overlay.className='gl';overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);flex-direction:column;gap:16px';
+      overlay.innerHTML='<div class="spn" style="width:48px;height:48px;border-width:4px"></div><div style="color:white;font-size:18px;font-weight:600">Restarting WM1303 service...</div><div style="color:#94a3b8;font-size:13px">Please wait ~25 seconds</div>';
+      document.body.appendChild(overlay);
+      setTimeout(()=>{if(overlay.parentNode)overlay.parentNode.removeChild(overlay);loadChE();loadTxQueues();},26000);
+    }
+  }catch(e){toast('Save error: '+e.message,'err');}
+}
 function renderIfChains(doFetch){
   if(doFetch){
     api('GET','/api/wm1303/spectrum').then(sd=>{
@@ -1360,7 +1597,7 @@ function renderIfChains(doFetch){
   info.innerHTML=`
     <div class="sc px-4 py-2"><div class="text-xs mb-1" style="color:var(--txm)">RF0 Center</div><div class="font-semibold text-sm" style="color:#60a5fa">${rfCenterData.rf0??'—'} MHz</div></div>
     <div class="sc px-4 py-2"><div class="text-xs mb-1" style="color:var(--txm)">RF1 Center</div><div class="font-semibold text-sm" style="color:#a78bfa">${rfCenterData.rf1??'—'} MHz</div></div>
-    <div class="sc px-4 py-2"><div class="text-xs mb-1" style="color:var(--txm)">IF Chains</div><div class="font-semibold text-sm">${ifChainData.length}</div></div>`;
+    <div class="sc px-4 py-2"><div class="text-xs mb-1" style="color:var(--txm)">Channels</div><div class="font-semibold text-sm">${ifChainData.length}</div></div>`;
   if(!ifChainData.length){
     tbl.innerHTML='<div class="text-center py-6" style="color:var(--txm)">No IF chain data — WM1303 service must be running with global_conf.json present.</div>';
     return;
@@ -1373,7 +1610,8 @@ function renderIfChains(doFetch){
     for(const b of bridgeFreqs){const d=Math.abs(b.mhz-mhz);if(d<bd){bd=d;best=b;}}
     return best;
   }
-  tbl.innerHTML=ifChainData.map(ch=>{
+  var filteredIfData=ifChainData.filter(ch=>ch.if_chain>=0&&ch.if_chain<=3);
+  tbl.innerHTML=filteredIfData.map(ch=>{
     const m=matchBridge(ch.frequency_mhz);
     const rfLbl=ch.radio===0?'RF0':'RF1';
     const rfClr=ch.radio===0?'#60a5fa':'#a78bfa';
@@ -1418,15 +1656,16 @@ async function saveCh(restart){
   }
 }
 let bRules=[];
-async function loadBr(){if(!chData.length){try{const _cr=await fetch("/api/wm1303/channels");const _cj=await _cr.json();chData=Array.isArray(_cj)?_cj:(_cj.channels||[]);}catch(_e){}}try{const d=await api("GET","/api/wm1303/bridge");bRules=d.rules||d||[];}catch(e){bRules=[{id:"r1",from:"n1",to:"n2",filter:"all",enabled:true}];}renderBr();}
+async function loadBr(){if(!chData.length){try{const _cr=await fetch("/api/wm1303/channels");const _cj=await _cr.json();chData=Array.isArray(_cj)?_cj:(_cj.channels||[]);}catch(_e){}}if(!cheData.frequency){try{cheData=await api('GET','/api/wm1303/channel_e');}catch(_e2){}}try{const d=await api("GET","/api/wm1303/bridge");bRules=d.rules||d||[];}catch(e){bRules=[{id:"r1",from:"n1",to:"n2",filter:"all",enabled:true}];}renderBr();}
 const MC_PKT_TYPES=['REQ','RESPONSE','TXT_MSG','ACK','ADVERT','GRP_TXT','GRP_DATA','ANON_REQ','PATH','TRACE','MULTIPART','CONTROL','RAW_CUSTOM'];
 function togglePktTypes(i){var el=G('pkt-types-'+i);if(el)el.style.display=el.style.display==='none'?'flex':'none';}
 function setPktType(i,t,checked){if(!bRules[i].packet_types)bRules[i].packet_types=[];var pt=bRules[i].packet_types;if(t==='ALL'){bRules[i].packet_types=[];renderBr();return;}if(checked){if(pt.indexOf(t)===-1)pt.push(t);}else{bRules[i].packet_types=pt.filter(x=>x!==t);}renderBr();}
 function renderBr(){
   const l=G('rules-list');
   if(!bRules.length){l.innerHTML='<div class="text-center py-8" style="color:var(--txm)">No rules. Add a forwarding rule.</div>';return;}
-  const chOpts=(chData||[]).length ? '<optgroup label="LoRa Channels">'+(chData||[]).map(ch=>'<option value="'+esc(ch.name)+'">'+esc(ch.name)+' ('+((ch.frequency||0)/1e6).toFixed(3)+' MHz)</option>').join('')+'</optgroup>' : '';
-  const nO='<option value="">Select endpoint...</option>'+chOpts+'<option value="repeater">&#128251; Repeater</option>';
+  const chOpts=(chData||[]).length ? '<optgroup label="IF Channels">'+(chData||[]).map(ch=>'<option value="'+esc(ch.name)+'">'+esc(ch.friendly_name||ch.name)+' ('+((ch.frequency||0)/1e6).toFixed(3)+' MHz)</option>').join('')+'</optgroup>' : '';
+  const cheOpt=cheData&&cheData.frequency ? '<optgroup label="Channel E"><option value="channel_e">'+(cheData.friendly_name||'Channel E')+' ('+(cheData.frequency/1e6).toFixed(3)+' MHz)</option></optgroup>' : '';
+  const nO='<option value="">Select endpoint...</option>'+chOpts+cheOpt+'<option value="repeater">&#128251; Repeater</option>';
   // FILTER_DROPDOWN_REMOVED
   l.innerHTML=bRules.map((r,i)=>{
     var pt=r.packet_types||[];
@@ -1506,7 +1745,7 @@ async function specLoad() {
   if(G('specHalSubtitle'))G('specHalSubtitle').style.display=sxH.managed_by_hal?'inline':'none';
   if(G('specSx1261Role'))G('specSx1261Role').textContent=sxH.role||'LBT / CAD / Spectrum';
   if(sxH.spi_path&&G('specSpiPath'))G('specSpiPath').textContent=sxH.spi_path;
-  G('specChCount').textContent = (d.channels || []).length + ' chains';
+  G('specChCount').textContent = (d.active_channel_count !== undefined ? d.active_channel_count : (d.channels || []).length) + ' active';
 
   const scanEl = G('specScanStatus');
   if(d.spectral_scan_enabled){scanEl.innerHTML='<span style="background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);padding:2px 8px;border-radius:6px;font-size:12px">✅ Spectral Scan Active</span>';}else{scanEl.innerHTML='<span style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);padding:2px 8px;border-radius:6px;font-size:12px">Spectral Scan Disabled</span>';}
@@ -1520,7 +1759,7 @@ async function specLoad() {
   var _sec=G('specEnableCheck');if(_sec)_sec.checked = d.spectral_scan_enabled;
   var _sel=G('specEnableLabel');if(_sel)_sel.textContent = d.spectral_scan_enabled ? 'Enabled' : 'Disabled';
 
-  // IF Chain table - removed from UI, skip
+  // Channel table - removed from UI, skip
 
   // LBT channels
   const lbtList = G('specLbtList');
@@ -1710,7 +1949,7 @@ showTab = function(name, btn) {
   <!-- Header -->
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:12px">
     <div>
-      <h2 style="margin:0;font-size:18px;font-weight:600;color:var(--tx)">📊 SX1261 Spectrum & Signal Quality</h2>
+      <h2 style="margin:0;font-size:18px;font-weight:600;color:var(--tx)">📊 Channel E Spectrum & Signal Quality</h2>
       
       <p style="margin:4px 0 0;font-size:12px;color:var(--txm)">RF Signal Monitoring — Per-Channel RSSI, SNR, Noise Floor</p>
     </div>
@@ -1719,19 +1958,19 @@ showTab = function(name, btn) {
   <!-- Info cards -->
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px">
     <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">SX1261 SPI</div>
+      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Channel E SPI</div>
       <div id="specSpiPath" style="font-size:14px;font-weight:600;color:#6366f1">/dev/spidev0.1</div>
     </div>
     <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">SX1261 Role</div>
+      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Channel E Role</div>
       <div id="specSx1261Role" style="font-size:14px;font-weight:600;color:#10b981">LBT / CAD / Spectrum</div>
     </div>
     <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">SX1261 Status</div>
+      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Channel E Status</div>
       <div id="specSx1261Status" style="font-size:14px;font-weight:600;color:#f59e0b">Checking...</div>
     </div>
     <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Active IF Chains</div>
+      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Active Channels</div>
       <div id="specChCount" style="font-size:14px;font-weight:600;color:var(--tx)">—</div>
     </div>
     <div class="gl" style="padding:14px">
@@ -1762,7 +2001,7 @@ showTab = function(name, btn) {
       <canvas id="spectrumChart"></canvas>
     </div>
     <div style="margin-top:10px;display:flex;gap:16px;font-size:11px;color:var(--txm);flex-wrap:wrap">
-      <span><span style="display:inline-block;width:12px;height:12px;background:#6366f1;border-radius:2px;margin-right:4px"></span>Multi-SF IF Chain</span>
+      <span><span style="display:inline-block;width:12px;height:12px;background:#6366f1;border-radius:2px;margin-right:4px"></span>Multi-SF Channel</span>
       <span><span style="display:inline-block;width:12px;height:12px;background:#f59e0b;border-radius:2px;margin-right:4px"></span>LoRa Std (IF8)</span>
       <span><span style="display:inline-block;width:12px;height:12px;background:#10b981;border-radius:2px;margin-right:4px"></span>FSK (IF9)</span>
     </div>
@@ -2112,7 +2351,7 @@ function renderNfChart(data, stats) {
         var color = getChColor(idx);
         var label = chId;
         var m = chId.match(/^channel_([a-z])$/);
-        if (m) label = 'Channel ' + m[1].toUpperCase();
+        if (m) { var _idx = m[1].charCodeAt(0) - 97; label = 'IF' + _idx; }
         var pts = byChannel[chId].map(function(pt) {
           return { x: new Date(pt.timestamp * 1000), y: pt.noise_floor_dbm || pt.avg_nf };
         });
@@ -2174,8 +2413,9 @@ async function loadPerChannelNF() {
 }
 
 function formatChannelName(chId) {
+  if (chId === 'channel_e') return 'Channel E';
   var m = chId.match(/^channel_([a-z])$/);
-  if (m) return 'Channel ' + m[1].toUpperCase();
+  if (m) { var idx = m[1].charCodeAt(0) - 97; return 'IF' + idx; }
   return chId;
 }
 
@@ -2519,7 +2759,7 @@ function renderNfCards(channels) {
       var swTotal = (ch.sw_clear||0) + (ch.sw_detected||0);
       if (hwTotal > 0 || swTotal > 0) {
         html += '<div style="font-size:10px;color:var(--txm);margin-top:4px;display:grid;grid-template-columns:1fr 1fr;gap:2px">';
-        html += '<span title="Hardware CAD (SX1261)">&#x1F4E1; HW: C:' + (ch.hw_clear||0) + ' D:' + (ch.hw_detected||0) + '</span>';
+        html += '<span title="Hardware CAD (Channel E)">&#x1F4E1; HW: C:' + (ch.hw_clear||0) + ' D:' + (ch.hw_detected||0) + '</span>';
         html += '<span title="Software CAD (pattern)">&#x1F4BB; SW: C:' + (ch.sw_clear||0) + ' D:' + (ch.sw_detected||0) + '</span>';
         html += '</div>';
       }

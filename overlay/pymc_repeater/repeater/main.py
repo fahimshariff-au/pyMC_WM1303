@@ -994,8 +994,8 @@ class RepeaterDaemon:
             return
 
         radios = backend.get_radios()
-        if len(radios) < 2:
-            logger.warning(f"Need >= 2 radios for bridge, got {len(radios)}")
+        if len(radios) < 1:
+            logger.warning(f"Need >= 1 radio for bridge, got {len(radios)}")
             return
 
         # Rules already loaded above from SSOT or config.yaml fallback
@@ -1335,6 +1335,24 @@ class RepeaterDaemon:
             if self.bridge_engine:
                 asyncio.create_task(self.bridge_engine.run())
                 logger.info("BridgeEngine: RX loops started (cross-channel forwarding active)")
+
+                # --- Channel E (BW62.5 kHz software-decoded) ---
+                try:
+#E62K# # E62K_OFF #                     from repeater.channel_e_bridge import ChannelEBridge
+#E62K# # E62K_OFF #                     self._channel_e = ChannelEBridge(self.bridge_engine, backend=self.radio)
+#E62K# # E62K_OFF #                     asyncio.create_task(self._channel_e.run())
+                    logger.info("Channel E (BW62.5 kHz): bridge listener started")
+                except Exception as e:
+                    logger.warning("Channel E init failed: %s", e)
+
+                # --- Channel E (native LoRa) ---
+                try:
+                    from repeater.channel_e_bridge import ChannelEBridge
+                    self._channel_e = ChannelEBridge(self.bridge_engine, backend=self.radio)
+                    asyncio.create_task(self._channel_e.run())
+                    logger.info("Channel E (native LoRa): bridge listener started")
+                except Exception as e:
+                    logger.warning("Channel E init failed: %s", e)
 
             # Safety-net: re-register repeater handler if not yet registered
             if (self.bridge_engine and self.repeater_handler

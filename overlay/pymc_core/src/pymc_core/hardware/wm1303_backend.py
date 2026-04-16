@@ -209,7 +209,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
         'freq_start': _scan_start,
         'nb_chan': _nb_chan,  # typically 8-9 channels for 1.6MHz BW
         'nb_scan': 100,  # reduced from 2000 for faster scans
-        'pace_s': 1,  # try every 1s to catch TX gaps
+        'pace_s': 60,  # 5 minutes between sweeps  # try every 1s to catch TX gaps
     }
     logger.info('_generate_bridge_conf: spectral_scan enabled '
                 '(freq_start=%d, nb_chan=%d, freq_stop=%d, center=%d)',
@@ -252,7 +252,26 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
     for i in range(8):
         key = f'chan_multiSF_{i}'
         if key not in chan_configs:
-            chan_configs[key] = {'enable': False, 'radio': 0, 'if': 0}
+            chan_configs[key] = {'enable': True, 'radio': 0, 'if': 0}
+
+    # --- Channel E config from wm1303_ui.json ---
+    _che_lora_rx = {'enable': True, 'freq_hz': 869618000, 'bandwidth': 62500, 'spreading_factor': 8, 'coding_rate': 1}
+    try:
+        _che_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+        if _che_path.exists():
+            import json as _jche
+            _che_d = _jche.loads(_che_path.read_text()).get('channel_e', {})
+            if _che_d:
+                _che_lora_rx = {
+                    'enable': bool(_che_d.get('enabled', True)),
+                    'freq_hz': int(_che_d.get('frequency', 869618000)),
+                    'bandwidth': int(_che_d.get('bandwidth', 62500)),
+                    'spreading_factor': int(_che_d.get('spreading_factor', 8)),
+                    'coding_rate': {'4/5':1,'4/6':2,'4/7':3,'4/8':4}.get(str(_che_d.get('coding_rate','4/5')), int(_che_d.get('coding_rate',1)) if str(_che_d.get('coding_rate','1')).isdigit() else 1),
+                }
+                logger.info('_generate_bridge_conf: channel_e from UI: freq=%d bw=%d sf=%d cr=%d', _che_lora_rx['freq_hz'], _che_lora_rx['bandwidth'], _che_lora_rx['spreading_factor'], _che_lora_rx['coding_rate'])
+    except Exception as _cex:
+        logger.warning('_generate_bridge_conf: channel_e read error: %s', _cex)
 
     conf = {
         'SX130x_conf': {
@@ -263,7 +282,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             'antenna_gain': 0,
             'full_duplex': False,
             'precision_timestamp': {
-                'enable': False,
+                'enable': True,
                 'max_ts_metrics': 255,
                 'nb_symbols': 1,
             },
@@ -291,14 +310,15 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 'tx_enable': False,
             },
             **chan_configs,
-            'chan_Lora_std':  {'enable': False, 'radio': 0, 'if': 0,
+            'chan_Lora_std':  {'enable': True, 'radio': 0, 'if': 0,
                               'bandwidth': 250000, 'spread_factor': 7},
-            'chan_FSK':       {'enable': False, 'radio': 0, 'if': 0,
+            'chan_FSK':       {'enable': True, 'radio': 0, 'if': 0,
                               'bandwidth': 125000, 'datarate': 50000},
             # SX1261 companion chip for LBT (Listen Before Talk)
             'sx1261_conf': {
                 'spi_path': '/dev/spidev0.1',
                 'rssi_offset': 0,
+                'lora_rx': _che_lora_rx,
                 'spectral_scan': _spectral_scan_conf,
                 'lbt': {
                     'enable': _lbt_enabled,
@@ -321,6 +341,50 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             'forward_crc_disabled': True,
         },
     }
+
+    # ── CAPTURE_RAM streaming config (BW62.5 decoder) ──────────────
+    capture_conf_path = os.path.join(os.path.dirname(__file__), "capture_conf.json")
+    # Try loading from /home/pi/wm1303_pf/capture_conf.json first
+    _cap_path = "/home/pi/wm1303_pf/capture_conf.json"
+    try:
+        import json as _json
+        with open(_cap_path) as _f:
+            _cap_raw = _json.load(_f)
+        # Support both flat and nested format
+        _cap = _cap_raw.get("capture_conf", _cap_raw)
+        if _cap.get("enable", False):
+            conf["capture_conf"] = {
+                "enable": True,
+                "source": _cap.get("source", 2),
+                "period": _cap.get("period", 511),
+            }
+            # Pass through optional capture fields
+            for _opt_key in ("udp_port", "num_phases", "phase_delay_ms"):
+                if _opt_key in _cap:
+                    conf["capture_conf"][_opt_key] = _cap[_opt_key]
+            logger.info("_generate_bridge_conf: added capture_conf from %s (source=%d, period=%d)",
+                        _cap_path, conf["capture_conf"]["source"], conf["capture_conf"]["period"])
+    except Exception as _ex:
+        logger.debug("_generate_bridge_conf: no capture_conf.json: %s", _ex)
+
+    # === BW62.5 Radio B patch ===
+    # If a software_decoded channel exists, configure Radio B for it.
+    for _idx, _ch in enumerate(all_ui_channels):
+        if _ch.get("software_decoded", False) and _idx < 8:
+            _ch_freq = int(_ch.get("frequency", 0))
+            if _ch_freq:
+                _r1_freq = _ch_freq
+                conf["SX130x_conf"]["radio_1"]["freq"] = _r1_freq
+                _key = f"chan_multiSF_{_idx}"
+                conf["SX130x_conf"][_key] = {
+                    "enable": True, "radio": 1, "if": 0
+                }
+                logger.info(
+                    "_generate_bridge_conf: BW62.5 patch: radio_1=%d, "
+                    "%s -> radio=1 if=0 (channel=%d Hz)",
+                    _r1_freq, _key, _ch_freq)
+    # === End BW62.5 patch ===
+
     return conf
 
 
@@ -432,9 +496,15 @@ class WM1303Backend:
         self._sx1261 = None
         self._sx1261_available = False
 
+        # Channel E config cache (avoid reading JSON on every RX packet)
+        self._channel_e_freq_cache: int = 0
+        self._channel_e_config_cache: dict = {}
+        self._channel_e_cache_time: float = 0
+        self._channel_e_cache_ttl: float = 5.0  # seconds
+
         # RX Watchdog: auto-restart pkt_fwd when concentrator stops receiving
         self._last_rx_timestamp = time.monotonic()
-        self._watchdog_timeout = 180  # 3 minutes without RX triggers restart
+        self._watchdog_timeout = 9999  # 3 minutes without RX triggers restart
         self._watchdog_thread: threading.Thread | None = None
         self._watchdog_running = False
 
@@ -443,8 +513,8 @@ class WM1303Backend:
         self._last_stat_rxnb = -1      # last rxnb value from PUSH_DATA stats
         self._last_stat_txnb = 0       # last txnb value from PUSH_DATA stats
 
-        # Early detection: SX1261 RSSI vs SX1302 RX comparison (Detection Method 2)
-        self._rssi_spike_count = 0             # strong RSSI detections by SX1261
+        # Early detection: Channel E RSSI vs SX1302 RX comparison (Detection Method 2)
+        self._rssi_spike_count = 0             # strong RSSI detections by Channel E
         self._rssi_spike_window_start = time.monotonic()  # window start for spike counting
 
 
@@ -717,6 +787,89 @@ class WM1303Backend:
                        '(freq=%d, SF%d, BW%.0fkHz)',
                        channel_id, freq_hz, sf, bw_khz)
 
+#CHANNEL_E_SW_DISABLED#         # --- Channel E software-decoded (BW62.5 kHz) TX queue ---
+#CHANNEL_E_SW_DISABLED#         try:
+#CHANNEL_E_SW_DISABLED#             self._tx_queue_manager.add_channel(
+#CHANNEL_E_SW_DISABLED#                 channel_id="channel_e_sw",
+#CHANNEL_E_SW_DISABLED#                 freq_hz=869618000,
+#CHANNEL_E_SW_DISABLED#                 bw_khz=62.5,
+#CHANNEL_E_SW_DISABLED#                 sf=8,
+#CHANNEL_E_SW_DISABLED#                 cr=5,
+#CHANNEL_E_SW_DISABLED#                 preamble=17,
+#CHANNEL_E_SW_DISABLED#                 tx_power=14,
+#CHANNEL_E_SW_DISABLED#             )
+#CHANNEL_E_SW_DISABLED#             logger.info("WM1303Backend: TX queue created for channel_e_sw "
+#CHANNEL_E_SW_DISABLED#                        "(freq=869618000, SF8, BW62.5kHz)")
+#CHANNEL_E_SW_DISABLED#         except ValueError:
+#CHANNEL_E_SW_DISABLED#             logger.warning("WM1303Backend: could not add channel_e_sw TX queue "
+#CHANNEL_E_SW_DISABLED#                           "(max channels reached)")
+
+        # --- Channel E (BW62.5 kHz / Channel E native) TX queue ---
+        # Read parameters dynamically from wm1303_ui.json (SSOT)
+        try:
+            _che_tx_freq = 869618000
+            _che_tx_bw = 62.5
+            _che_tx_sf = 8
+            _che_tx_cr = 5
+            _che_tx_preamble = 17
+            _che_tx_power = 27
+            try:
+                _che_tx_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+                if _che_tx_path.exists():
+                    _che_tx_ui = json.loads(_che_tx_path.read_text()).get('channel_e', {})
+                    if _che_tx_ui:
+                        _che_tx_freq = int(_che_tx_ui.get('frequency', 869618000))
+                        _che_tx_bw = int(_che_tx_ui.get('bandwidth', 62500)) / 1000.0
+                        _che_tx_sf = int(_che_tx_ui.get('spreading_factor', 8))
+                        _cr_raw = _che_tx_ui.get('coding_rate', '4/5')
+                        _cr_map = {'4/5': 5, '4/6': 6, '4/7': 7, '4/8': 8}
+                        if isinstance(_cr_raw, str) and _cr_raw in _cr_map:
+                            _che_tx_cr = _cr_map[_cr_raw]
+                        elif isinstance(_cr_raw, int) and 1 <= _cr_raw <= 4:
+                            _che_tx_cr = _cr_raw + 4  # HAL int 1=4/5 -> cr=5
+                        _che_tx_preamble = int(_che_tx_ui.get('preamble_length', 17))
+                        _che_tx_power = int(_che_tx_ui.get('tx_power', 27))
+            except Exception as _che_tx_err:
+                logger.warning("WM1303Backend: channel_e TX queue UI read error: %s, using defaults", _che_tx_err)
+            self._tx_queue_manager.add_channel(
+                channel_id="channel_e",
+                freq_hz=_che_tx_freq,
+                bw_khz=_che_tx_bw,
+                sf=_che_tx_sf,
+                cr=_che_tx_cr,
+                preamble=_che_tx_preamble,
+                tx_power=_che_tx_power,
+            )
+            logger.info("WM1303Backend: TX queue created for channel_e "
+                       "(freq=%d, SF%d, BW%.1fkHz, CR4/%d, preamble=%d, TX%ddBm)",
+                       _che_tx_freq, _che_tx_sf, _che_tx_bw, _che_tx_cr,
+                       _che_tx_preamble, _che_tx_power)
+        except ValueError:
+            logger.warning("WM1303Backend: could not add channel_e TX queue "
+                          "(max channels reached)")
+
+
+    def _load_channel_e_cache(self) -> int:
+        """Load and cache channel_e frequency from wm1303_ui.json.
+
+        Returns cached value if TTL has not expired, otherwise re-reads
+        the JSON file. This avoids disk I/O on every RX packet.
+        """
+        now = time.monotonic()
+        if (now - self._channel_e_cache_time) < self._channel_e_cache_ttl and self._channel_e_freq_cache:
+            return self._channel_e_freq_cache
+        try:
+            _ui = json.loads(Path("/etc/pymc_repeater/wm1303_ui.json").read_text()).get("channel_e", {})
+            self._channel_e_config_cache = _ui
+            self._channel_e_freq_cache = int(_ui.get("frequency", 0))
+            self._channel_e_cache_time = now
+        except Exception as e:
+            logger.debug("WM1303Backend: channel_e cache refresh error: %s", e)
+            # Keep stale cache if available
+            if not self._channel_e_freq_cache:
+                self._channel_e_freq_cache = 0
+        return self._channel_e_freq_cache
+
     def _apply_ssot_channel_freqs(self) -> None:
         """Apply SSOT channel params from wm1303_ui.json to self.channels.
 
@@ -812,7 +965,7 @@ class WM1303Backend:
         return 0.0  # batch already formed → send NOW
 
     def _init_sx1261_lbt(self) -> None:
-        """Initialize SX1261 status reporting (managed by HAL)."""
+        """Initialize Channel E status reporting (managed by HAL)."""
         self._sx1261 = None
         self._sx1261_available = False
         self._sx1261_managed_by_hal = True
@@ -825,13 +978,13 @@ class WM1303Backend:
                 with open(cfg_path) as f:
                     cfg = yaml.safe_load(f) or {}
                 self._sx1261_hal_config = cfg.get('sx1261_lbt', {})
-                logger.info('WM1303Backend: SX1261 is managed by lora_pkt_fwd HAL '
+                logger.info('WM1303Backend: Channel E is managed by lora_pkt_fwd HAL '
                            '(SPI conflict prevents independent access). '
                            'Config: role=%s', self._sx1261_hal_config.get('role', 'unknown'))
             else:
-                logger.info('WM1303Backend: config.yaml not found, SX1261 status unknown')
+                logger.info('WM1303Backend: config.yaml not found, Channel E status unknown')
         except Exception as e:
-            logger.warning('WM1303Backend: Could not read SX1261 config: %s', e)
+            logger.warning('WM1303Backend: Could not read Channel E config: %s', e)
 
 
 
@@ -942,6 +1095,14 @@ class WM1303Backend:
                 if fn:
                     fn_key = fn.lower().replace(' ', '_')
                     new_cache[fn_key] = new_cache[ch_name]
+            # --- Also include channel_e from its separate UI section ---
+            che = ui.get('channel_e', {})
+            if che:
+                new_cache['channel_e'] = {
+                    'lbt_enabled': che.get('lbt_enabled', False),
+                    'lbt_rssi_target': che.get('lbt_threshold',
+                                               che.get('lbt_rssi_target', -80)),
+                }
             self._lbt_config_cache = new_cache
             self._lbt_config_cache_time = now
             return new_cache.get(channel_id, {'lbt_enabled': False})
@@ -1010,6 +1171,15 @@ class WM1303Backend:
                 return
             ui = json.loads(ui_path.read_text())
             channels = [ch for ch in ui.get('channels', []) if ch.get('active', False)]
+            # Include Channel E (SX1261) in noise floor processing
+            che_cfg = ui.get('channel_e', {})
+            if che_cfg.get('enabled', False):
+                channels.append({
+                    'name': che_cfg.get('friendly_name', 'Channel E'),
+                    'frequency': int(che_cfg.get('frequency', 0)),
+                    'bandwidth': int(che_cfg.get('bandwidth', 62500)),
+                    'active': True
+                })
             # Build/refresh freq_hz -> channel_id mapping
             new_freq_map = {}
             # Build/refresh freq_hz -> ui_config_name mapping
@@ -1033,6 +1203,16 @@ class WM1303Backend:
                     if f:
                         new_freq_map[int(f)] = _CHID[idx]
                     idx += 1
+            # --- Channel E (SX1261) ---
+            che = ui.get('channel_e', {})
+            if che.get('enabled', False):
+                che_name = che.get('friendly_name', 'Channel E')
+                che_freq = int(che.get('frequency', 0))
+                new_id_map['channel_e'] = che_name
+                new_ui_to_ch_id[che_name] = 'channel_e'
+                if che_freq:
+                    new_map[che_freq] = che_name
+                    new_freq_map[che_freq] = 'channel_e'
             with self._nf_lock:
                 self._freq_to_ui_name = new_map
                 self._ch_id_to_ui_name = new_id_map
@@ -1232,6 +1412,11 @@ class WM1303Backend:
             if ch.get('active', False) and idx < len(_CHID):
                 ch_id_to_ui_name[_CHID[idx]] = ch.get('name', '')
                 idx += 1
+        # Include Channel E (SX1261) from pre-built mapping
+        with self._nf_lock:
+            _che_ui_name = self._ch_id_to_ui_name.get('channel_e')
+        if _che_ui_name:
+            ch_id_to_ui_name['channel_e'] = _che_ui_name
 
         with self._rx_nf_lock:
             for ch_id, estimates in self._rx_nf_estimates.items():
@@ -1413,6 +1598,11 @@ class WM1303Backend:
                 if fn:
                     fn_key = fn.lower().replace(' ', '_')
                     new_cache[fn_key] = cad_enabled
+            # --- Also include channel_e from its separate UI section ---
+            che = ui.get('channel_e', {})
+            if che:
+                cad_e = che.get('cad_enabled', che.get('lbt_enabled', False))
+                new_cache['channel_e'] = cad_e
             self._cad_config_cache = new_cache
             self._cad_config_cache_time = now
             # Write CAD config for the C HAL whenever config is refreshed
@@ -1601,7 +1791,7 @@ class WM1303Backend:
                 'noise_floor': ch_nf,
                 'freq_mhz': best_freq,
                 'reason': 'channel_busy',
-                'cad_result': {'detected': False, 'source': 'skipped_rssi_blocked', 'reason': 'rssi_above_threshold'},
+                'cad_result': 'skipped_rssi_blocked',
             }
 
         # ② CAD check (if enabled for this channel)
@@ -1822,7 +2012,7 @@ class WM1303Backend:
         """Monitor RX activity with 3 detection methods and restart pkt_fwd if stuck.
 
         Detection 1 (STAT): PUSH_DATA stats show rxnb=0 for 2+ consecutive windows (~60s)
-        Detection 2 (RSSI): SX1261 sees strong RF but SX1302 not receiving (60s)
+        Detection 2 (RSSI): Channel E sees strong RF but SX1302 not receiving (60s)
         Detection 3 (TIMEOUT): Original fallback - no RX for full timeout (180s)
         """
         logger.info('WM1303Backend: RX watchdog started (timeout=%ds, '
@@ -1836,7 +2026,7 @@ class WM1303Backend:
             elapsed = time.monotonic() - self._last_rx_timestamp
 
             # Detection 1: PUSH_DATA stats show no RX for 2+ windows (~60s)
-            if self._zero_rx_stat_count >= 2:
+            if self._zero_rx_stat_count >= 999:
                 logger.warning(
                     'WM1303Backend: WATCHDOG [STAT] - rxnb=0 for %d stat windows '
                     'with TX active, restarting pkt_fwd',
@@ -1845,10 +2035,10 @@ class WM1303Backend:
                 self._do_watchdog_restart('stat_monitor')
                 continue
 
-            # Detection 2: SX1261 sees RF but SX1302 not receiving (60s)
-            if elapsed > 60 and self._rssi_spike_count >= 5:
+            # Detection 2: Channel E sees RF but SX1302 not receiving (60s)
+            if elapsed > 60 and self._rssi_spike_count >= 999:
                 logger.warning(
-                    'WM1303Backend: WATCHDOG [RSSI] - %d RSSI spikes detected by SX1261 '
+                    'WM1303Backend: WATCHDOG [RSSI] - %d RSSI spikes detected by Channel E '
                     'but no RX for %.0fs, restarting pkt_fwd',
                     self._rssi_spike_count, elapsed
                 )
@@ -2141,6 +2331,14 @@ class WM1303Backend:
                 logger.info('WM1303Backend: RX->%s freq=%d SF%d %d bytes rssi=%.1f snr=%.1f',
                              cid, freq_hz, rx_sf, len(payload), rssi, snr)
                 radio.enqueue_rx(payload, rssi=int(rssi), snr=snr)
+                # --- 62KHZ RESEARCH: Payload hex logger ---
+                try:
+                    import time as _t62khz
+                    with open('/tmp/payload_hex_log.txt', 'a') as _fhex:
+                        _fhex.write(f"{_t62khz.strftime('%H:%M:%S.%f')} freq={freq_hz} SF{rx_sf} size={len(payload)} hex={payload.hex()}\n")
+                except Exception:
+                    pass
+                # --- END 62KHZ RESEARCH ---
                 self._last_rx_timestamp = time.monotonic()  # watchdog: RX activity
                 self._zero_rx_stat_count = 0  # reset stat monitor on valid RX
                 self._rssi_spike_count = 0    # reset RSSI spike monitor on valid RX
@@ -2176,6 +2374,22 @@ class WM1303Backend:
             self._zero_rx_stat_count = 0  # reset stat monitor on valid RX
             self._rssi_spike_count = 0    # reset RSSI spike monitor on valid RX
             matched = True
+
+        # --- Channel E (channel_e) RX injection ---
+        if not matched and hasattr(self, "_channel_e_rx_callback") and self._channel_e_rx_callback is not None:
+            _channel_e_freq = self._load_channel_e_cache()
+            if _channel_e_freq and abs(freq_hz - _channel_e_freq) <= 100000:
+                try:
+                    self._channel_e_rx_callback(payload, rssi=int(rssi), snr=snr)
+                    self._update_rx_stats("channel_e", freq_hz, rssi, snr)
+                    logger.info("WM1303Backend: RX->channel_e freq=%d %d bytes rssi=%.1f snr=%.1f",
+                                freq_hz, len(payload), rssi, snr)
+                    self._last_rx_timestamp = time.monotonic()
+                    self._zero_rx_stat_count = 0
+                    matched = True
+                except Exception as _channel_e_err:
+                    logger.warning("WM1303Backend: channel_e rx_callback error: %s", _channel_e_err)
+        # --- End Channel E injection ---
 
         if not matched:
             logger.info('WM1303Backend: no channel match for freq=%d SF%s '

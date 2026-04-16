@@ -716,6 +716,13 @@ class WM1303API:
             if method == "POST":
                 return self._adv_config_post()
 
+        # -- channel_e (Channel E / LoRa RX configuration) --
+        if resource == "channel_e":
+            if method == "GET":
+                return self._channel_e_get()
+            if method == "POST":
+                return self._channel_e_post()
+
         raise cherrypy.HTTPError(404, "Unknown resource: {}".format(resource))
 
     def _status(self):
@@ -803,6 +810,13 @@ class WM1303API:
                 _version = _vf.read_text().strip()
         except Exception:
             pass
+        # Channel counts including Channel E (SX1261)
+        _ui_data = _load_ui()
+        _if_active = sum(1 for ch in _ui_data.get("channels", []) if ch.get("active", False))
+        _che_active = 1 if _ui_data.get("channel_e", {}).get("enabled", False) else 0
+        _total_ch = 4 + 1  # 4 hardware IF slots (A-D) + Channel E always exists
+        _active_ch = _if_active + _che_active
+        _inactive_ch = _total_ch - _active_ch
         _r=_j({
             "version": _version,
             "service": "active" if svc_active else "inactive",
@@ -819,9 +833,9 @@ class WM1303API:
             "packets_received": _pkt_rx,
             "packets_sent": _pkt_tx,
             "packets_forwarded": _pkt_fwd,
-            "active_channels": sum(1 for ch in _load_ui().get("channels", []) if ch.get("active", False)),
-            "total_channels": 4,
-            "inactive_channels": 4 - sum(1 for ch in _load_ui().get("channels", []) if ch.get("active", False)),
+            "active_channels": _active_ch,
+            "total_channels": _total_ch,
+            "inactive_channels": _inactive_ch,
             "timestamp": time.time(),
         })
         _STATUS_CACHE['data'] = _r
@@ -1075,6 +1089,70 @@ class WM1303API:
                 'dropped_ttl': ch_tx.get('dropped_ttl', 0),
             })
             active_idx += 1
+
+        # --- Include Channel E (SX1261 dedicated LoRa RX/TX) if enabled ---
+        _che_ui = _load_ui().get("channel_e", {})
+        if _che_ui.get("enabled", False):
+            ch_e_st = channel_stats.get("channel_e", {})
+            ch_e_tx = tx_stats.get("channel_e", {})
+            _che_freq = int(_che_ui.get("frequency", 0))
+            _che_rx = ch_e_st.get("rx_count", 0)
+            _che_tx_sent = ch_e_st.get("tx_count", 0) or ch_e_tx.get("total_sent", 0)
+            _che_tx_failed = ch_e_st.get("tx_failed", 0) or ch_e_tx.get("total_failed", 0)
+            _che_last_tx = ch_e_st.get("last_tx_time") or ch_e_tx.get("last_tx_time")
+            _che_last_rx = ch_e_st.get("last_rx_time")
+            _che_rssi = ch_e_st.get("last_rssi", -120.0)
+            _che_rssi_avg = ch_e_st.get("rssi_avg", -120.0)
+            _che_snr = ch_e_st.get("last_snr", 0.0)
+            _che_nf_lbt = ch_e_tx.get("noise_floor_lbt_avg")
+            _che_nf = _find_noise(_che_freq)
+            if _che_nf == 0 or _che_nf is None: _che_nf = -120.0
+            if _che_nf_lbt is not None and _che_nf_lbt > -119.0:
+                _che_nf = _che_nf_lbt
+            _che_total_airtime_ms = ch_e_st.get("total_tx_airtime_ms", 0)
+            _che_duty = round((_che_total_airtime_ms / 1000.0 / uptime_seconds) * 100, 3) if uptime_seconds > 0 else 0
+            channels_live.append({
+                "name": "channel_e",
+                "friendly_name": _che_ui.get("friendly_name", "Channel E"),
+                "frequency": _che_freq,
+                "bandwidth": int(_che_ui.get("bandwidth", 62500)),
+                "spreading_factor": int(_che_ui.get("spreading_factor", 8)),
+                "coding_rate": _che_ui.get("coding_rate", "4/5"),
+                "is_sx1261": True,
+                "rx_packets": _che_rx,
+                "tx_packets": _che_tx_sent,
+                "tx_failed": _che_tx_failed,
+                "last_rx": _che_last_rx,
+                "last_tx": _che_last_tx,
+                "rssi_last": _che_rssi,
+                "rssi_avg": _che_rssi_avg,
+                "snr_last": _che_snr,
+                "noise_floor": _che_nf,
+                "avg_tx_airtime_ms": ch_e_st.get("avg_tx_airtime_ms", 0),
+                "avg_tx_send_ms": ch_e_st.get("avg_tx_send_ms", 0),
+                "avg_tx_wait_ms": ch_e_st.get("avg_tx_wait_ms", 0),
+                "last_tx_airtime_ms": ch_e_st.get("last_tx_airtime_ms", 0),
+                "total_tx_airtime_ms": _che_total_airtime_ms,
+                "total_tx_send_ms": ch_e_st.get("total_tx_send_ms", 0),
+                "tx_bytes": ch_e_st.get("tx_bytes", 0),
+                "tx_duty_pct": _che_duty,
+                "lbt_blocked": ch_e_tx.get("lbt_blocked", 0) or ch_e_st.get("lbt_blocked", 0),
+                "lbt_passed": ch_e_tx.get("lbt_passed", 0) or ch_e_st.get("lbt_passed", 0),
+                "lbt_skipped": ch_e_tx.get("lbt_skipped", 0) or ch_e_st.get("lbt_skipped", 0),
+                "lbt_last_blocked_at": ch_e_tx.get("lbt_last_blocked_at") or ch_e_st.get("lbt_last_blocked_at"),
+                "lbt_last_rssi": ch_e_tx.get("lbt_last_rssi") or ch_e_st.get("lbt_last_rssi"),
+                "noise_floor_lbt_avg": ch_e_tx.get("noise_floor_lbt_avg"),
+                "noise_floor_lbt_min": ch_e_tx.get("noise_floor_lbt_min"),
+                "noise_floor_lbt_max": ch_e_tx.get("noise_floor_lbt_max"),
+                "noise_floor_lbt_samples": ch_e_tx.get("noise_floor_lbt_samples", 0),
+                "queue_pending": ch_e_tx.get("pending", 0),
+                "queue_size": ch_e_tx.get("queue_size", 15),
+                "dropped_overflow": ch_e_tx.get("dropped_overflow", 0),
+                "dropped_ttl": ch_e_tx.get("dropped_ttl", 0),
+            })
+            total_rx += _che_rx
+            total_tx += _che_tx_sent
+
 
         return _j({
             "channels": channels_live,
@@ -1542,6 +1620,45 @@ class WM1303API:
             else:
                 queues[ch_name] = {"enabled": False}
 
+        # --- Include Channel E (SX1261) TX queue if present ---
+        ch_e_stats = tx_stats.get("channel_e", {})
+        if ch_e_stats:
+            _che_ui = _load_ui().get("channel_e", {})
+            queues["channel_e"] = {
+                "enabled": ch_e_stats.get("enabled", True),
+                "pending": ch_e_stats.get("pending", 0),
+                "total_sent": ch_e_stats.get("total_sent", 0),
+                "total_failed": ch_e_stats.get("total_failed", 0),
+                "last_tx": ch_e_stats.get("last_tx_time"),
+                "avg_tx_time_ms": ch_e_stats.get("avg_tx_time_ms", 0),
+                "freq": ch_e_stats.get("freq_hz", int(_che_ui.get("frequency", 0))),
+                "sf": ch_e_stats.get("sf", int(_che_ui.get("spreading_factor", 8))),
+                "bw_khz": ch_e_stats.get("bw_khz", int(_che_ui.get("bandwidth", 62500)) / 1000),
+                "cr": ch_e_stats.get("cr", 5),
+                "avg_airtime_ms": ch_e_stats.get("avg_airtime_ms", 0),
+                "avg_send_ms": ch_e_stats.get("avg_send_ms", 0),
+                "avg_wait_ms": ch_e_stats.get("avg_wait_ms", 0),
+                "last_airtime_ms": ch_e_stats.get("last_airtime_ms", 0),
+                "last_send_ms": ch_e_stats.get("last_send_ms", 0),
+                "last_wait_ms": ch_e_stats.get("last_wait_ms", 0),
+                "total_airtime_ms": ch_e_stats.get("total_airtime_ms", 0),
+                "total_send_ms": ch_e_stats.get("total_send_ms", 0),
+            }
+        elif _load_ui().get("channel_e", {}).get("enabled", False):
+            _che_ui = _load_ui().get("channel_e", {})
+            queues["channel_e"] = {
+                "enabled": True,
+                "pending": 0,
+                "total_sent": 0,
+                "total_failed": 0,
+                "last_tx": None,
+                "avg_tx_time_ms": 0,
+                "freq": int(_che_ui.get("frequency", 0)),
+                "sf": int(_che_ui.get("spreading_factor", 8)),
+                "bw_khz": int(_che_ui.get("bandwidth", 62500)) / 1000,
+                "cr": 5,
+            }
+
         return _j({
             "architecture": "RF1_ONLY",
             "queues": queues,
@@ -1595,6 +1712,7 @@ class WM1303API:
             "last_scan": last_scan,
             "scan_binary_available": _SPECTRAL_BIN.exists(),
             "sx1261_role": "lbt_cad_spectrum_only",
+            "active_channel_count": sum(1 for ch in _load_ui().get("channels", []) if ch.get("active", False)) + (1 if _load_ui().get("channel_e", {}).get("enabled", False) else 0),
             "sx1261_tx_enabled": False,
             "sx1261_status": sx1261_status,
             "timestamp": time.time(),
@@ -1629,7 +1747,7 @@ class WM1303API:
                     return _j({"status": "ok", "result": "Channel " + ("free" if result else "busy"), "channel_free": result})
                 except Exception as e:
                     return _j({"status": "error", "result": str(e), "error": str(e)})
-            return _j({"status": "ok", "result": "SX1261 managed by HAL - channel status unavailable", "channel_free": True, "simulated": False})
+            return _j({"status": "ok", "result": "Channel E managed by HAL - channel status unavailable", "channel_free": True, "simulated": False})
         if action == "cad_test":
             sx = self._get_sx1261()
             if sx and getattr(sx, '_initialized', False):
@@ -1638,7 +1756,7 @@ class WM1303API:
                     return _j({"status": "ok", "result": "Activity " + ("detected" if result else "not detected"), "activity_detected": result})
                 except Exception as e:
                     return _j({"status": "error", "result": str(e), "error": str(e)})
-            return _j({"status": "ok", "result": "SX1261 managed by HAL - activity status unavailable", "activity_detected": False, "simulated": False})
+            return _j({"status": "ok", "result": "Channel E managed by HAL - activity status unavailable", "activity_detected": False, "simulated": False})
         if action == "scan":
             return self._do_spectrum_scan()
         return _j({"error": "unknown action"})
@@ -1701,7 +1819,7 @@ class WM1303API:
                             {"freq_mhz": round(f/1e6, 3), "rssi_dbm": r}
                             for f, r in sorted(_scan_data.items())
                         ]
-                        note = "Real SX1261 HAL spectral scan ({} frequencies)".format(len(scan_points))
+                        note = "Real Channel E HAL spectral scan ({} frequencies)".format(len(scan_points))
                         logger.info("_do_spectrum_scan: got %d real scan points from HAL", len(scan_points))
                 except Exception as _e:
                     logger.debug("_do_spectrum_scan: journal read failed: %s", _e)
@@ -1748,9 +1866,9 @@ class WM1303API:
                 try:
                     results = sx.get_rssi_scan(863000000, 870000000, 200000)
                     scan_points = [{"freq_mhz": round(r["freq_hz"]/1e6, 3), "rssi_dbm": r["rssi_dbm"]} for r in results]
-                    note = "Real SX1261 RSSI measurement (Python driver)"
+                    note = "Real Channel E RSSI measurement (Python driver)"
                 except Exception as e:
-                    logger.debug("SX1261 Python driver scan failed: %s", e)
+                    logger.debug("Channel E Python driver scan failed: %s", e)
                     scan_points = []
 
         # --- Fallback: Simulated data ---
@@ -2573,6 +2691,31 @@ class WM1303API:
                         "color": ch_colors[idx % len(ch_colors)],
                         "data": timeseries
                     })
+                # --- Channel E (SX1261) ---
+                _che_cfg = _load_ui().get("channel_e", {})
+                if _che_cfg.get("enabled", False):
+                    che_rows = conn.execute(
+                        "SELECT timestamp, rx_count, tx_count FROM packet_activity "
+                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
+                        ("channel_e", cutoff)
+                    ).fetchall()
+                    che_buckets = {}
+                    for row in che_rows:
+                        bk = int(row["timestamp"] / bucket_s) * bucket_s
+                        if bk not in che_buckets:
+                            che_buckets[bk] = {"rx": [], "tx": []}
+                        che_buckets[bk]["rx"].append(row["rx_count"] or 0)
+                        che_buckets[bk]["tx"].append(row["tx_count"] or 0)
+                    che_ts = []
+                    for bk_ts in sorted(che_buckets.keys()):
+                        bk = che_buckets[bk_ts]
+                        che_ts.append({"t": bk_ts, "rx": sum(bk["rx"]), "tx": sum(bk["tx"])})
+                    result_channels.append({
+                        "id": "channel_e",
+                        "label": _che_cfg.get("friendly_name", "Channel E"),
+                        "color": "#f97316",
+                        "data": che_ts
+                    })
             return _j({"hours": h, "bucket_seconds": bucket_s, "channels": result_channels})
         except Exception as e:
             logger.error("packet_activity error: %s", e)
@@ -2817,6 +2960,104 @@ class WM1303API:
             logger.error("adv_config_post error: %s", e)
             return _j({"status": "error", "error": str(e)})
 
+
+
+    # ------------------------------------------------------------------ #
+    #  Channel E  (LoRa RX)                                        #
+    # ------------------------------------------------------------------ #
+    def _channel_e_get(self):
+        """Return Channel E LoRa RX channel configuration (SSOT: wm1303_ui.json)."""
+        try:
+            ui = _load_ui()
+            che = ui.get("channel_e", {})
+            cr_raw = che.get("coding_rate", "4/5")
+            if isinstance(cr_raw, int):
+                cr_str = {1:"4/5",2:"4/6",3:"4/7",4:"4/8"}.get(cr_raw, "4/5")
+            else:
+                cr_str = str(cr_raw) if cr_raw else "4/5"
+            result = {
+                "status": "ok",
+                "enabled": che.get("enabled", False),
+                "enable": che.get("enabled", False),
+                "active": che.get("enabled", False),
+                "frequency": che.get("frequency", 869618000),
+                "bandwidth": che.get("bandwidth", 62500),
+                "spreading_factor": che.get("spreading_factor", 8),
+                "coding_rate": cr_str,
+                "boosted_rx": che.get("boosted_rx", False),
+                "friendly_name": che.get("friendly_name", "Channel E"),
+                "preamble_length": che.get("preamble_length", 17),
+                "lbt_enabled": che.get("lbt_enabled", False),
+                "lbt_threshold": che.get("lbt_threshold", -80),
+                "lbt_rssi_target": che.get("lbt_threshold", -80),
+                "cad_enabled": che.get("cad_enabled", False),
+                "tx_power": che.get("tx_power", 27),
+            }
+            return _j(result)
+        except Exception as ex:
+            logger.error("_channel_e_get: %s", ex)
+            return _j({"status": "error", "reason": str(ex)})
+
+    def _channel_e_post(self):
+        """Save Channel E LoRa RX channel configuration."""
+        try:
+            body = json.loads(cherrypy.request.body.read())
+            restart = body.pop("restart", False)
+            gc = _load_global_conf()
+            sx_conf = gc.setdefault("SX130x_conf", {}).setdefault("sx1261_conf", {})
+            lora_rx = sx_conf.setdefault("lora_rx", {})
+            lora_rx["enable"] = bool(body.get("enable", body.get("enabled", lora_rx.get("enable", False))))
+            if "frequency" in body:
+                lora_rx["freq_hz"] = int(body["frequency"])
+            if "bandwidth" in body:
+                lora_rx["bandwidth"] = int(body["bandwidth"])
+            if "spreading_factor" in body:
+                lora_rx["spreading_factor"] = int(body["spreading_factor"])
+            if "coding_rate" in body:
+                _cr_val = body["coding_rate"]
+                _cr_s2i = {"4/5": 1, "4/6": 2, "4/7": 3, "4/8": 4}
+                if isinstance(_cr_val, str) and _cr_val in _cr_s2i:
+                    lora_rx["coding_rate"] = _cr_s2i[_cr_val]
+                else:
+                    try:
+                        lora_rx["coding_rate"] = int(_cr_val)
+                    except (ValueError, TypeError):
+                        lora_rx["coding_rate"] = 1
+            lbt = sx_conf.setdefault("lbt", {})
+            if "lbt_enabled" in body:
+                lbt["enable"] = bool(body["lbt_enabled"])
+            if "lbt_threshold" in body or "lbt_rssi_target" in body:
+                lbt["rssi_target"] = int(body.get("lbt_rssi_target", body.get("lbt_threshold", -80)))
+            from pathlib import Path as _P
+            _P("/home/pi/wm1303_pf/global_conf.json").write_text(json.dumps(gc, indent=2))
+            _P("/home/pi/wm1303_pf/bridge_conf.json").write_text(json.dumps(gc, indent=2))
+            ui = _load_ui()
+            che_ui = ui.setdefault("channel_e", {})
+            for key in ["friendly_name", "boosted_rx", "preamble_length", "cad_enabled", "tx_power", "lbt_enabled", "lbt_threshold"]:
+                if key in body:
+                    che_ui[key] = body[key]
+            che_ui["enabled"] = lora_rx["enable"]
+            che_ui["lbt_enabled"] = lbt.get("enable", False)
+            che_ui["lbt_threshold"] = lbt.get("rssi_target", -80)
+            che_ui["frequency"] = lora_rx.get("freq_hz", 869618000)
+            che_ui["bandwidth"] = lora_rx.get("bandwidth", 62500)
+            che_ui["spreading_factor"] = lora_rx.get("spreading_factor", 8)
+            che_ui["coding_rate"] = {1:"4/5",2:"4/6",3:"4/7",4:"4/8"}.get(lora_rx.get("coding_rate",1), "4/5")
+            _save_ui(ui)
+            logger.info("channel_e config saved: freq=%s bw=%s sf=%s cr=%s enabled=%s",
+                        lora_rx.get("freq_hz"), lora_rx.get("bandwidth"),
+                        lora_rx.get("spreading_factor"), lora_rx.get("coding_rate"),
+                        lora_rx["enable"])
+            if restart:
+                import subprocess as _sp_r, threading as _thr_r
+                def _do_restart():
+                    import time as _t; _t.sleep(1)
+                    _sp_r.run(["sudo", "systemctl", "restart", _SVC_NAME], capture_output=True, timeout=30)
+                _thr_r.Thread(target=_do_restart, daemon=True).start()
+            return _j({"status": "ok", "restart": restart})
+        except Exception as ex:
+            logger.error("_channel_e_post: %s", ex)
+            return _j({"status": "error", "reason": str(ex)})
 
 # --- Background packet activity recorder (every 60s) ---
 _pkt_act_last_counts = {}  # {channel_id: {"rx": N, "tx": N}} cumulative from previous interval

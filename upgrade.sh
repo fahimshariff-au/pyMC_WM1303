@@ -283,6 +283,7 @@ cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1302.c"  "${HAL_DIR}/libloragw/src
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1261.c"  "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1302.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1261.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_hal.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/sx1261_defs.h"    "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/Makefile"             "${HAL_DIR}/libloragw/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/src/lora_pkt_fwd.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
@@ -302,7 +303,7 @@ step "Applying pyMC_Repeater overlay"
 RPT_DIR="${REPO_DIR}/pyMC_Repeater"
 
 # repeater/ level files
-for f in bridge_engine.py config_manager.py engine.py main.py identity_manager.py config.py packet_router.py; do
+for f in bridge_engine.py channel_e_bridge.py config_manager.py engine.py main.py identity_manager.py config.py packet_router.py; do
     if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_repeater/repeater/${f}" "${RPT_DIR}/repeater/" >> "${LOG_FILE}" 2>&1
     fi
@@ -346,6 +347,7 @@ for overlay_file in \
     "libloragw/src/loragw_sx1302.c" \
     "libloragw/src/loragw_sx1261.c" \
     "libloragw/inc/loragw_sx1302.h" \
+    "libloragw/inc/loragw_hal.h" \
     "libloragw/inc/loragw_sx1261.h" \
     "libloragw/inc/sx1261_defs.h" \
     "libloragw/Makefile" \
@@ -476,7 +478,7 @@ fi
 step "Cleaning Python bytecode caches"
 find ${INSTALL_BASE} -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 find ${VENV_DIR} -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-rm -f /tmp/pymc_spectral_results.json 2>/dev/null || true
+rm -f /tmp/pymc_spectral_results.json /tmp/pymc_channel_e_bridge_conf.json 2>/dev/null || true
 ok "Caches cleaned"
 
 

@@ -36,6 +36,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 
 typedef enum {
     SX1261_CALIBRATE_IMAGE          = 0x98,
+    SX1261_CALIBRATE                = 0x89,
     SX1261_CLR_IRQ_STATUS           = 0x02,
     SX1261_STOP_TIMER_ON_PREAMBLE   = 0x9F,
     SX1261_SET_RFSWITCHMODE         = 0x9D,

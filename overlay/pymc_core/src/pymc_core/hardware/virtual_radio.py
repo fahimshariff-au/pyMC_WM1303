@@ -17,7 +17,7 @@ class VirtualLoRaRadio(LoRaRadio):
     concentrator. The backend manages the actual hardware (lora_pkt_fwd)
     and routes received packets to the correct virtual radio instance.
 
-    TX is routed through the SX1261 TX queue (if available) for
+    TX is routed through the Channel E TX queue (if available) for
     dedicated TX without interrupting SX1303 RX.
     """
 
@@ -166,8 +166,8 @@ class VirtualLoRaRadio(LoRaRadio):
         """Send data on this channel.
 
         Routes through backend.send() which uses:
-        - SX1261 TX queue (primary) - dedicated TX radio, no RX interruption
-        - SX1303 PULL_RESP (fallback) - if SX1261 unavailable
+        - Channel E TX queue (primary) - dedicated TX radio, no RX interruption
+        - SX1303 PULL_RESP (fallback) - if Channel E unavailable
         """
         meta = await self.backend.send(
             self.channel_id, data,

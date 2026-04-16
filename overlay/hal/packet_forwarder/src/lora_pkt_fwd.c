@@ -55,6 +55,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #include "loragw_reg.h"
 #include "loragw_gps.h"
 #include "loragw_sx1261.h"  /* for sx1261_cad_scan() */
+#include "capture_thread.h" /* for CAPTURE_RAM streaming */
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE MACROS ------------------------------------------------------- */
@@ -357,6 +358,25 @@ static uint32_t nb_pkt_received_fsk = 0;
 
 static struct lgw_conf_debug_s debugconf;
 static uint32_t nb_pkt_received_ref[16];
+static volatile uint64_t spectral_last_rx_ms = 0;
+static volatile uint32_t spectral_last_rx_toa_ms = 0;
+
+static uint64_t spectral_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((uint64_t)ts.tv_sec * 1000ULL) + ((uint64_t)ts.tv_nsec / 1000000ULL);
+}
+
+static uint32_t spectral_compute_rx_toa_ms(const struct lgw_pkt_rx_s *p) {
+    uint32_t toa_us = 0;
+    if (p == NULL) return 0;
+    if (p->modulation == MOD_LORA) {
+        toa_us = lora_packet_time_on_air(p->bandwidth, p->datarate, p->coderate, 8, false, false, p->size, NULL, NULL, NULL);
+        return (uint32_t)((toa_us + 999U) / 1000U);
+    }
+    return 0;
+}
+
 
 /* Interface type */
 static lgw_com_type_t com_type = LGW_COM_SPI;
@@ -744,6 +764,75 @@ static int parse_SX130x_configuration(const char * conf_file) {
             }
         }
 
+        /* LoRa RX (Channel F) configuration */
+        val = json_object_get_value(conf_sx1261_obj, "lora_rx");
+        if (json_value_get_type(val) == JSONObject) {
+            JSON_Object *lora_rx_obj = json_value_get_object(val);
+            val = json_object_get_value(lora_rx_obj, "enable");
+            if (json_value_get_type(val) == JSONBoolean) {
+                sx1261conf.lora_rx_enable = (bool)json_value_get_boolean(val);
+            } else {
+                MSG("WARNING: Data type for lora_rx.enable seems wrong, please check\n");
+            }
+            if (sx1261conf.lora_rx_enable == true) {
+                /* Enable the sx1261 radio hardware if not already enabled */
+                sx1261conf.enable = true;
+                MSG("INFO: LoRa RX (Channel F) on SX1261 is enabled\n");
+
+                val = json_object_get_value(lora_rx_obj, "freq_hz");
+                if (json_value_get_type(val) == JSONNumber) {
+                    sx1261conf.lora_rx_freq = (uint32_t)json_value_get_number(val);
+                } else {
+                    MSG("WARNING: Data type for lora_rx.freq_hz seems wrong, please check\n");
+                }
+
+                val = json_object_get_value(lora_rx_obj, "bandwidth");
+                if (json_value_get_type(val) == JSONNumber) {
+                    bw = (uint32_t)json_value_get_number(val);
+                    switch(bw) {
+                        case 500000: sx1261conf.lora_rx_bw = BW_500KHZ; break;
+                        case 250000: sx1261conf.lora_rx_bw = BW_250KHZ; break;
+                        case 125000: sx1261conf.lora_rx_bw = BW_125KHZ; break;
+                        case 62500:  sx1261conf.lora_rx_bw = BW_62K5HZ; break;
+                        default:
+                            MSG("WARNING: unsupported lora_rx bandwidth %u, using 62500\n", bw);
+                            sx1261conf.lora_rx_bw = BW_62K5HZ;
+                    }
+                } else {
+                    MSG("WARNING: Data type for lora_rx.bandwidth seems wrong, defaulting to 62500\n");
+                    sx1261conf.lora_rx_bw = BW_62K5HZ;
+                }
+
+                val = json_object_get_value(lora_rx_obj, "spreading_factor");
+                if (json_value_get_type(val) == JSONNumber) {
+                    sx1261conf.lora_rx_sf = (uint8_t)json_value_get_number(val);
+                    if (sx1261conf.lora_rx_sf < 7 || sx1261conf.lora_rx_sf > 12) {
+                        MSG("WARNING: lora_rx.spreading_factor %u out of range, using 8\n", sx1261conf.lora_rx_sf);
+                        sx1261conf.lora_rx_sf = 8;
+                    }
+                } else {
+                    MSG("WARNING: Data type for lora_rx.spreading_factor seems wrong, defaulting to 8\n");
+                    sx1261conf.lora_rx_sf = 8;
+                }
+
+                val = json_object_get_value(lora_rx_obj, "coding_rate");
+                if (json_value_get_type(val) == JSONNumber) {
+                    sx1261conf.lora_rx_cr = (uint8_t)json_value_get_number(val);
+                    if (sx1261conf.lora_rx_cr < 1 || sx1261conf.lora_rx_cr > 4) {
+                        MSG("WARNING: lora_rx.coding_rate %u out of range, using 1 (4/5)\n", sx1261conf.lora_rx_cr);
+                        sx1261conf.lora_rx_cr = 1;
+                    }
+                } else {
+                    MSG("WARNING: Data type for lora_rx.coding_rate seems wrong, defaulting to 1 (4/5)\n");
+                    sx1261conf.lora_rx_cr = 1;
+                }
+
+                MSG("INFO: LoRa RX Channel F: freq=%uHz, BW=0x%02X, SF%u, CR%u\n",
+                    sx1261conf.lora_rx_freq, sx1261conf.lora_rx_bw,
+                    sx1261conf.lora_rx_sf, sx1261conf.lora_rx_cr);
+            }
+        }
+
         /* all parameters parsed, submitting configuration to the HAL */
         if (lgw_sx1261_setconf(&sx1261conf) != LGW_HAL_SUCCESS) {
             MSG("ERROR: Failed to configure the SX1261 radio\n");
@@ -1106,6 +1195,9 @@ static int parse_SX130x_configuration(const char * conf_file) {
             return -1;
         }
     }
+
+    /* Parse CAPTURE_RAM streaming configuration */
+    capture_conf_parse(json_value_get_object(root_val));
     json_value_free(root_val);
 
     return 0;
@@ -1540,6 +1632,7 @@ int main(int argc, char ** argv)
     pthread_t thrid_valid;
     pthread_t thrid_jit;
     pthread_t thrid_ss;
+    pthread_t thrid_capture;
 
     /* network socket creation */
     struct addrinfo hints;
@@ -1593,6 +1686,9 @@ int main(int argc, char ** argv)
     float up_ack_ratio;
     float dw_ack_ratio;
 
+
+    /* Force line-buffered stdout for piped output */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     /* Parse command line options */
     while( (i = getopt( argc, argv, "hc:" )) != -1 )
     {
@@ -1793,6 +1889,15 @@ int main(int argc, char ** argv)
         i = pthread_create(&thrid_ss, NULL, (void * (*)(void *))thread_spectral_scan, NULL);
         if (i != 0) {
             MSG("ERROR: [main] impossible to create Spectral Scan thread\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    /* spawn thread for CAPTURE_RAM streaming */
+    if (capture_conf.enable == true) {
+        i = pthread_create(&thrid_capture, NULL, (void * (*)(void *))thread_capture_ram, NULL);
+        if (i != 0) {
+            MSG("ERROR: [main] impossible to create CAPTURE_RAM thread\n");
             exit(EXIT_FAILURE);
         }
     }
@@ -2012,6 +2117,12 @@ int main(int argc, char ** argv)
             printf("ERROR: failed to join Spectral Scan thread with %d - %s\n", i, strerror(errno));
         }
     }
+    if (capture_conf.enable == true) {
+        i = pthread_join(thrid_capture, NULL);
+        if (i != 0) {
+            printf("ERROR: failed to join CAPTURE_RAM thread with %d - %s\n", i, strerror(errno));
+        }
+    }
     if (gps_enabled == true) {
         pthread_cancel(thrid_gps); /* don't wait for GPS thread, no access to concentrator board */
         pthread_cancel(thrid_valid); /* don't wait for validation thread, no access to concentrator board */
@@ -2172,6 +2283,15 @@ void thread_up(void) {
             } else {
                 mote_addr = 0;
                 mote_fcnt = 0;
+            }
+
+            /* Track recent RX activity for airtime-aware spectral scan deferral */
+            {
+                uint32_t toa_ms = spectral_compute_rx_toa_ms(p);
+                if (toa_ms > 0) {
+                    spectral_last_rx_ms = spectral_now_ms();
+                    spectral_last_rx_toa_ms = toa_ms;
+                }
             }
 
             /* basic packet filtering */
@@ -2366,11 +2486,15 @@ void thread_up(void) {
                         memcpy((void *)(buff_up + buff_index), (void *)"BW500\"", 6);
                         buff_index += 6;
                         break;
+                    case BW_62K5HZ:
+                        memcpy((void *)(buff_up + buff_index), (void *)"BW62\"", 5);
+                        buff_index += 5;
+                        break;
                     default:
-                        MSG("ERROR: [up] lora packet with unknown bandwidth 0x%02X\n", p->bandwidth);
+                        MSG("WARNING: [up] lora packet with unknown bandwidth 0x%02X\n", p->bandwidth);
                         memcpy((void *)(buff_up + buff_index), (void *)"BW?\"", 4);
                         buff_index += 4;
-                        exit(EXIT_FAILURE);
+                        break; /* was exit(EXIT_FAILURE) */
                 }
 
                 /* Packet ECC coding rate, 11-13 useful chars */
@@ -3148,6 +3272,7 @@ void thread_down(void) {
                     case 125: txpkt.bandwidth = BW_125KHZ; break;
                     case 250: txpkt.bandwidth = BW_250KHZ; break;
                     case 500: txpkt.bandwidth = BW_500KHZ; break;
+                    case  62: txpkt.bandwidth = BW_62K5HZ; break;
                     default:
                         MSG("WARNING: [down] format error in \"txpk.datr\", invalid BW, TX aborted\n");
                         json_value_free(root_val);
@@ -3672,6 +3797,8 @@ void thread_valid(void) {
 /* --- THREAD 6: BACKGROUND SPECTRAL SCAN                           --------- */
 
 void thread_spectral_scan(void) {
+    FILE *dbgf = fopen("/tmp/spectral_debug.log", "w");
+    if (dbgf) { fprintf(dbgf, "spectral scan thread started\n"); fflush(dbgf); }
     int i, x;
     uint32_t freq_hz = spectral_scan_params.freq_hz_start;
     uint32_t freq_hz_stop = spectral_scan_params.freq_hz_start + spectral_scan_params.nb_chan * 200E3;
@@ -3722,51 +3849,52 @@ void thread_spectral_scan(void) {
 
         spectral_scan_started = false;
 
-        /* Start spectral scan — wait for TX to finish (retry loop) */
-        pthread_mutex_lock(&mx_concent);
-
-        /* Retry loop: wait up to 500ms for TX to complete */
+        /* Start spectral scan only when TX is free and recent RX airtime guard has elapsed */
         int scan_ready = 0;
         int retries = 0;
-        int busy_chain = -1;
-        while (!scan_ready && retries < 50) {  /* max 50 x 10ms = 500ms */
-            int tx_busy = 0;
-            for (i = 0; i < LGW_RF_CHAIN_NB; i++) {
-                if (tx_enable[i] == true) {
-                    x = lgw_status((uint8_t)i, TX_STATUS, &tx_status);
-                    if (x == LGW_HAL_SUCCESS && (tx_status == TX_SCHEDULED || tx_status == TX_EMITTING)) {
-                        tx_busy = 1;
-                        busy_chain = i;
-                        break;
-                    }
-                }
-            }
-            if (!tx_busy) {
-                scan_ready = 1;
-            } else {
-                pthread_mutex_unlock(&mx_concent);  /* release so RX/TX threads can work */
-                wait_ms(10);
-                pthread_mutex_lock(&mx_concent);    /* re-acquire for next check */
-                retries++;
-            }
-        }
-        if (!scan_ready) {
-            printf("INFO: skip spectral scan after %d retries (TX busy on RF chain %d)\n", retries, busy_chain);
+        int32_t raw0 = -1, raw1 = -1;
+        uint64_t now_ms;
+        uint64_t last_rx_ms;
+        uint32_t last_rx_toa_ms = 0;
+        uint32_t rx_guard_ms;
+
+        while ((!exit_sig && !quit_sig) && (retries < 50)) {
+            now_ms = spectral_now_ms();
+            last_rx_ms = spectral_last_rx_ms;
+            last_rx_toa_ms = spectral_last_rx_toa_ms;
+            rx_guard_ms = last_rx_toa_ms + 50; /* airtime-aware guard + margin */
+
+            pthread_mutex_lock(&mx_concent);
+            lgw_reg_r(SX1302_REG_TX_TOP_TX_FSM_STATUS_TX_STATUS(0), &raw0);
+            lgw_reg_r(SX1302_REG_TX_TOP_TX_FSM_STATUS_TX_STATUS(1), &raw1);
             pthread_mutex_unlock(&mx_concent);
-            continue; /* main while loop */
-        }
-        if (retries > 0) {
-            printf("INFO: spectral scan waited %d ms for TX to finish\n", retries * 10);
+
+            if (((raw0 & 0xFF) == 0x80) && ((raw1 & 0xFF) == 0x80) &&
+                ((last_rx_ms == 0) || ((now_ms - last_rx_ms) >= rx_guard_ms))) {
+                scan_ready = 1;
+                break;
+            }
+            retries++;
+            wait_ms(10);
         }
 
-        /* TX is free — start the spectral scan */
-        x = lgw_spectral_scan_start(freq_hz, spectral_scan_params.nb_scan);
-        if (x != 0) {
-            printf("ERROR: spectral scan start failed\n");
-            pthread_mutex_unlock(&mx_concent);
-            continue; /* main while loop */
+        if (!scan_ready) {
+            printf("INFO: spectral scan deferred (tx0=0x%02X tx1=0x%02X last_rx_toa=%ums retries=%d)\n",
+                   raw0 & 0xFF, raw1 & 0xFF, last_rx_toa_ms, retries);
+            fflush(stdout);
+            continue;
         }
+
+        if (retries > 0) {
+            printf("INFO: spectral scan waited %d ms for TX/RX idle window\n", retries * 10);
+            fflush(stdout);
+        }
+
+        pthread_mutex_lock(&mx_concent);
+        x = lgw_spectral_scan_start(freq_hz, spectral_scan_params.nb_scan);
         spectral_scan_started = true;
+        printf("INFO: spectral scan started on freq=%u Hz (chan %d/%d), sweep_idx=%d\n", freq_hz, sweep_idx+1, sweep_total, sweep_idx);
+        fflush(stdout);
         pthread_mutex_unlock(&mx_concent);
 
         if (spectral_scan_started == true) {
@@ -3777,6 +3905,12 @@ void thread_spectral_scan(void) {
                 /* handle timeout */
                 if (timeout_check(tm_start, 2000) != 0) {
                     printf("ERROR: %s: TIMEOUT on Spectral Scan\n", __FUNCTION__);
+                    /* Restore LoRa RX after timeout */
+                    pthread_mutex_lock(&mx_concent);
+                    sx1261_lora_rx_restart_light();
+                    pthread_mutex_unlock(&mx_concent);
+                    if (dbgf) { fprintf(dbgf, "LoRa RX restart after TIMEOUT\n"); fflush(dbgf); }
+                    fflush(stdout);
                     break;  /* do while */
                 }
 
@@ -3793,24 +3927,41 @@ void thread_spectral_scan(void) {
                 wait_ms(10);
             } while (status != LGW_SPECTRAL_SCAN_STATUS_COMPLETED && status != LGW_SPECTRAL_SCAN_STATUS_ABORTED);
 
+            printf("INFO: spectral scan status loop exited: status=%d (0=unknown,1=completed,2=aborted)\n", status);
+            if (dbgf) { fprintf(dbgf, "status_loop_exit status=%d\n", status); fflush(dbgf); }
+            fflush(stdout);
+
             if (status == LGW_SPECTRAL_SCAN_STATUS_COMPLETED) {
                 /* Get spectral scan results */
                 memset(levels, 0, sizeof levels);
                 memset(results, 0, sizeof results);
+                printf("DEBUG: about to call lgw_spectral_scan_get_results for freq=%u\n", freq_hz);
+                if (dbgf) { fprintf(dbgf, "about to call get_results freq=%u status=%d\n", freq_hz, status); fflush(dbgf); }
+                fflush(stdout);
                 pthread_mutex_lock(&mx_concent);
                 x = lgw_spectral_scan_get_results(levels, results);
                 pthread_mutex_unlock(&mx_concent);
+                printf("DEBUG: lgw_spectral_scan_get_results returned x=%d\n", x);
+                if (dbgf) { fprintf(dbgf, "get_results returned x=%d\n", x); fflush(dbgf); }
+                fflush(stdout);
                 if (x != 0) {
-                    printf("ERROR: spectral scan get results failed\n");
+                    printf("ERROR: spectral scan get results failed (x=%d)\n", x);
+                    /* Restore LoRa RX after failed get_results */
+                    pthread_mutex_lock(&mx_concent);
+                    sx1261_lora_rx_restart_light();
+                    pthread_mutex_unlock(&mx_concent);
                     continue; /* main while loop */
                 }
 
-                /* print raw results (original format for log parsing) */
-                printf("SPECTRAL SCAN - %u Hz: ", freq_hz);
-                for (i = 0; i < LGW_SPECTRAL_SCAN_RESULT_SIZE; i++) {
-                    printf("%u ", results[i]);
+                /* print raw results to debug file (avoid blocking stdout) */
+                if (dbgf) {
+                    fprintf(dbgf, "SPECTRAL SCAN - %u Hz: ", freq_hz);
+                    for (i = 0; i < LGW_SPECTRAL_SCAN_RESULT_SIZE; i++) {
+                        fprintf(dbgf, "%u ", results[i]);
+                    }
+                    fprintf(dbgf, "\n");
+                    fflush(dbgf);
                 }
-                printf("\n");
 
                 /* Compute RSSI statistics from histogram */
                 double rssi_sum = 0.0;
@@ -3842,6 +3993,12 @@ void thread_spectral_scan(void) {
                     sweep_acc[sweep_idx].sample_count = total_samples;
                 }
                 sweep_idx++;
+
+                /* Restore LoRa RX between scan channels to minimize Channel F downtime */
+                pthread_mutex_lock(&mx_concent);
+                sx1261_lora_rx_restart_light();
+                pthread_mutex_unlock(&mx_concent);
+                if (dbgf) { fprintf(dbgf, "per-channel LoRa RX restart after chan %d\n", sweep_idx); fflush(dbgf); }
 
                 /* Next frequency to scan */
                 freq_hz += 200000; /* 200kHz channels */
@@ -3946,6 +4103,15 @@ void thread_spectral_scan(void) {
                         printf("INFO: spectral sweep complete (%d channels%s), results written\n",
                                written,
                                cad_config.enable ? " + CAD" : "");
+                    /* Restore SX1261 LoRa RX after spectral scan sweep */
+                    pthread_mutex_lock(&mx_concent);
+                    if (sx1261_lora_rx_active() == false) {
+                        sx1261_lora_rx_restart_light();
+                        printf("INFO: SX1261 LoRa RX restarted after spectral scan sweep\n");
+                        fflush(stdout);
+                        fflush(stdout);
+                    }
+                    pthread_mutex_unlock(&mx_concent);
                     } else {
                         printf("ERROR: could not open /tmp/pymc_spectral_results.json.tmp for writing\n");
                     }
@@ -3957,6 +4123,12 @@ void thread_spectral_scan(void) {
                 }
             } else if (status == LGW_SPECTRAL_SCAN_STATUS_ABORTED) {
                 printf("INFO: %s: spectral scan has been aborted\n", __FUNCTION__);
+                /* Restore LoRa RX after aborted scan */
+                pthread_mutex_lock(&mx_concent);
+                sx1261_lora_rx_restart_light();
+                pthread_mutex_unlock(&mx_concent);
+                if (dbgf) { fprintf(dbgf, "LoRa RX restart after ABORTED scan\n"); fflush(dbgf); }
+                fflush(stdout);
             } else {
                 printf("ERROR: %s: spectral scan status us unexpected 0x%02X\n", __FUNCTION__, status);
             }

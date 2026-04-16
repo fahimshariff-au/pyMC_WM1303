@@ -45,6 +45,31 @@ def _mc_hdr(data: bytes) -> str:
 
 
 
+
+def _extract_mc_payload(data: bytes) -> bytes:
+    """Extract payload bytes after MeshCore header + path data.
+
+    The payload stays constant across hop iterations, making it
+    suitable for detecting self-echo feedback loops.
+    """
+    if not data or len(data) < 2:
+        return data
+    hdr = data[0]
+    rt = hdr & 0x03
+    has_tc = rt in (0x00, 0x03)  # TFLOOD or TDIRECT have timestamp
+    idx = 5 if has_tc else 1  # path_raw byte offset
+    if idx >= len(data):
+        return data
+    pl_raw = data[idx]
+    hops = pl_raw & 0x3F
+    hsz = ((pl_raw >> 6) & 0x03) + 1  # hash size in bytes
+    pbytes = hops * hsz
+    payload_start = idx + 1 + pbytes
+    if payload_start >= len(data):
+        return data  # malformed, return all for safe hashing
+    return data[payload_start:]
+
+
 class BridgeEngine:
     """Cross-channel packet bridge for WM1303 concentrator.
 
@@ -164,6 +189,11 @@ class BridgeEngine:
         self._recently_forwarded: dict[str, float] = {}  # hash -> monotonic_time
         self._fwd_echo_ttl = 10.0  # seconds
         self._fwd_echo_detected = 0  # counter
+
+        # Payload-based echo detection (catches modified self-echoes)
+        self._recently_tx_payloads: dict[str, float] = {}  # payload_hash -> monotonic_time
+        self._payload_echo_ttl = 30.0  # seconds (longer window for slow loops)
+        self._payload_echo_detected = 0  # counter
 
         # Dedup event logging for visualization
         self._dedup_events: deque = deque(maxlen=500)  # ring buffer
@@ -356,6 +386,28 @@ class BridgeEngine:
             logger.debug('BridgeEngine: injected duplicate dropped from %s (hash=%s)', source_name, _dup_hash)
             return
 
+
+        # Payload-based echo detection for injected packets (channels E, F, repeater)
+        _pay_inj = _extract_mc_payload(data)
+        if len(_pay_inj) >= 4:
+            _pay_inj_hash = hashlib.sha256(_pay_inj).hexdigest()[:12]
+            _pay_inj_now = time.monotonic()
+            if _pay_inj_hash in self._recently_tx_payloads:
+                _pay_inj_age = _pay_inj_now - self._recently_tx_payloads[_pay_inj_hash]
+                if _pay_inj_age < self._payload_echo_ttl:
+                    self._payload_echo_detected += 1
+                    _pay_inj_hops = -1
+                    try:
+                        _pr_idx = 5 if (data[0] & 0x03) in (0, 3) else 1
+                        _pay_inj_hops = data[_pr_idx] & 0x3F
+                    except Exception:
+                        pass
+                    self._record_dedup_event('payload_echo', source_name, _pay_inj_hash, len(data), self._get_packet_type_name(data))
+                    logger.warning('BridgeEngine: Payload-echo detected on INJECT %s! payload_hash=%s age=%.1fs hops=%d (total=%d) - DISCARDING',
+                                   source_name, _pay_inj_hash, _pay_inj_age, _pay_inj_hops,
+                                   self._payload_echo_detected)
+                    return
+
         pkt_hash = hashlib.sha256(data).hexdigest()[:12]
         pkt_type_name = self._get_packet_type_name(data)
         logger.info('[HEXDUMP] dir=INJECT src=%s sz=%d hdr=%s hex=%s', source_name, len(data), _mc_hdr(data), _hexdump(data))
@@ -408,7 +460,7 @@ class BridgeEngine:
             tx_delay = float(rule.get('tx_delay_ms', 50)) / 1000.0
 
             # Check if target is an external endpoint (mqtt, repeater)
-            if rule_target in self.NON_RADIO_ENDPOINTS:
+            if rule_target in self._endpoint_handlers:
                 handler = self._endpoint_handlers.get(rule_target)
                 if handler:
                     logger.info('BridgeEngine: forwarding %d bytes: %s -> %s '
@@ -450,57 +502,30 @@ class BridgeEngine:
                        len(data), source_cid, tcid, rule_id,
                        pkt_type_name, pkt_hash)
 
-        # Fire all radio sends concurrently so TX burst batching can
-        # collect packets for ALL channels in a single burst cycle
+        # Serialize radio sends because channel_a and channel_e share the same physical
+        # rf_chain 0. Concurrent dispatch can overwrite one scheduled TX with another.
         if radio_sends:
-            logger.info('BridgeEngine: firing %d radio sends concurrently '
-                       'for %s (type=%s, hash=%s)',
+            logger.info('BridgeEngine: serializing %d radio sends for %s (type=%s, hash=%s)',
                        len(radio_sends), source_cid, pkt_type_name, pkt_hash)
 
-            async def _do_radio_send(tcid, rule_id, tx_delay, target, payload):
-                """Send to one radio target, return (tcid, result_or_error)."""
+            for tcid, rule_id, tx_delay, target in radio_sends:
                 try:
                     if tx_delay > 0:
                         await asyncio.sleep(tx_delay)
-                    logger.info('[HEXDUMP] dir=TX ch=%s sz=%d hdr=%s hex=%s', tcid, len(payload), _mc_hdr(payload), _hexdump(payload))
-                    tx_result = await target.send(payload)
-                    return (tcid, rule_id, tx_result, None)
+                    logger.info('[HEXDUMP] dir=TX ch=%s sz=%d hdr=%s hex=%s',
+                                tcid, len(data), _mc_hdr(data), _hexdump(data))
+                    tx_result = await target.send(data)
                 except Exception as e:
-                    return (tcid, rule_id, None, e)
-
-            tasks = [
-                _do_radio_send(tcid, rule_id, tx_delay, target, data)
-                for tcid, rule_id, tx_delay, target in radio_sends
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for res in results:
-                if isinstance(res, Exception):
-                    logger.error('BridgeEngine: unexpected gather error: %s', res)
-                    continue
-                tcid, rule_id, tx_result, err = res
-                if err:
                     logger.error('BridgeEngine: TX error to %s (rule=%s): %s',
-                                tcid, rule_id, err)
-                else:
-                    self.forwarded_packets += 1
-                    forwarded = True
-                    self._record_dedup_event('forwarded', source_cid, pkt_hash, len(data), pkt_type_name)
-                    logger.info('BridgeEngine: TX result on %s (rule=%s): %s',
-                               tcid, rule_id, tx_result)
+                                tcid, rule_id, e)
+                    continue
 
-            # Store echo hash once for all radio sends (same packet data)
-            if forwarded:
-                _fwd_hash = hashlib.sha256(data).hexdigest()[:12]
-                self._recently_forwarded[_fwd_hash] = time.monotonic()
-                # Cleanup expired
-                _now_fwd = time.monotonic()
-                self._recently_forwarded = {
-                    k: v for k, v in self._recently_forwarded.items()
-                    if _now_fwd - v < self._fwd_echo_ttl
-                }
-                logger.debug('BridgeEngine: stored fwd echo hash %s (active=%d)',
-                            _fwd_hash, len(self._recently_forwarded))
+                self.forwarded_packets += 1
+                forwarded = True
+                self._record_dedup_event('forwarded', source_cid, pkt_hash, len(data), pkt_type_name)
+                logger.info('BridgeEngine: TX result on %s (rule=%s): %s',
+                            tcid, rule_id, tx_result)
+                logger.info('BridgeEngine: delivered to %s endpoint', tcid)
 
         if not forwarded:
             logger.debug('BridgeEngine: no rule matched for %s on %s (type=%s, '
@@ -548,7 +573,7 @@ class BridgeEngine:
     def _resolve_channel(self, name: str) -> str:
         """Resolve a channel alias to its canonical channel_id."""
         resolved = self.CHANNEL_ALIASES.get(name, name)
-        if resolved == name and name not in self.NON_RADIO_ENDPOINTS and name not in self._radio_map:
+        if resolved == name and name not in self.NON_RADIO_ENDPOINTS and name not in self._radio_map and name not in self._endpoint_handlers:
             logger.warning('BridgeEngine: alias miss for %r - not in CHANNEL_ALIASES or radio_map', name)
         return resolved
 
@@ -780,6 +805,33 @@ class BridgeEngine:
                         was_echo=True, drop_reason="echo")
                     continue
 
+
+            # Payload-based echo detection (catches modified self-echoes
+            # where hop count/path changed but payload is identical)
+            _pay_rx = _extract_mc_payload(data)
+            if len(_pay_rx) >= 4:
+                _pay_rx_hash = hashlib.sha256(_pay_rx).hexdigest()[:12]
+                _pay_now = time.monotonic()
+                if _pay_rx_hash in self._recently_tx_payloads:
+                    _pay_age = _pay_now - self._recently_tx_payloads[_pay_rx_hash]
+                    if _pay_age < self._payload_echo_ttl:
+                        self._payload_echo_detected += 1
+                        _pay_hops = -1
+                        try:
+                            _pr_idx = 5 if (data[0] & 0x03) in (0, 3) else 1
+                            _pay_hops = data[_pr_idx] & 0x3F
+                        except Exception:
+                            pass
+                        self._record_dedup_event('payload_echo', cid, _pay_rx_hash, len(data), self._get_packet_type_name(data))
+                        logger.warning('BridgeEngine: Payload-echo detected on %s! payload_hash=%s age=%.1fs hops=%d (total=%d) - DISCARDING',
+                                       cid, _pay_rx_hash, _pay_age, _pay_hops,
+                                       self._payload_echo_detected)
+                        self._update_repeater_counters(
+                            data, cid, pkt_type_name=self._get_packet_type_name(data),
+                            pkt_hash=_pay_rx_hash, was_duplicate=False,
+                            was_echo=True, drop_reason="payload_echo")
+                        continue
+
             pkt_hash = hashlib.sha256(data).hexdigest()[:12]
             pkt_type_name = self._get_packet_type_name(data)
             logger.info('BridgeEngine: RX %d bytes on %s (type=%s, hash=%s)',
@@ -857,7 +909,9 @@ class BridgeEngine:
             'dropped_duplicate': self.dropped_duplicate,
             'dropped_filtered': self.dropped_filtered,
             'fwd_echo_detected': self._fwd_echo_detected,
+            'payload_echo_detected': self._payload_echo_detected,
             'fwd_echo_hashes_active': len(self._recently_forwarded),
+            'payload_echo_hashes_active': len(self._recently_tx_payloads),
             'dedup_events_buffered': len(self._dedup_events),
             'dedup_seen_active': len(self._seen),
             'channels': [getattr(r, 'channel_id', str(i)) for i, r in enumerate(self.radios)],

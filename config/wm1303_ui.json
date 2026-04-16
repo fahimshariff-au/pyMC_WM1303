@@ -1,62 +1,65 @@
 {
-  "rf_center_freq_mhz": 869.525,
   "channels": [
     {
-      "name": "ch-1",
-      "frequency": 869525000,
-      "bandwidth": 125000,
-      "spreading_factor": 7,
-      "coding_rate": "4/5",
-      "tx_enabled": true,
-      "tx_power": 14,
+      "name": "local-test",
+      "frequency": 869100000,
+      "sf": 7,
+      "bw": 125000,
+      "cr": "4/5",
       "active": true,
       "preamble_length": 17,
       "friendly_name": "Channel A",
       "lbt_rssi_target": -80,
-      "lbt_enabled": true,
-      "cad_enabled": false
-    },
-    {
-      "name": "ch-2",
-      "frequency": 869625000,
-      "bandwidth": 125000,
-      "spreading_factor": 8,
-      "coding_rate": "4/5",
-      "tx_enabled": true,
       "tx_power": 14,
-      "active": true,
-      "preamble_length": 17,
-      "friendly_name": "Channel B",
-      "lbt_rssi_target": -80,
-      "lbt_enabled": true,
+      "lbt_enabled": false,
       "cad_enabled": false
     }
   ],
   "bridge": {
-    "rules": []
+    "rules": [
+      {
+        "name": "channel_e_to_rep",
+        "from": "channel_e",
+        "to": "repeater",
+        "enabled": true,
+        "tx_delay_ms": 5
+      },
+      {
+        "name": "rep_to_channel_e",
+        "from": "repeater",
+        "to": "channel_e",
+        "enabled": true,
+        "tx_delay_ms": 5
+      },
+      {
+        "name": "rep_to_cha",
+        "from": "repeater",
+        "to": "channel_a",
+        "enabled": true,
+        "tx_delay_ms": 5
+      },
+      {
+        "name": "cha_to_rep",
+        "from": "channel_a",
+        "to": "repeater",
+        "enabled": true,
+        "tx_delay_ms": 5
+      }
+    ]
   },
-  "advert_interval": 133200,
-  "gpio_pins": {
-    "sx1302_reset": 17,
-    "sx1302_power_en": 18,
-    "sx1261_reset": 5,
-    "ad5338r_reset": 13,
-    "gpio_base_offset": 512
+  "channel_e": {
+    "friendly_name": "EU-Narrow",
+    "boosted_rx": true,
+    "preamble_length": 17,
+    "cad_enabled": false,
+    "tx_power": 27,
+    "enabled": true,
+    "frequency": 869618000,
+    "bandwidth": 62500,
+    "spreading_factor": 8,
+    "coding_rate": "4/5",
+    "lbt_enabled": false,
+    "lbt_threshold": -80
   },
-  "hal_advanced": {
-    "force_host_fe_ctrl": false,
-    "lna_lut": "0x03",
-    "pa_lut": "0x04",
-    "agc_ana_gain": "auto",
-    "agc_dec_gain": "auto",
-    "channelizer_fixed_gain": false
-  },
-  "adv_config": {
-    "max_cache_size": 1000,
-    "tx_packet_ttl_seconds": 5,
-    "tx_overflow_policy": "drop_oldest",
-    "noise_floor_interval_seconds": 30,
-    "noise_floor_tx_hold_seconds": 4,
-    "noise_floor_buffer_size": 20
-  }
+  "rf_center_freq_mhz": 869.525
 }

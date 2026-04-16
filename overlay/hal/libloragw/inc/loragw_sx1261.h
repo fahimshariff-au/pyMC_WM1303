@@ -7,8 +7,8 @@
   (C)2019 Semtech
 
 Description:
-    Functions used to handle LoRa concentrator SX1261 radio used to handle LBT
-    and Spectral Scan.
+    Functions used to handle LoRa concentrator SX1261 radio used to handle LBT,
+    Spectral Scan, CAD and LoRa RX (Channel F).
 
 License: Revised BSD License, see LICENSE.TXT file include in the project
 */
@@ -69,6 +69,25 @@ typedef struct {
 } sx1261_cad_result_t;
 
 int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_t *result);
+
+/* LoRa RX (Channel F) - continuous LoRa reception on SX1261 */
+int sx1261_lora_rx_configure(uint32_t freq_hz, uint8_t bw, uint8_t sf, uint8_t cr);
+int sx1261_lora_rx_start(void);
+/**
+ * @brief Lightweight pause for TX blanking (STDBY_XOSC, <1ms)
+ */
+int sx1261_lora_rx_pause(void);
+
+/**
+ * @brief Lightweight resume after TX blanking (CLR_IRQ + SetRx, <1ms)
+ */
+int sx1261_lora_rx_resume(void);
+
+int sx1261_lora_rx_stop(void);
+int sx1261_lora_rx_fetch(struct lgw_pkt_rx_s *pkt_data, uint8_t max_pkt);
+bool sx1261_lora_rx_active(void);
+
+int sx1261_lora_rx_restart_light(void);
 
 #endif
 

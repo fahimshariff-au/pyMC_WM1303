@@ -1,31 +1,27 @@
 #!/bin/sh
-# Full power cycle script for WM1303 CoreCell
-# Unlike reset_lgw.sh which only toggles reset pins,
-# this script turns power OFF to clear SX1250 TX-induced desensitization.
+# Auto-generated power cycle script for WM1303 CoreCell
+# Full power cycle to clear SX1250 TX-induced desensitization
 
 SX1302_RESET_PIN=529
 SX1302_POWER_EN_PIN=530
 SX1261_RESET_PIN=517
 AD5338R_RESET_PIN=525
 
-# Export GPIOs
-for pin in $SX1302_RESET_PIN $SX1261_RESET_PIN $SX1302_POWER_EN_PIN $AD5338R_RESET_PIN; do
-    echo "$pin" > /sys/class/gpio/export 2>/dev/null || true
+for pin in ${SX1302_RESET_PIN} ${SX1261_RESET_PIN} ${SX1302_POWER_EN_PIN} ${AD5338R_RESET_PIN}; do
+    echo "${pin}" > /sys/class/gpio/export 2>/dev/null || true
     sleep 0.1
     echo "out" > /sys/class/gpio/gpio${pin}/direction
     sleep 0.1
 done
 
-# FULL POWER CYCLE
 echo "Power OFF CoreCell..."
 echo "0" > /sys/class/gpio/gpio${SX1302_POWER_EN_PIN}/value
-sleep 3  # Wait for caps to FULLY discharge (was 1s, increased for complete SX1250 analog reset)
+sleep 3
 
 echo "Power ON CoreCell..."
 echo "1" > /sys/class/gpio/gpio${SX1302_POWER_EN_PIN}/value
-sleep 0.5  # Wait for power stabilization
+sleep 0.5
 
-# Logic resets
 echo "CoreCell reset..."
 echo "1" > /sys/class/gpio/gpio${SX1302_RESET_PIN}/value; sleep 0.1
 echo "0" > /sys/class/gpio/gpio${SX1302_RESET_PIN}/value; sleep 0.1
@@ -38,5 +34,5 @@ echo "AD5338R reset..."
 echo "0" > /sys/class/gpio/gpio${AD5338R_RESET_PIN}/value; sleep 0.1
 echo "1" > /sys/class/gpio/gpio${AD5338R_RESET_PIN}/value; sleep 0.1
 
-sleep 1  # Final stabilization
+sleep 1
 echo "Power cycle complete"

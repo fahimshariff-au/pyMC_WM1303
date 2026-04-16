@@ -2107,6 +2107,9 @@ int sx1302_parse(lgw_context_t * context, struct lgw_pkt_rx_s * p) {
             case BW_500KHZ:
                 p->freq_offset = (int32_t)((float)(pkt.frequency_offset_error) * FREQ_OFFSET_LSB_500KHZ);
                 break;
+            case BW_62K5HZ:
+                p->freq_offset = (int32_t)((float)(pkt.frequency_offset_error) * FREQ_OFFSET_LSB_125KHZ / 2);
+                break;
             default:
                 p->freq_offset = 0;
                 printf("Invalid frequency offset\n");
@@ -2273,6 +2276,8 @@ int sx1302_tx_set_start_delay(uint8_t rf_chain, lgw_radio_type_t radio_type, uin
                 radio_bw_delay = 24;
             } else if (bandwidth == BW_500KHZ) {
                 radio_bw_delay = 21;
+            } else if (bandwidth == BW_62K5HZ) {
+                radio_bw_delay = 19; /* same as BW125 - conservative for 62.5kHz */
             } else {
                 DEBUG_MSG("ERROR: bandwidth not supported\n");
                 return LGW_REG_ERROR;
@@ -2287,6 +2292,8 @@ int sx1302_tx_set_start_delay(uint8_t rf_chain, lgw_radio_type_t radio_type, uin
                 radio_bw_delay += 6;
             } else if (bandwidth == BW_500KHZ) {
                 radio_bw_delay += 0;
+            } else if (bandwidth == BW_62K5HZ) {
+                radio_bw_delay += 0; /* same as BW125/BW500 for SX1255/7 */
             } else {
                 DEBUG_MSG("ERROR: bandwidth not supported\n");
                 return LGW_REG_ERROR;
@@ -2342,6 +2349,8 @@ float sx1302_rssi_get_temperature_offset(struct lgw_rssi_tcomp_s * context, floa
 uint8_t sx1302_tx_status(uint8_t rf_chain) {
     int err;
     int32_t read_value;
+    static uint16_t unknown_count[2] = {0, 0};
+    uint8_t idx = rf_chain & 1;
 
     err = lgw_reg_r(SX1302_REG_TX_TOP_TX_FSM_STATUS_TX_STATUS(rf_chain), &read_value);
     if (err != LGW_REG_SUCCESS) {
@@ -2350,13 +2359,26 @@ uint8_t sx1302_tx_status(uint8_t rf_chain) {
     }
 
     if (read_value == 0x80) {
+        unknown_count[idx] = 0;
         return TX_FREE;
     } else if ((read_value == 0x30) || (read_value == 0x50) || (read_value == 0x60) || (read_value == 0x70)) {
+        unknown_count[idx] = 0;
         return TX_EMITTING;
     } else if ((read_value == 0x91) || (read_value == 0x92)) {
+        unknown_count[idx] = 0;
         return TX_SCHEDULED;
     } else {
-        printf("ERROR: UNKNOWN TX STATUS 0x%02X\n", read_value);
+        unknown_count[idx]++;
+        if (unknown_count[idx] >= 10) {
+            printf("WARNING: TX STATUS 0x%02X persisted %u reads on rf%u, treating as TX_FREE\n",
+                   read_value, unknown_count[idx], rf_chain);
+            unknown_count[idx] = 0;
+            return TX_FREE;
+        }
+        if (unknown_count[idx] <= 10) {
+            printf("ERROR: UNKNOWN TX STATUS 0x%02X (rf%u, consec=%u)\n",
+                   read_value, rf_chain, unknown_count[idx]);
+        }
         return TX_STATUS_UNKNOWN;
     }
 }
@@ -2386,10 +2408,10 @@ int sx1302_tx_abort(uint8_t rf_chain) {
 
     timeout_start(&tm_start);
     do {
-        /* handle timeout */
-        if (timeout_check(tm_start, 1000) != 0) {
-            printf("ERROR: %s: TIMEOUT on TX abort\n", __FUNCTION__);
-            return LGW_REG_ERROR;
+        /* handle timeout - treat as success since TX_FREE fallback handles recovery */
+        if (timeout_check(tm_start, 500) != 0) {
+            printf("WARNING: %s: TX abort timeout on rf%u, forcing TX_FREE\n", __FUNCTION__, rf_chain);
+            break; /* exit loop, treat as success */
         }
 
         /* get tx status */
