@@ -40,31 +40,23 @@ Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel
 - Raspberry Pi OS Lite (Bookworm or newer)
 - SSH access and internet connectivity
 
-### Installation
+### Install or Upgrade
+
+A single command handles both fresh installations and upgrades — the script automatically detects which is needed:
 
 ```bash
-git clone https://github.com/HansvanMeer/pyMC_WM1303.git
-cd pyMC_WM1303
-sudo bash install.sh
+curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
 ```
 
-The script handles system updates, dependencies, HAL compilation, Python setup, and service configuration. Takes 15–30 minutes.
+- **New system** → clones the repository and runs a full installation (15–30 minutes)
+- **Existing installation** → pulls the latest changes and runs an incremental upgrade
+
+The script handles system updates, dependencies, HAL compilation, Python setup, and service configuration.
 
 ### Access the UI
 
 ```
 http://<pi-ip>:8000/wm1303.html
-```
-
-### Upgrade
-
-```bash
-curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/upgrade_bootstrap.sh | sudo bash
-```
-
-Or manually:
-```bash
-cd ~/pyMC_WM1303 && git pull && sudo bash upgrade.sh
 ```
 
 ## ⚠️ Channel Count & LoRa Settings Impact
