@@ -43,6 +43,7 @@ try:
 except ImportError:
     _COLLECTOR_AVAILABLE = False
 import json
+import os
 import subprocess
 import logging
 import time
@@ -489,6 +490,14 @@ class WM1303API:
 
     def __init__(self, daemon=None):
         self.daemon = daemon
+        # Initialize debug bundle collector
+        from .debug_collector import DebugCollector
+        self._debug_collector = DebugCollector(
+            config={},
+            backend=None,
+            bridge_engine=None,
+            repeater_engine=None,
+        )
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
@@ -722,6 +731,16 @@ class WM1303API:
                 return self._channel_e_get()
             if method == "POST":
                 return self._channel_e_post()
+        # -- debug bundle --
+        if resource == "debug":
+            sub = args[0] if args else "status"
+            if sub == "status" and method == "GET":
+                return self._debug_status()
+            if sub == "generate" and method == "POST":
+                return self._debug_generate()
+            if sub == "download" and method == "GET":
+                return self._debug_download()
+            raise cherrypy.HTTPError(404, "Unknown debug sub-resource: {}".format(sub))
 
         raise cherrypy.HTTPError(404, "Unknown resource: {}".format(resource))
 
@@ -786,6 +805,13 @@ class WM1303API:
         try:
             with open('/sys/class/thermal/thermal_zone0/temp') as tf:
                 temperature = round(int(tf.read().strip()) / 1000.0, 1)
+        except Exception:
+            pass
+        # Read concentrator (SX1302) temperature from pkt_fwd status file
+        concentrator_temp = None
+        try:
+            with open('/tmp/concentrator_temp') as ctf:
+                concentrator_temp = round(float(ctf.read().strip()), 1)
         except Exception:
             pass
         # Sum packet counts from per-channel backend stats
@@ -896,7 +922,7 @@ class WM1303API:
             "sx1261_spi": "/dev/spidev0.1",
             "uptime": uptime_str,
             "eui": eui_str,
-            "temperature": temperature,
+            "temperature": concentrator_temp if concentrator_temp is not None else temperature,
             "packets_received": _pkt_rx,
             "packets_sent": _pkt_tx,
             "packets_forwarded": _pkt_fwd,
@@ -1969,6 +1995,60 @@ class WM1303API:
             return _j({"lines": lines[-100:], "total": len(lines)})
         except Exception as e:
             return _j({"lines": ["Error: {}".format(e)], "total": 0})
+    # -- debug bundle ------------------------------------------------------
+    def _debug_status(self):
+        """GET /api/wm1303/debug/status - Check debug bundle availability."""
+        return _j(self._debug_collector.get_status())
+
+    def _debug_generate(self):
+        """POST /api/wm1303/debug/generate - Generate a new debug bundle."""
+        import asyncio
+        # Lazily update collector references from daemon
+        self._update_debug_collector_refs()
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    result = pool.submit(lambda: asyncio.run(self._debug_collector.generate())).result(timeout=120)
+            else:
+                result = loop.run_until_complete(self._debug_collector.generate())
+        except Exception:
+            result = asyncio.run(self._debug_collector.generate())
+        return _j(result)
+
+    def _debug_download(self):
+        """GET /api/wm1303/debug/download - Download the debug bundle."""
+        path = self._debug_collector.get_bundle_path()
+        if not path:
+            raise cherrypy.HTTPError(404, "No debug bundle available. Generate one first.")
+        return cherrypy.lib.static.serve_file(
+            path,
+            content_type="application/gzip",
+            disposition="attachment",
+            name=os.path.basename(path),
+        )
+
+    def _update_debug_collector_refs(self):
+        """Lazily resolve backend/bridge/repeater references from daemon."""
+        c = self._debug_collector
+        if c.backend is None and self.daemon:
+            try:
+                c.backend = getattr(self.daemon, 'backend', None) or _get_backend()
+            except Exception:
+                pass
+            try:
+                c.bridge_engine = getattr(self.daemon, 'bridge_engine', None)
+            except Exception:
+                pass
+            try:
+                c.repeater_engine = getattr(self.daemon, 'repeater_engine', None)
+            except Exception:
+                pass
+            try:
+                c.config = getattr(self.daemon, 'config', {}) or {}
+            except Exception:
+                pass
 
     # -- control -----------------------------------------------------------
     def _control(self):

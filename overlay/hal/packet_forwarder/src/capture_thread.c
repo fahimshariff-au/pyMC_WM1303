@@ -21,7 +21,7 @@
  *
  * UDP format v5: single read per packet, wp_before + wp_after
  *
- * Copyright 2026, SX1302 62.5 kHz Research Project
+ * Copyright 2026, pyMC WM1303 Project
  * SPDX-License-Identifier: BSD-3-Clause
  */
 

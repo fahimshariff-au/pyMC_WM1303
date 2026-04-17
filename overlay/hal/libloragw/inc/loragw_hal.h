@@ -364,12 +364,13 @@ struct lgw_conf_sx1261_s {
     char                        spi_path[64];       /*!> Path to access the SPI device to connect to the SX1261 (not used for USB com type) */
     int8_t                      rssi_offset;        /*!> value to be applied to the sx1261 RSSI value (dBm) */
     struct lgw_conf_lbt_s       lbt_conf;           /*!> listen-before-talk configuration */
-    /* LoRa RX (Channel F) configuration */
+    /* LoRa RX (Channel E) configuration */
     bool                        lora_rx_enable;     /*!> enable LoRa RX on SX1261 */
     uint32_t                    lora_rx_freq;       /*!> LoRa RX frequency in Hz */
     uint8_t                     lora_rx_bw;         /*!> LoRa RX bandwidth (BW_62K5HZ, BW_125KHZ, etc) */
     uint8_t                     lora_rx_sf;         /*!> LoRa RX spreading factor (7-12) */
     uint8_t                     lora_rx_cr;         /*!> LoRa RX coding rate (1=4/5, 2=4/6, 3=4/7, 4=4/8) */
+    bool                        lora_rx_boosted;    /*!> LoRa RX boosted LNA gain (true=max sensitivity) */
 };
 
 /**

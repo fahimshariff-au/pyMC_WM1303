@@ -192,11 +192,72 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 ch_name, f, delta, center, max_if_offset, bw)
             ch['active'] = False  # force-disable to prevent HAL rejection
 
-    # --- HAL-level LBT is ALWAYS DISABLED ---
-    # All LBT logic is handled in Python software (GlobalTXScheduler)
+    # --- HAL-level LBT: DISABLED ---
+    # The AGC firmware does NOT properly support the LBT tx_status handshake.
+    # When HAL LBT is enabled, lgw_lbt_tx_status() waits up to 500ms for the
+    # AGC to signal TX-start, but the AGC never sets the status bit. This causes
+    # EVERY lgw_send() call to timeout and abort with "TIMEOUT on TX start".
+    # Result: ZERO packets transmitted.
+    #
+    # Instead of HAL LBT, we use a custom real-time SX1261 RSSI check in the
+    # pkt_fwd JIT thread (see lora_pkt_fwd.c). This performs a direct SX1261
+    # RSSI measurement before each TX without relying on the broken AGC handshake.
+    #
+    # The Python software LBT (_lbt_check) is KEPT as a pre-filter — it checks
+    # cached spectral data before the packet even reaches pkt_fwd.
     _lbt_enabled = False
     _lbt_rssi_target = -80
     _lbt_channels = []
+
+    # --- LBT channel generation (kept for reference, not used with HAL LBT disabled) ---
+    # _lbt_seen = set()  # deduplicate by (frequency, bandwidth) tuple
+    #
+    # # Add LBT channels from ALL active UI channels
+    # for ch in (all_ui_channels or []):
+    #     if not ch.get('active', False):
+    #         continue
+    #     ch_freq = int(ch.get('frequency', 0))
+    #     ch_bw = int(ch.get('bandwidth', 125000))
+    #     # Supported LBT bandwidths: 62500, 125000, 250000
+    #     if ch_bw not in (62500, 125000, 250000):
+    #         ch_bw = 125000  # fallback for unsupported bandwidths
+    #     lbt_key = (ch_freq, ch_bw)
+    #     if ch_freq and lbt_key not in _lbt_seen:
+    #         _lbt_channels.append({
+    #             'freq_hz': ch_freq,
+    #             'bandwidth': ch_bw,
+    #             'scan_time_us': 5000,
+    #             'transmit_time_ms': 10000,
+    #         })
+    #         _lbt_seen.add(lbt_key)
+    #
+    # # Add Channel E frequency for LBT coverage (if not already present).
+    # _che_freq_for_lbt = 869618000  # default, updated below from UI config
+    # _che_bw_for_lbt = 62500        # Channel E native bandwidth
+    # try:
+    #     _che_lbt_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+    #     if _che_lbt_path.exists():
+    #         _che_lbt_d = json.loads(_che_lbt_path.read_text()).get('channel_e', {})
+    #         if _che_lbt_d:
+    #             _che_freq_for_lbt = int(_che_lbt_d.get('frequency', 869618000))
+    #             _che_bw_for_lbt = int(_che_lbt_d.get('bandwidth', 62500))
+    #             if _che_bw_for_lbt not in (62500, 125000, 250000):
+    #                 _che_bw_for_lbt = 62500
+    # except Exception:
+    #     pass
+    # _che_lbt_key = (_che_freq_for_lbt, _che_bw_for_lbt)
+    # if _che_freq_for_lbt and _che_lbt_key not in _lbt_seen:
+    #     _lbt_channels.append({
+    #         'freq_hz': _che_freq_for_lbt,
+    #         'bandwidth': _che_bw_for_lbt,
+    #         'scan_time_us': 5000,
+    #         'transmit_time_ms': 10000,
+    #     })
+    #     _lbt_seen.add(_che_lbt_key)
+
+    logger.info('_generate_bridge_conf: HAL LBT DISABLED '
+                '(AGC firmware does not support LBT tx_status handshake, '
+                'using custom SX1261 RSSI check in pkt_fwd instead)')
 
     # --- SX1261: compute spectral_scan dynamically from channel config ---
     # Cover the full RF RX bandwidth: center ± 800kHz
@@ -209,7 +270,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
         'freq_start': _scan_start,
         'nb_chan': _nb_chan,  # typically 8-9 channels for 1.6MHz BW
         'nb_scan': 100,  # reduced from 2000 for faster scans
-        'pace_s': 60,  # 5 minutes between sweeps  # try every 1s to catch TX gaps
+        'pace_s': 60,  # 1 minute between sweeps
     }
     logger.info('_generate_bridge_conf: spectral_scan enabled '
                 '(freq_start=%d, nb_chan=%d, freq_stop=%d, center=%d)',
@@ -258,7 +319,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             chan_configs[key] = {'enable': False, 'radio': 0, 'if': 0}
 
     # --- Channel E config from wm1303_ui.json ---
-    _che_lora_rx = {'enable': True, 'freq_hz': 869618000, 'bandwidth': 62500, 'spreading_factor': 8, 'coding_rate': 1}
+    _che_lora_rx = {'enable': True, 'freq_hz': 869618000, 'bandwidth': 62500, 'spreading_factor': 8, 'coding_rate': 1, 'boosted': True}
     try:
         _che_path = Path('/etc/pymc_repeater/wm1303_ui.json')
         if _che_path.exists():
@@ -271,8 +332,9 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                     'bandwidth': int(_che_d.get('bandwidth', 62500)),
                     'spreading_factor': int(_che_d.get('spreading_factor', 8)),
                     'coding_rate': {'4/5':1,'4/6':2,'4/7':3,'4/8':4}.get(str(_che_d.get('coding_rate','4/5')), int(_che_d.get('coding_rate',1)) if str(_che_d.get('coding_rate','1')).isdigit() else 1),
+                    'boosted': bool(_che_d.get('boosted_rx', True)),
                 }
-                logger.info('_generate_bridge_conf: channel_e from UI: freq=%d bw=%d sf=%d cr=%d', _che_lora_rx['freq_hz'], _che_lora_rx['bandwidth'], _che_lora_rx['spreading_factor'], _che_lora_rx['coding_rate'])
+                logger.info('_generate_bridge_conf: channel_e from UI: freq=%d bw=%d sf=%d cr=%d boosted=%s', _che_lora_rx['freq_hz'], _che_lora_rx['bandwidth'], _che_lora_rx['spreading_factor'], _che_lora_rx['coding_rate'], _che_lora_rx['boosted'])
     except Exception as _cex:
         logger.warning('_generate_bridge_conf: channel_e read error: %s', _cex)
 
@@ -328,6 +390,10 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                     'rssi_target': _lbt_rssi_target,
                     'nb_channel': len(_lbt_channels),
                     'channels': _lbt_channels,
+                },
+                'custom_lbt': {
+                    'enable': False,
+                    'rssi_target': _lbt_rssi_target,
                 },
             },
         },
@@ -1794,7 +1860,7 @@ class WM1303Backend:
                 'noise_floor': ch_nf,
                 'freq_mhz': best_freq,
                 'reason': 'channel_busy',
-                'cad_result': 'skipped_rssi_blocked',
+                'cad_result': {'detected': False, 'reason': 'skipped_rssi_blocked', 'source': 'none'},
             }
 
         # ② CAD check (if enabled for this channel)
@@ -2334,14 +2400,6 @@ class WM1303Backend:
                 logger.info('WM1303Backend: RX->%s freq=%d SF%d %d bytes rssi=%.1f snr=%.1f',
                              cid, freq_hz, rx_sf, len(payload), rssi, snr)
                 radio.enqueue_rx(payload, rssi=int(rssi), snr=snr)
-                # --- 62KHZ RESEARCH: Payload hex logger ---
-                try:
-                    import time as _t62khz
-                    with open('/tmp/payload_hex_log.txt', 'a') as _fhex:
-                        _fhex.write(f"{_t62khz.strftime('%H:%M:%S.%f')} freq={freq_hz} SF{rx_sf} size={len(payload)} hex={payload.hex()}\n")
-                except Exception:
-                    pass
-                # --- END 62KHZ RESEARCH ---
                 self._last_rx_timestamp = time.monotonic()  # watchdog: RX activity
                 self._zero_rx_stat_count = 0  # reset stat monitor on valid RX
                 self._rssi_spike_count = 0    # reset RSSI spike monitor on valid RX
@@ -2381,18 +2439,7 @@ class WM1303Backend:
         # --- Channel E (channel_e) RX injection ---
         if not matched and hasattr(self, "_channel_e_rx_callback") and self._channel_e_rx_callback is not None:
             _channel_e_freq = self._load_channel_e_cache()
-            _channel_e_bw = int(getattr(self, '_channel_e_config_cache', {}).get('bandwidth', 62500))
-            # Tight frequency match (10 kHz) + bandwidth guard:
-            # Only accept packets whose RX bandwidth matches the configured
-            # Channel E bandwidth.  This prevents the SX1302 concentrator
-            # (BW125) packets from being mis-labelled as Channel E (BW62.5).
-            # Note: HAL reports BW62.5 as 'BW62' → _parse_datr returns 62000,
-            # but config uses 62500.  Use 10% tolerance for the BW check.
-            _bw_match = (rx_bw is not None
-                         and abs(rx_bw - _channel_e_bw) <= _channel_e_bw * 0.10)
-            if (_channel_e_freq
-                    and abs(freq_hz - _channel_e_freq) <= 10000
-                    and _bw_match):
+            if _channel_e_freq and abs(freq_hz - _channel_e_freq) <= 100000:
                 try:
                     self._channel_e_rx_callback(payload, rssi=int(rssi), snr=snr)
                     self._update_rx_stats("channel_e", freq_hz, rssi, snr)

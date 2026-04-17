@@ -61,9 +61,10 @@ class RepeaterHandler(BaseHandler):
         self.send_advert_func = send_advert_func
         self.airtime_mgr = AirtimeManager(config)
         self.seen_packets = OrderedDict()
-        self.cache_ttl = max(
-            300, config.get("repeater", {}).get("cache_ttl", 3600)
-        )  # Min 5 min, default 1 hour
+        self.cache_ttl = config.get("repeater", {}).get("cache_ttl", 30)
+        # Dedup TTL in seconds: how long a packet hash stays in the seen cache.
+        # Default 30s — short enough to allow legitimate re-sends, long enough
+        # to suppress immediate duplicates from multiple receive paths.
         self.max_cache_size = 1000
         self.max_duplicates_per_packet = 20
         self.tx_delay_factor = config.get("delays", {}).get("tx_delay_factor", 1.0)
@@ -640,11 +641,28 @@ class RepeaterHandler(BaseHandler):
         return "Unknown"
 
     def is_duplicate(self, packet: Packet) -> bool:
+        # TTL-based dedup: expire entries older than cache_ttl seconds
+        now = time.time()
+        self._evict_expired(now)
 
         pkt_hash = packet.calculate_packet_hash().hex().upper()
         if pkt_hash in self.seen_packets:
             return True
         return False
+
+    def _evict_expired(self, now: float = None):
+        """Remove entries from seen_packets that are older than cache_ttl."""
+        if now is None:
+            now = time.time()
+        cutoff = now - self.cache_ttl
+        # OrderedDict is insertion-ordered; oldest entries are first
+        while self.seen_packets:
+            oldest_key, oldest_time = next(iter(self.seen_packets.items()))
+            if oldest_time < cutoff:
+                self.seen_packets.popitem(last=False)
+            else:
+                break
+
 
     def mark_seen(self, packet: Packet):
 
@@ -865,19 +883,6 @@ class RepeaterHandler(BaseHandler):
                 packet.drop_reason = "Marked do not retransmit"
             return None
 
-        hash_size = packet.get_path_hash_size()
-        hop_count = packet.get_path_hash_count()
-
-        # Check if we're the next hop
-        if not packet.path or len(packet.path) < hash_size:
-            packet.drop_reason = "Direct: no path"
-            return None
-
-        next_hop = bytes(packet.path[:hash_size])
-        if next_hop != self.local_hash_bytes[:hash_size]:
-            packet.drop_reason = "Direct: not for us"
-            return None
-
         # Suppress duplicates
         if self.is_duplicate(packet):
             packet.drop_reason = "Duplicate"
@@ -885,11 +890,22 @@ class RepeaterHandler(BaseHandler):
 
         self.mark_seen(packet)
 
-        # Remove first hash entry (hash_size bytes)
-        packet.path = bytearray(packet.path[hash_size:])
-        packet.path_len = PathUtils.encode_path_len(hash_size, hop_count - 1)
+        hash_size = packet.get_path_hash_size()
+
+        # If the packet has a path and we're the next hop, consume our hash
+        if packet.path and len(packet.path) >= hash_size:
+            next_hop = bytes(packet.path[:hash_size])
+            if next_hop == self.local_hash_bytes[:hash_size]:
+                hop_count = packet.get_path_hash_count()
+                packet.path = bytearray(packet.path[hash_size:])
+                packet.path_len = PathUtils.encode_path_len(hash_size, hop_count - 1)
+
+        # Always forward DIRECT packets — even if we're not the intended
+        # next hop or the path is empty.  The WM1303 bridge operates as a
+        # transparent relay; routing decisions are left to the mesh nodes.
 
         return packet
+
 
     @staticmethod
     def calculate_packet_score(snr: float, packet_len: int, spreading_factor: int = 8) -> float:

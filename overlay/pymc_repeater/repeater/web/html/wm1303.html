@@ -427,7 +427,39 @@ select.ci option{background:#1e293b}
       <span class="text-xs" style="color:var(--txm)"><span class="dot dok pls" style="width:6px;height:6px;display:inline-block;margin-right:4px"></span>Polling every 2s</span>
     </div>
   </div>
-</div>
+
+  <!-- Debug Bundle Section -->
+  <div class="gl p-5" style="margin-top:16px">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div class="stl mb-0">&#128230; Debug Export</div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button class="btn sec sm" id="dbg-gen-btn" onclick="dbgGenerate()">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12M5 10l7 7 7-7"/><path d="M5 21h14"/></svg>
+          Generate Debug Bundle
+        </button>
+        <button class="btn sec sm" id="dbg-dl-btn" onclick="dbgDownload()" disabled style="opacity:0.4;cursor:not-allowed">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download
+        </button>
+      </div>
+    </div>
+    <div id="dbg-status" style="display:none;padding:12px;border-radius:8px;background:var(--bg);border:1px solid var(--bd);font-size:13px">
+      <div id="dbg-msg" style="color:var(--txm)"></div>
+      <div id="dbg-progress" style="display:none;margin-top:8px">
+        <div style="height:4px;background:var(--bd);border-radius:2px;overflow:hidden">
+          <div id="dbg-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#6366f1,#8b5cf6);border-radius:2px;transition:width 0.3s"></div>
+        </div>
+      </div>
+      <div id="dbg-info" style="display:none;margin-top:8px;color:var(--tx)">
+        <span id="dbg-filename" style="font-family:monospace;font-size:12px"></span>
+        <span style="margin:0 8px;color:var(--txm)">|</span>
+        <span id="dbg-size" style="font-size:12px;color:var(--txm)"></span>
+        <span style="margin:0 8px;color:var(--txm)">|</span>
+        <span id="dbg-expires" style="font-size:12px;color:var(--txm)"></span>
+      </div>
+    </div>
+    <p style="margin-top:8px;font-size:11px;color:var(--txm)">Generate a diagnostic bundle containing system info, logs, config (sanitized), runtime stats, and file integrity checksums. The bundle is available for download for 15 minutes after generation. No private keys or secrets are included.</p>
+  </div>
 </div>
 
 <!-- ═══════════════════ ADV. CONFIG TAB ═══════════════════ -->
@@ -670,7 +702,7 @@ function toast(msg,type,dur){
   G('toasts').appendChild(e);
   setTimeout(()=>{e.style.animation='sOut .3s ease forwards';setTimeout(()=>e.remove(),300);},dur);
 }
-const TABS={status:function(){try{loadStatus();}catch(e){console.error('loadStatus err:',e);}},dedup:function(){try{dedupLoad();}catch(e){console.error('dedupLoad err:',e);}},channels:function(){try{loadCh();loadChE();loadTxQueues();}catch(e){console.error('loadCh err:',e);G('tab-channels').innerHTML='<h3 style="color:red">Error: '+e.message+'</h3>';}},ifchains:function(){try{renderIfChains(true);}catch(e){console.error('renderIfChains err:',e);}},bridge:function(){try{loadBr();}catch(e){console.error('loadBr err:',e);}},logs:function(){try{startLogs();}catch(e){console.error('startLogs err:',e);}},spectrum:function(){try{specLoad();}catch(e){console.error('specLoad err:',e);}},'adv-config':function(){try{loadAdvConfig();}catch(e){console.error('loadAdvConfig err:',e);}}};
+const TABS={status:function(){try{loadStatus();}catch(e){console.error('loadStatus err:',e);}},dedup:function(){try{dedupLoad();}catch(e){console.error('dedupLoad err:',e);}},channels:function(){try{loadCh();loadChE();loadTxQueues();}catch(e){console.error('loadCh err:',e);G('tab-channels').innerHTML='<h3 style="color:red">Error: '+e.message+'</h3>';}},ifchains:function(){try{renderIfChains(true);}catch(e){console.error('renderIfChains err:',e);}},bridge:function(){try{loadBr();}catch(e){console.error('loadBr err:',e);}},logs:function(){try{startLogs();dbgCheckStatus();}catch(e){console.error('startLogs err:',e);}},spectrum:function(){try{specLoad();}catch(e){console.error('specLoad err:',e);}},'adv-config':function(){try{loadAdvConfig();}catch(e){console.error('loadAdvConfig err:',e);}}};
 function showTab(name,btn){
   console.log('showTab called:',name);
   document.querySelectorAll('.tp').forEach(p=>p.classList.remove('active'));
@@ -1724,6 +1756,86 @@ function tglPause(){
   logPaused=!logPaused;const b=G('log-pb');
   b.innerHTML=logPaused?'<svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>Resume':'<svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>Pause';
   b.style.color=logPaused?'#f59e0b':'';
+}
+// ── Debug Bundle ────────────────────────────────────────────────────────────
+let dbgTimer=null;
+let dbgCountdown=null;
+async function dbgGenerate(){
+  const btn=G('dbg-gen-btn'),st=G('dbg-status'),msg=G('dbg-msg'),bar=G('dbg-bar'),prog=G('dbg-progress'),info=G('dbg-info');
+  btn.disabled=true;btn.style.opacity='0.5';
+  st.style.display='block';prog.style.display='block';info.style.display='none';
+  msg.textContent='Generating debug bundle... This may take up to 30 seconds.';
+  msg.style.color='var(--txm)';
+  bar.style.width='10%';
+  let pct=10;
+  const pTimer=setInterval(()=>{if(pct<90){pct+=Math.random()*8;bar.style.width=Math.min(pct,90)+'%';}},500);
+  try{
+    const r=await api('POST','/api/wm1303/debug/generate');
+    clearInterval(pTimer);bar.style.width='100%';
+    if(r.error){
+      msg.textContent='\u26A0 '+r.message;msg.style.color='#f59e0b';
+      prog.style.display='none';btn.disabled=false;btn.style.opacity='1';
+      return;
+    }
+    msg.textContent='\u2705 Debug bundle ready!';msg.style.color='#22c55e';
+    prog.style.display='none';
+    dbgShowInfo(r);
+    dbgEnableDownload(true);
+    dbgStartCountdown(r.expires_in_seconds||900);
+  }catch(e){
+    clearInterval(pTimer);
+    msg.textContent='\u274C Failed: '+e.message;msg.style.color='#ef4444';
+    prog.style.display='none';
+  }
+  btn.disabled=false;btn.style.opacity='1';
+}
+function dbgShowInfo(r){
+  const info=G('dbg-info');
+  info.style.display='block';
+  G('dbg-filename').textContent=r.filename||'';
+  G('dbg-size').textContent=r.size_mb?r.size_mb+' MB':'unknown size';
+  G('dbg-expires').textContent='';
+}
+function dbgEnableDownload(en){
+  const btn=G('dbg-dl-btn');
+  btn.disabled=!en;btn.style.opacity=en?'1':'0.4';btn.style.cursor=en?'pointer':'not-allowed';
+}
+function dbgDownload(){
+  window.location.href='/api/wm1303/debug/download';
+}
+function dbgStartCountdown(secs){
+  clearInterval(dbgCountdown);
+  let rem=secs;
+  const update=()=>{
+    if(rem<=0){clearInterval(dbgCountdown);dbgExpired();return;}
+    const m=Math.floor(rem/60),s=rem%60;
+    G('dbg-expires').textContent='Expires in '+m+':'+(s<10?'0':'')+s;
+    rem--;
+  };
+  update();
+  dbgCountdown=setInterval(update,1000);
+}
+function dbgExpired(){
+  dbgEnableDownload(false);
+  const msg=G('dbg-msg');
+  msg.textContent='Debug bundle expired. Generate a new one to download.';
+  msg.style.color='var(--txm)';
+  G('dbg-info').style.display='none';
+}
+async function dbgCheckStatus(){
+  try{
+    const r=await api('GET','/api/wm1303/debug/status');
+    if(r.available){
+      G('dbg-status').style.display='block';
+      G('dbg-msg').textContent='\u2705 Debug bundle ready!';G('dbg-msg').style.color='#22c55e';
+      G('dbg-progress').style.display='none';
+      dbgShowInfo(r);
+      dbgEnableDownload(true);
+      dbgStartCountdown(r.expires_in_seconds||0);
+    }else{
+      dbgEnableDownload(false);
+    }
+  }catch(e){}
 }
 document.addEventListener('DOMContentLoaded',()=>{loadStatus();setInterval(loadStatus,10000);});
 window.addEventListener('beforeunload',()=>clearInterval(logTmr));

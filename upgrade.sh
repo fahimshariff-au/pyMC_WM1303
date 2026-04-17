@@ -374,11 +374,14 @@ cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_hal.c"     "${HAL_DIR}/libloragw/src
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1302.c"  "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1261.c"  "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_spi.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_lbt.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_aux.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1302.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1261.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_hal.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/sx1261_defs.h"    "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_spi.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_lbt.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/Makefile"             "${HAL_DIR}/libloragw/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/src/lora_pkt_fwd.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/src/capture_thread.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
@@ -407,7 +410,7 @@ for f in bridge_engine.py channel_e_bridge.py config_manager.py engine.py main.p
 done
 
 # repeater/web/ level files
-for f in wm1303_api.py http_server.py spectrum_collector.py cad_calibration_engine.py api_endpoints.py; do
+for f in wm1303_api.py http_server.py spectrum_collector.py cad_calibration_engine.py api_endpoints.py debug_collector.py; do
     if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/web/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_repeater/repeater/web/${f}" "${RPT_DIR}/repeater/web/" >> "${LOG_FILE}" 2>&1
     fi
@@ -444,11 +447,14 @@ for overlay_file in \
     "libloragw/src/loragw_sx1302.c" \
     "libloragw/src/loragw_sx1261.c" \
     "libloragw/src/loragw_spi.c" \
+    "libloragw/src/loragw_lbt.c" \
+    "libloragw/src/loragw_aux.c" \
     "libloragw/inc/loragw_sx1302.h" \
     "libloragw/inc/loragw_hal.h" \
     "libloragw/inc/loragw_sx1261.h" \
     "libloragw/inc/sx1261_defs.h" \
     "libloragw/inc/loragw_spi.h" \
+    "libloragw/inc/loragw_lbt.h" \
     "libloragw/Makefile" \
     "packet_forwarder/src/lora_pkt_fwd.c" \
     "packet_forwarder/src/capture_thread.c" \
@@ -683,6 +689,77 @@ PYMERGE
         ok "Installed from template (first upgrade)"
     else
         warn "Config merge issue — see ${LOG_FILE}"
+    fi
+
+    step "Migrating config.yaml (key renames and value updates)"
+    CONFIG_MIGRATE=$(${VENV_DIR}/bin/python3 << PYMIGRATE 2>>${LOG_FILE}
+import yaml, sys
+
+live_path = "${CONFIG_DIR}/config.yaml"
+try:
+    with open(live_path) as f:
+        cfg = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    print("skipped-no-config")
+    sys.exit(0)
+
+changes = []
+
+# --- Bridge section ---
+br = cfg.get('bridge', {})
+
+# Rename dedup_ttl_seconds -> dedup_ttl
+if 'dedup_ttl_seconds' in br:
+    old_val = br.pop('dedup_ttl_seconds')
+    if 'dedup_ttl' not in br:
+        br['dedup_ttl'] = 15
+    changes.append('bridge.dedup_ttl_seconds->dedup_ttl')
+
+# Ensure dedup_ttl exists with correct value
+if 'dedup_ttl' not in br:
+    br['dedup_ttl'] = 15
+    changes.append('bridge.dedup_ttl=15')
+
+cfg['bridge'] = br
+
+# --- Repeater section ---
+rep = cfg.get('repeater', {})
+
+# cache_ttl: 60 -> 30
+if rep.get('cache_ttl', 0) >= 60:
+    rep['cache_ttl'] = 30
+    changes.append('repeater.cache_ttl=30')
+
+# tx_delay_factor: ensure 0.5
+if rep.get('tx_delay_factor', 1.0) > 0.5:
+    rep['tx_delay_factor'] = 0.5
+    changes.append('repeater.tx_delay_factor=0.5')
+
+cfg['repeater'] = rep
+
+# --- Delays section ---
+dly = cfg.get('delays', {})
+if dly.get('tx_delay_factor', 1.0) > 0.5:
+    dly['tx_delay_factor'] = 0.5
+    changes.append('delays.tx_delay_factor=0.5')
+cfg['delays'] = dly
+
+if changes:
+    with open(live_path, 'w') as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    print('migrated: ' + ', '.join(changes))
+else:
+    print('up-to-date')
+PYMIGRATE
+    )
+    if [ "${CONFIG_MIGRATE}" = "up-to-date" ]; then
+        ok "No migrations needed"
+    elif echo "${CONFIG_MIGRATE}" | grep -q "^migrated:"; then
+        ok "${CONFIG_MIGRATE}"
+    elif [ "${CONFIG_MIGRATE}" = "skipped-no-config" ]; then
+        ok "Skipped (no config.yaml yet)"
+    else
+        warn "Config migration issue — see ${LOG_FILE}"
     fi
 
     step "Merging config.yaml (adding missing fields)"

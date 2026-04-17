@@ -55,6 +55,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #include "loragw_reg.h"
 #include "loragw_gps.h"
 #include "loragw_sx1261.h"  /* for sx1261_cad_scan() */
+#include "loragw_lbt.h"     /* for lgw_lbt_rssi_check() */
 #include "capture_thread.h" /* for CAPTURE_RAM streaming */
 
 /* -------------------------------------------------------------------------- */
@@ -390,6 +391,19 @@ static spectral_scan_t spectral_scan_params = {
     .pace_s = 10
 };
 
+/* Custom LBT: real-time SX1261 RSSI check before TX (replaces broken HAL LBT) */
+static bool custom_lbt_enable = false;
+static int8_t custom_lbt_rssi_target = -80;  /* dBm threshold */
+static int8_t custom_lbt_rssi_offset = 0;    /* SX1261 RSSI calibration offset */
+
+/* Time-based TX guard: track when last TX started and expected airtime.
+   The SX1302 status register has a pipeline delay, so lgw_status may report
+   TX_FREE even while the radio is still emitting. This guard prevents the
+   SX1261 RSSI check from reading our OWN TX signal as interference. */
+static struct timespec custom_lbt_last_tx_time = {0, 0};
+static uint32_t custom_lbt_last_tx_airtime_ms = 0;
+
+
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DECLARATION ---------------------------------------- */
 
@@ -715,6 +729,7 @@ static int parse_SX130x_configuration(const char * conf_file) {
                                 case 500000: sx1261conf.lbt_conf.channels[i].bandwidth = BW_500KHZ; break;
                                 case 250000: sx1261conf.lbt_conf.channels[i].bandwidth = BW_250KHZ; break;
                                 case 125000: sx1261conf.lbt_conf.channels[i].bandwidth = BW_125KHZ; break;
+                                case  62500: sx1261conf.lbt_conf.channels[i].bandwidth = BW_62K5HZ; break;
                                 default: sx1261conf.lbt_conf.channels[i].bandwidth = BW_UNDEFINED;
                             }
                         } else {
@@ -764,7 +779,32 @@ static int parse_SX130x_configuration(const char * conf_file) {
             }
         }
 
-        /* LoRa RX (Channel F) configuration */
+        /* Custom LBT: real-time SX1261 RSSI check before TX (replaces broken HAL LBT) */
+        JSON_Object *conf_custom_lbt_obj = json_object_get_object(conf_sx1261_obj, "custom_lbt");
+        if (conf_custom_lbt_obj != NULL) {
+            val = json_object_get_value(conf_custom_lbt_obj, "enable");
+            if (json_value_get_type(val) == JSONBoolean) {
+                custom_lbt_enable = (bool)json_value_get_boolean(val);
+            }
+            if (custom_lbt_enable == true) {
+                /* Enable the sx1261 radio hardware if not already enabled */
+                sx1261conf.enable = true;
+                val = json_object_get_value(conf_custom_lbt_obj, "rssi_target");
+                if (json_value_get_type(val) == JSONNumber) {
+                    custom_lbt_rssi_target = (int8_t)json_value_get_number(val);
+                }
+                custom_lbt_rssi_offset = sx1261conf.rssi_offset;
+                MSG("INFO: Custom LBT enabled (rssi_target=%d dBm, rssi_offset=%d dB)\n",
+                    custom_lbt_rssi_target, custom_lbt_rssi_offset);
+            } else {
+                MSG("INFO: Custom LBT disabled\n");
+            }
+        } else {
+            MSG("INFO: no configuration for custom LBT\n");
+        }
+
+
+        /* LoRa RX (Channel E) configuration */
         val = json_object_get_value(conf_sx1261_obj, "lora_rx");
         if (json_value_get_type(val) == JSONObject) {
             JSON_Object *lora_rx_obj = json_value_get_object(val);
@@ -777,7 +817,7 @@ static int parse_SX130x_configuration(const char * conf_file) {
             if (sx1261conf.lora_rx_enable == true) {
                 /* Enable the sx1261 radio hardware if not already enabled */
                 sx1261conf.enable = true;
-                MSG("INFO: LoRa RX (Channel F) on SX1261 is enabled\n");
+                MSG("INFO: LoRa RX (Channel E) on SX1261 is enabled\n");
 
                 val = json_object_get_value(lora_rx_obj, "freq_hz");
                 if (json_value_get_type(val) == JSONNumber) {
@@ -827,9 +867,18 @@ static int parse_SX130x_configuration(const char * conf_file) {
                     sx1261conf.lora_rx_cr = 1;
                 }
 
-                MSG("INFO: LoRa RX Channel F: freq=%uHz, BW=0x%02X, SF%u, CR%u\n",
+                /* Parse boosted LNA RX gain (optional, default: true) */
+                val = json_object_get_value(lora_rx_obj, "boosted");
+                if (json_value_get_type(val) == JSONBoolean) {
+                    sx1261conf.lora_rx_boosted = (bool)json_value_get_boolean(val);
+                } else {
+                    sx1261conf.lora_rx_boosted = true; /* default: boosted for max sensitivity */
+                }
+
+                MSG("INFO: LoRa RX Channel E: freq=%uHz, BW=0x%02X, SF%u, CR%u, boosted=%s\n",
                     sx1261conf.lora_rx_freq, sx1261conf.lora_rx_bw,
-                    sx1261conf.lora_rx_sf, sx1261conf.lora_rx_cr);
+                    sx1261conf.lora_rx_sf, sx1261conf.lora_rx_cr,
+                    sx1261conf.lora_rx_boosted ? "true" : "false");
             }
         }
 
@@ -2084,6 +2133,12 @@ int main(int argc, char ** argv)
             printf("### Concentrator temperature unknown ###\n");
         } else {
             printf("### Concentrator temperature: %.0f C ###\n", temperature);
+            /* Write concentrator temperature to file for external readers */
+            FILE *temp_fp = fopen("/tmp/concentrator_temp", "w");
+            if (temp_fp != NULL) {
+                fprintf(temp_fp, "%.1f\n", temperature);
+                fclose(temp_fp);
+            }
         }
         printf("##### END #####\n");
 
@@ -3531,6 +3586,50 @@ void thread_jit(void) {
                                 MSG("WARNING: [jit%d] lgw_spectral_scan_abort failed\n", i);
                             }
                         }
+                        /* --- WM1303: Custom LBT via real-time SX1261 RSSI check --- */
+                        /* Instead of using HAL's broken AGC-based LBT, we perform a direct
+                           SX1261 RSSI measurement before each TX. This pauses Channel E
+                           LoRa RX for ~8-10ms but gives a real-time channel assessment.
+                           IMPORTANT: Skip the RSSI check if we recently transmitted,
+                           because the SX1261 would read our OWN TX signal as interference.
+                           The SX1302 status register has a pipeline delay so lgw_status()
+                           cannot be relied upon — we use a time-based guard instead. */
+                        if (custom_lbt_enable) {
+                            /* Time-based TX guard: skip RSSI check if we're still within
+                               the airtime window of a previous transmission. */
+                            struct timespec now;
+                            clock_gettime(CLOCK_MONOTONIC, &now);
+                            double elapsed_ms = difftimespec(now, custom_lbt_last_tx_time) * 1000.0;
+                            if (custom_lbt_last_tx_airtime_ms > 0 && elapsed_ms < (double)custom_lbt_last_tx_airtime_ms + 50.0) {
+                                /* Still within TX airtime window (+50ms margin).
+                                   Skip RSSI check — we'd only read our own TX signal. */
+                                MSG("INFO: [jit] Custom LBT skipped — TX guard active on rf_chain %d "
+                                    "(elapsed=%.0fms, guard=%ums)\n",
+                                    i, elapsed_ms, custom_lbt_last_tx_airtime_ms + 50);
+                            } else {
+                                /* No recent TX — perform real-time RSSI check.
+                                   NOTE: This is LOG-ONLY. We do NOT drop packets based on
+                                   the hardware RSSI check because the SX1261 can read our own
+                                   TX signal from the co-located SX1302 (-63 dBm typical),
+                                   causing false positives that drop legitimate echo/confirmation
+                                   packets. The software LBT in Python (cached spectral data)
+                                   handles actual TX blocking decisions. */
+                                bool lbt_tx_ok = true;
+                                int16_t lbt_rssi = 0;
+                                int lbt_err = lgw_lbt_rssi_check(pkt.freq_hz, pkt.bandwidth,
+                                                                 custom_lbt_rssi_target,
+                                                                 custom_lbt_rssi_offset,
+                                                                 &lbt_rssi, &lbt_tx_ok);
+                                if (lbt_err == 0 && lbt_tx_ok == false) {
+                                    /* Log the busy channel but DO NOT block TX.
+                                       This data is valuable for diagnostics. */
+                                    MSG("INFO: [jit] Custom LBT RSSI high on rf_chain %d "
+                                        "(freq=%u Hz, RSSI=%d dBm, threshold=%d dBm) — TX proceeding\n",
+                                        i, pkt.freq_hz, lbt_rssi, custom_lbt_rssi_target);
+                                }
+                                /* Always proceed with TX */
+                            }
+                        }
                         result = lgw_send(&pkt);
                         pthread_mutex_unlock(&mx_concent); /* free concentrator ASAP */
                         if (result != LGW_HAL_SUCCESS) {
@@ -3544,6 +3643,44 @@ void thread_jit(void) {
                             meas_nb_tx_ok += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
                             MSG_DEBUG(DEBUG_PKT_FWD, "lgw_send done on rf_chain %d: count_us=%u\n", i, pkt.count_us);
+                            /* Record TX timestamp and estimated airtime for Custom LBT guard */
+                            if (custom_lbt_enable) {
+                                clock_gettime(CLOCK_MONOTONIC, &custom_lbt_last_tx_time);
+                                /* Estimate LoRa airtime from packet parameters.
+                                   Rough formula: symbol_time = 2^SF / BW
+                                   For safety, use generous estimates per SF/BW combo. */
+                                uint32_t est_airtime_ms = 500; /* default fallback */
+                                if (pkt.bandwidth == BW_125KHZ) {
+                                    switch (pkt.datarate) {
+                                        case DR_LORA_SF7:  est_airtime_ms = 50 + pkt.size * 2;   break;
+                                        case DR_LORA_SF8:  est_airtime_ms = 100 + pkt.size * 3;  break;
+                                        case DR_LORA_SF9:  est_airtime_ms = 200 + pkt.size * 5;  break;
+                                        case DR_LORA_SF10: est_airtime_ms = 400 + pkt.size * 9;  break;
+                                        case DR_LORA_SF11: est_airtime_ms = 800 + pkt.size * 17; break;
+                                        case DR_LORA_SF12: est_airtime_ms = 1600 + pkt.size * 33; break;
+                                        default: est_airtime_ms = 500; break;
+                                    }
+                                } else if (pkt.bandwidth == BW_250KHZ) {
+                                    switch (pkt.datarate) {
+                                        case DR_LORA_SF7:  est_airtime_ms = 30 + pkt.size * 1;   break;
+                                        case DR_LORA_SF8:  est_airtime_ms = 50 + pkt.size * 2;   break;
+                                        default: est_airtime_ms = 250; break;
+                                    }
+                                } else if (pkt.bandwidth == BW_500KHZ) {
+                                    est_airtime_ms = 25 + pkt.size * 1;
+                                } else {
+                                    /* BW_62K5HZ (Channel E) */
+                                    switch (pkt.datarate) {
+                                        case DR_LORA_SF7:  est_airtime_ms = 100 + pkt.size * 4;  break;
+                                        case DR_LORA_SF8:  est_airtime_ms = 200 + pkt.size * 7;  break;
+                                        case DR_LORA_SF9:  est_airtime_ms = 400 + pkt.size * 13; break;
+                                        default: est_airtime_ms = 1000; break;
+                                    }
+                                }
+                                custom_lbt_last_tx_airtime_ms = est_airtime_ms;
+                                MSG("INFO: [jit] Custom LBT TX guard set: %u ms (SF%u, BW=%u, size=%u)\n",
+                                    est_airtime_ms, pkt.datarate, pkt.bandwidth, pkt.size);
+                            }
                         }
                     } else {
                         MSG("ERROR: jit_dequeue failed on rf_chain %d with %d\n", i, jit_result);
@@ -3994,7 +4131,7 @@ void thread_spectral_scan(void) {
                 }
                 sweep_idx++;
 
-                /* Restore LoRa RX between scan channels to minimize Channel F downtime */
+                /* Restore LoRa RX between scan channels to minimize Channel E downtime */
                 pthread_mutex_lock(&mx_concent);
                 sx1261_lora_rx_restart_light();
                 pthread_mutex_unlock(&mx_concent);

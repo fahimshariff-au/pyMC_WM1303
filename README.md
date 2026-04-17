@@ -19,7 +19,6 @@ This project transforms a **SenseCAP M1** (Raspberry Pi 4 + WM1303 LoRa concentr
 Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel E uses the SX1261 companion chip, enabling sub-125 kHz bandwidths that the concentrator cannot handle.
 
 > **Tip:** Fewer active channels = more stable operation. 4 channels maximum is recommended.
-
 ## Key Features
 
 - **Multi-channel bridging** — Route packets between channels with configurable rules
@@ -67,6 +66,75 @@ Or manually:
 ```bash
 cd ~/pyMC_WM1303 && git pull && sudo bash upgrade.sh
 ```
+
+## ⚠️ Channel Count & LoRa Settings Impact
+
+Every received message that matches a bridge rule is **retransmitted on each target channel, one at a time**. More active channels and slower LoRa settings directly increase the total TX time per message — and while transmitting, the radio **cannot receive**.
+
+### How TX time adds up
+
+The TX scheduler uses fair round-robin: each channel transmits in sequence. The total TX time is the **sum** of all channel airtimes:
+
+```
+  Message received on Channel A → forwarded to B, C, D, E
+
+  Time ──────────────────────────────────────────────────────────────►
+
+  ┌─ RX ─┐┌── TX Ch.B ──┐┌── TX Ch.C ──┐┌── TX Ch.D ──┐┌──── TX Ch.E ────┐┌─ RX ─
+  │listen ││  183 ms     ││  183 ms     ││  183 ms     ││    366 ms       ││listen
+  └───────┘└─────────────┘└─────────────┘└─────────────┘└─────────────────┘└──────
+           ├──────────────── Total TX: 915 ms ──────────────────────────────┤
+                          NO RX possible during this window
+```
+
+With slower LoRa settings, the same message takes **much** longer:
+
+```
+  Same message, but all channels set to BW125/SF10/CR8:
+
+  Time ──────────────────────────────────────────────────────────────────────────────────────────►
+
+  ┌─ RX ─┐┌─────── TX Ch.B ───────┐┌─────── TX Ch.C ───────┐┌─────── TX Ch.D ───────┐┌──────── TX Ch.E ────────┐┌─ RX ─
+  │listen ││       920 ms          ││       920 ms          ││       920 ms          ││       1051 ms          ││listen
+  └───────┘└───────────────────────┘└───────────────────────┘└───────────────────────┘└────────────────────────┘└──────
+           ├─────────────────────────── Total TX: 3.8 seconds ─────────────────────────────────────┤
+                                    RX blocked 4× longer than fast settings!
+```
+
+### Airtime comparison (50-byte packet)
+
+| LoRa Settings | Airtime | Relative |
+|---------------|--------:|---------:|
+| BW125 / SF8 / CR5 | **183 ms** | 1.0× |
+| BW125 / SF9 / CR5 | 345 ms | 1.9× |
+| BW62.5 / SF8 / CR5 | 366 ms | 2.0× |
+| BW125 / SF10 / CR5 | 649 ms | 3.6× |
+| BW125 / SF10 / CR8 | 920 ms | **5.0×** |
+| BW125 / SF11 / CR5 | 1,380 ms | 7.6× |
+| BW125 / SF12 / CR8 | 3,416 ms | **18.7×** |
+
+> A single packet on SF12/CR8 takes as long as **19 packets** on SF8/CR5!
+
+### RX availability per message (1 message every 10 seconds)
+
+| Channels | Fast (BW125/SF8/CR5) | Medium (BW62.5/SF8/CR5) | Slow (BW125/SF10/CR8) |
+|---------:|---------------------:|------------------------:|----------------------:|
+| 2 | ✅ 96.3% | ✅ 92.7% | ⚠️ 81.6% |
+| 3 | ✅ 94.5% | ✅ 89.0% | ⚠️ 72.4% |
+| 5 | ✅ 90.9% | ⚠️ 81.7% | 🔴 54.0% |
+
+> With 5 slow channels, the repeater spends **nearly half its time transmitting** and may miss incoming messages.
+
+### Recommendations
+
+| Guideline | Why |
+|-----------|-----|
+| **Use 2–3 channels** for best reliability | Keeps TX time short, maximizes RX availability |
+| **Prefer faster settings** (lower SF, higher BW) | Dramatically reduces airtime per packet |
+| **Only add channels you actually need** | Each channel multiplies the TX time per message |
+| **Match settings to range needs** | Use SF8 for nearby nodes, reserve SF10+ only for distant links |
+| **Monitor TX queue stats** in the Status tab | If queues build up, your channels are too slow or too many |
+
 
 ## Screenshots
 

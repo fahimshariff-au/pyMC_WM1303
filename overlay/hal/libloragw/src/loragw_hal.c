@@ -804,8 +804,8 @@ int lgw_sx1261_setconf(struct lgw_conf_sx1261_s * conf) {
     CONTEXT_SX1261.lbt_conf.rssi_target = conf->lbt_conf.rssi_target;
     CONTEXT_SX1261.lbt_conf.nb_channel = conf->lbt_conf.nb_channel;
     for (i = 0; i < CONTEXT_SX1261.lbt_conf.nb_channel; i++) {
-        if (conf->lbt_conf.channels[i].bandwidth != BW_125KHZ && conf->lbt_conf.channels[i].bandwidth != BW_250KHZ) {
-            printf("ERROR: bandwidth not supported for LBT channel %d\n", i);
+        if (conf->lbt_conf.channels[i].bandwidth != BW_62K5HZ && conf->lbt_conf.channels[i].bandwidth != BW_125KHZ && conf->lbt_conf.channels[i].bandwidth != BW_250KHZ) {
+            printf("ERROR: bandwidth not supported for LBT channel %d (got 0x%02X)\n", i, conf->lbt_conf.channels[i].bandwidth);
             return LGW_HAL_ERROR;
         }
         if (conf->lbt_conf.channels[i].scan_time_us != LGW_LBT_SCAN_TIME_128_US && conf->lbt_conf.channels[i].scan_time_us != LGW_LBT_SCAN_TIME_5000_US) {
@@ -815,12 +815,13 @@ int lgw_sx1261_setconf(struct lgw_conf_sx1261_s * conf) {
         CONTEXT_SX1261.lbt_conf.channels[i] = conf->lbt_conf.channels[i];
     }
 
-    /* Set the LoRa RX (Channel F) conf */
+    /* Set the LoRa RX (Channel E) conf */
     CONTEXT_SX1261.lora_rx_enable = conf->lora_rx_enable;
     CONTEXT_SX1261.lora_rx_freq = conf->lora_rx_freq;
     CONTEXT_SX1261.lora_rx_bw = conf->lora_rx_bw;
     CONTEXT_SX1261.lora_rx_sf = conf->lora_rx_sf;
     CONTEXT_SX1261.lora_rx_cr = conf->lora_rx_cr;
+    CONTEXT_SX1261.lora_rx_boosted = conf->lora_rx_boosted;
 
     return LGW_HAL_SUCCESS;
 }
@@ -1180,12 +1181,13 @@ int lgw_start(void) {
             return LGW_HAL_ERROR;
         }
 
-        /* Configure and start SX1261 LoRa RX for Channel F */
+        /* Configure and start SX1261 LoRa RX for Channel E */
         if (CONTEXT_SX1261.lora_rx_enable) {
             err = sx1261_lora_rx_configure(CONTEXT_SX1261.lora_rx_freq,
                                             CONTEXT_SX1261.lora_rx_bw,
                                             CONTEXT_SX1261.lora_rx_sf,
-                                            CONTEXT_SX1261.lora_rx_cr);
+                                            CONTEXT_SX1261.lora_rx_cr,
+                                            CONTEXT_SX1261.lora_rx_boosted);
             if (err == LGW_REG_SUCCESS) {
                 err = sx1261_lora_rx_start();
                 if (err != LGW_REG_SUCCESS) {
@@ -1329,7 +1331,7 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
 
     /* Exit now if no packet fetched from SX1302 (but still check SX1261 below) */
     if (nb_pkt_fetched == 0) {
-        /* Check SX1261 for LoRa RX packets (Channel F) even if SX1302 has none */
+        /* Check SX1261 for LoRa RX packets (Channel E) even if SX1302 has none */
         if (sx1261_lora_rx_active() && nb_pkt_found < max_pkt) {
             int sx1261_pkt = sx1261_lora_rx_fetch(&pkt_data[nb_pkt_found], max_pkt - nb_pkt_found);
             if (sx1261_pkt > 0) {
@@ -1373,7 +1375,7 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
         DEBUG_PRINTF("INFO: RSSI temperature offset applied: %.3f dB (current temperature %.1f C)\n", rssi_temperature_offset, current_temperature);
     }
 
-    /* Check SX1261 for LoRa RX packets (Channel F) */
+    /* Check SX1261 for LoRa RX packets (Channel E) */
     if (sx1261_lora_rx_active() && nb_pkt_found < max_pkt) {
         int sx1261_pkt = sx1261_lora_rx_fetch(&pkt_data[nb_pkt_found], max_pkt - nb_pkt_found);
         if (sx1261_pkt > 0) {

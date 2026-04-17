@@ -421,11 +421,14 @@ cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_hal.c"     "${HAL_DIR}/libloragw/src
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1302.c"  "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1261.c"  "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_spi.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_lbt.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_aux.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1302.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1261.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_hal.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/sx1261_defs.h"    "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_spi.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_lbt.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/Makefile"             "${HAL_DIR}/libloragw/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/src/lora_pkt_fwd.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/packet_forwarder/src/capture_thread.c" "${HAL_DIR}/packet_forwarder/src/" >> "${LOG_FILE}" 2>&1
@@ -454,7 +457,7 @@ for f in bridge_engine.py channel_e_bridge.py config_manager.py engine.py main.p
 done
 
 # repeater/web/ level files
-for f in wm1303_api.py http_server.py spectrum_collector.py cad_calibration_engine.py api_endpoints.py; do
+for f in wm1303_api.py http_server.py spectrum_collector.py cad_calibration_engine.py api_endpoints.py debug_collector.py; do
     if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/web/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_repeater/repeater/web/${f}" "${RPT_DIR}/repeater/web/" >> "${LOG_FILE}" 2>&1
     fi

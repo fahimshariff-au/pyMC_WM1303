@@ -154,7 +154,7 @@ class BridgeEngine:
     }
 
     def __init__(self, radios: list, rules: list | None = None,
-                 dedup_ttl: float = 15.0, tx_delay_ms: float = 50.0):
+                 dedup_ttl: float = 15.0, tx_delay_ms: float = 0.0):
         self.radios = radios
         # Build radio map: channel_id -> radio instance
         self._radio_map = {
@@ -185,15 +185,7 @@ class BridgeEngine:
         self._repeater_engine = None     # RepeaterHandler instance for counter updates
         self._endpoint_handlers: dict[str, callable] = {}  # name -> callback
 
-        # Forwarded-packet echo detection (secondary safety net)
-        self._recently_forwarded: dict[str, float] = {}  # hash -> monotonic_time
-        self._fwd_echo_ttl = 10.0  # seconds
-        self._fwd_echo_detected = 0  # counter
 
-        # Payload-based echo detection (catches modified self-echoes)
-        self._recently_tx_payloads: dict[str, float] = {}  # payload_hash -> monotonic_time
-        self._payload_echo_ttl = 30.0  # seconds (longer window for slow loops)
-        self._payload_echo_detected = 0  # counter
 
         # Dedup event logging for visualization
         self._dedup_events: deque = deque(maxlen=500)  # ring buffer
@@ -387,26 +379,6 @@ class BridgeEngine:
             return
 
 
-        # Payload-based echo detection for injected packets (channels E, F, repeater)
-        _pay_inj = _extract_mc_payload(data)
-        if len(_pay_inj) >= 4:
-            _pay_inj_hash = hashlib.sha256(_pay_inj).hexdigest()[:12]
-            _pay_inj_now = time.monotonic()
-            if _pay_inj_hash in self._recently_tx_payloads:
-                _pay_inj_age = _pay_inj_now - self._recently_tx_payloads[_pay_inj_hash]
-                if _pay_inj_age < self._payload_echo_ttl:
-                    self._payload_echo_detected += 1
-                    _pay_inj_hops = -1
-                    try:
-                        _pr_idx = 5 if (data[0] & 0x03) in (0, 3) else 1
-                        _pay_inj_hops = data[_pr_idx] & 0x3F
-                    except Exception:
-                        pass
-                    self._record_dedup_event('payload_echo', source_name, _pay_inj_hash, len(data), self._get_packet_type_name(data))
-                    logger.warning('BridgeEngine: Payload-echo detected on INJECT %s! payload_hash=%s age=%.1fs hops=%d (total=%d) - DISCARDING',
-                                   source_name, _pay_inj_hash, _pay_inj_age, _pay_inj_hops,
-                                   self._payload_echo_detected)
-                    return
 
         pkt_hash = hashlib.sha256(data).hexdigest()[:12]
         pkt_type_name = self._get_packet_type_name(data)
@@ -457,7 +429,7 @@ class BridgeEngine:
 
             rule_target_raw = rule.get('target', '')
             rule_target = self._resolve_channel(rule_target_raw)
-            tx_delay = float(rule.get('tx_delay_ms', 50)) / 1000.0
+            tx_delay = float(rule.get('tx_delay_ms', 0)) / 1000.0
 
             # Check if target is an external endpoint (mqtt, repeater)
             if rule_target in self._endpoint_handlers:
@@ -580,11 +552,15 @@ class BridgeEngine:
     def _is_duplicate(self, data: bytes) -> bool:
         now = time.monotonic()
         key = hashlib.sha256(data).hexdigest()
-        self._seen = {k: v for k, v in self._seen.items() if now - v < self.dedup_ttl}
+        # Periodic cleanup: only rebuild dict every 5 seconds
+        if now - getattr(self, '_seen_cleanup_ts', 0) > 5.0:
+            self._seen = {k: v for k, v in self._seen.items() if now - v < self.dedup_ttl}
+            self._seen_cleanup_ts = now
         if key in self._seen:
             return True
         self._seen[key] = now
         return False
+
 
     def set_sqlite_handler(self, handler) -> None:
         """Set the SQLiteHandler for persistent dedup event storage."""
@@ -787,50 +763,6 @@ class BridgeEngine:
                 continue
 
 
-            # Forwarded-packet echo detection (secondary safety net)
-            _fwd_check_hash = hashlib.sha256(data).hexdigest()[:12]
-            _fwd_now = time.monotonic()
-            if _fwd_check_hash in self._recently_forwarded:
-                _fwd_age = _fwd_now - self._recently_forwarded[_fwd_check_hash]
-                if _fwd_age < self._fwd_echo_ttl:
-                    self._fwd_echo_detected += 1
-                    self._record_dedup_event('echo', cid, _fwd_check_hash, len(data), self._get_packet_type_name(data))
-                    logger.warning('BridgeEngine: Forwarded-packet echo detected on %s! '
-                                   'hash=%s age=%.1fs (total=%d) - DISCARDING',
-                                   cid, _fwd_check_hash, _fwd_age, self._fwd_echo_detected)
-                    # Update repeater engine: echo drop
-                    self._update_repeater_counters(
-                        data, cid, pkt_type_name=self._get_packet_type_name(data),
-                        pkt_hash=_fwd_check_hash, was_duplicate=False,
-                        was_echo=True, drop_reason="echo")
-                    continue
-
-
-            # Payload-based echo detection (catches modified self-echoes
-            # where hop count/path changed but payload is identical)
-            _pay_rx = _extract_mc_payload(data)
-            if len(_pay_rx) >= 4:
-                _pay_rx_hash = hashlib.sha256(_pay_rx).hexdigest()[:12]
-                _pay_now = time.monotonic()
-                if _pay_rx_hash in self._recently_tx_payloads:
-                    _pay_age = _pay_now - self._recently_tx_payloads[_pay_rx_hash]
-                    if _pay_age < self._payload_echo_ttl:
-                        self._payload_echo_detected += 1
-                        _pay_hops = -1
-                        try:
-                            _pr_idx = 5 if (data[0] & 0x03) in (0, 3) else 1
-                            _pay_hops = data[_pr_idx] & 0x3F
-                        except Exception:
-                            pass
-                        self._record_dedup_event('payload_echo', cid, _pay_rx_hash, len(data), self._get_packet_type_name(data))
-                        logger.warning('BridgeEngine: Payload-echo detected on %s! payload_hash=%s age=%.1fs hops=%d (total=%d) - DISCARDING',
-                                       cid, _pay_rx_hash, _pay_age, _pay_hops,
-                                       self._payload_echo_detected)
-                        self._update_repeater_counters(
-                            data, cid, pkt_type_name=self._get_packet_type_name(data),
-                            pkt_hash=_pay_rx_hash, was_duplicate=False,
-                            was_echo=True, drop_reason="payload_echo")
-                        continue
 
             pkt_hash = hashlib.sha256(data).hexdigest()[:12]
             pkt_type_name = self._get_packet_type_name(data)
@@ -908,10 +840,6 @@ class BridgeEngine:
             'forwarded_packets': self.forwarded_packets,
             'dropped_duplicate': self.dropped_duplicate,
             'dropped_filtered': self.dropped_filtered,
-            'fwd_echo_detected': self._fwd_echo_detected,
-            'payload_echo_detected': self._payload_echo_detected,
-            'fwd_echo_hashes_active': len(self._recently_forwarded),
-            'payload_echo_hashes_active': len(self._recently_tx_payloads),
             'dedup_events_buffered': len(self._dedup_events),
             'dedup_seen_active': len(self._seen),
             'channels': [getattr(r, 'channel_id', str(i)) for i, r in enumerate(self.radios)],

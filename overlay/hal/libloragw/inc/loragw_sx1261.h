@@ -8,7 +8,7 @@
 
 Description:
     Functions used to handle LoRa concentrator SX1261 radio used to handle LBT,
-    Spectral Scan, CAD and LoRa RX (Channel F).
+    Spectral Scan, CAD and LoRa RX (Channel E).
 
 License: Revised BSD License, see LICENSE.TXT file include in the project
 */
@@ -70,8 +70,8 @@ typedef struct {
 
 int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_t *result);
 
-/* LoRa RX (Channel F) - continuous LoRa reception on SX1261 */
-int sx1261_lora_rx_configure(uint32_t freq_hz, uint8_t bw, uint8_t sf, uint8_t cr);
+/* LoRa RX (Channel E) - continuous LoRa reception on SX1261 */
+int sx1261_lora_rx_configure(uint32_t freq_hz, uint8_t bw, uint8_t sf, uint8_t cr, bool boosted);
 int sx1261_lora_rx_start(void);
 /**
  * @brief Lightweight pause for TX blanking (STDBY_XOSC, <1ms)
@@ -86,6 +86,13 @@ int sx1261_lora_rx_resume(void);
 int sx1261_lora_rx_stop(void);
 int sx1261_lora_rx_fetch(struct lgw_pkt_rx_s *pkt_data, uint8_t max_pkt);
 bool sx1261_lora_rx_active(void);
+
+/**
+ * @brief Read instantaneous RSSI from SX1261 (must be in RX mode)
+ * @param rssi_dbm  pointer to store RSSI value in dBm
+ * @return LGW_REG_SUCCESS on success, LGW_REG_ERROR on failure
+ */
+int sx1261_get_rssi_inst(int16_t *rssi_dbm);
 
 int sx1261_lora_rx_restart_light(void);
 

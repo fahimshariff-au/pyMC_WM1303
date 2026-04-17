@@ -8,7 +8,7 @@
 
 Description:
     Functions used to handle LoRa concentrator SX1261 radio used to handle LBT,
-    Spectral Scan, CAD and LoRa RX (Channel F).
+    Spectral Scan, CAD and LoRa RX (Channel E).
 
 License: Revised BSD License, see LICENSE.TXT file include in the project
 */
@@ -80,12 +80,13 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE VARIABLES ---------------------------------------------------- */
 
-/* LoRa RX (Channel F) state */
+/* LoRa RX (Channel E) state */
 static bool sx1261_lora_rx_enabled = false;
 static uint32_t sx1261_lora_rx_freq = 0;
 static uint8_t sx1261_lora_rx_bw = 0;
 static uint8_t sx1261_lora_rx_sf = 0;
 static uint8_t sx1261_lora_rx_cr = 0;
+static bool sx1261_lora_rx_boosted = true; /* default: boosted LNA for max sensitivity */
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS ---------------------------------------------------- */
@@ -433,13 +434,17 @@ int sx1261_set_rx_params(uint32_t freq_hz, uint8_t bandwidth) {
     err = sx1261_reg_w(SX1261_SET_PACKET_TYPE, buff, 1);
     CHECK_ERR(err);
 
-    /* Set GFSK bandwidth */
+    /* Set GFSK bandwidth - the GFSK RX BW is set to ~2x the LoRa BW
+       to ensure the RSSI measurement covers the full LoRa channel */
     switch (bandwidth) {
+        case BW_62K5HZ:
+            fsk_bw_reg = 0x0B; /* RX_BW_117300 Hz - covers 62.5 kHz LoRa channel */
+            break;
         case BW_125KHZ:
-            fsk_bw_reg = 0x0A; /* RX_BW_234300 Hz */
+            fsk_bw_reg = 0x0A; /* RX_BW_234300 Hz - covers 125 kHz LoRa channel */
             break;
         case BW_250KHZ:
-            fsk_bw_reg = 0x09; /* RX_BW_467000 Hz */
+            fsk_bw_reg = 0x09; /* RX_BW_467000 Hz - covers 250 kHz LoRa channel */
             break;
         default:
             printf("ERROR: %s: Cannot configure sx1261 for bandwidth %u\n", __FUNCTION__, bandwidth);
@@ -1110,11 +1115,11 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
 }
 
 /* -------------------------------------------------------------------------- */
-/* --- SX1261 LoRa RX (Channel F) FUNCTIONS --------------------------------- */
+/* --- SX1261 LoRa RX (Channel E) FUNCTIONS --------------------------------- */
 /* -------------------------------------------------------------------------- */
 
 /**
- * @brief Configure SX1261 for continuous LoRa RX reception (Channel F).
+ * @brief Configure SX1261 for continuous LoRa RX reception (Channel E).
  *
  * Sets up the SX1261 radio for LoRa packet reception at the specified
  * frequency, bandwidth, spreading factor and coding rate. This configures
@@ -1126,7 +1131,7 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
  * @param cr       Coding rate (1=4/5, 2=4/6, 3=4/7, 4=4/8)
  * @return LGW_REG_SUCCESS on success, LGW_REG_ERROR on failure
  */
-int sx1261_lora_rx_configure(uint32_t freq_hz, uint8_t bw, uint8_t sf, uint8_t cr) {
+int sx1261_lora_rx_configure(uint32_t freq_hz, uint8_t bw, uint8_t sf, uint8_t cr, bool boosted) {
     int err;
     uint8_t buff[16];
     int32_t freq_reg;
@@ -1170,6 +1175,7 @@ int sx1261_lora_rx_configure(uint32_t freq_hz, uint8_t bw, uint8_t sf, uint8_t c
     sx1261_lora_rx_bw = bw;
     sx1261_lora_rx_sf = sf;
     sx1261_lora_rx_cr = cr;
+    sx1261_lora_rx_boosted = boosted;
 
     /* --- Step 1: Go to Standby --- */
     buff[0] = (uint8_t)SX1261_STDBY_RC;
@@ -1292,17 +1298,17 @@ int sx1261_lora_rx_configure(uint32_t freq_hz, uint8_t bw, uint8_t sf, uint8_t c
     }
     printf("SX1261: IQ polarity fix applied (reg 0x0736 = 0x%02X)\n", iq_reg_val);
 
-    /* --- Step 9: Enable boosted LNA gain --- */
-    /* Register 0x029F = 0x01 for maximum sensitivity */
+    /* --- Step 9: Set LNA RX gain (boosted or power-saving) --- */
+    /* Register 0x029F: 0x01 = boosted (max sensitivity), 0x00 = power saving */
     buff[0] = (SX1261_REG_RX_GAIN >> 8) & 0xFF;
     buff[1] = (SX1261_REG_RX_GAIN >> 0) & 0xFF;
-    buff[2] = 0x01; /* Boosted LNA gain */
+    buff[2] = boosted ? 0x01 : 0x00;
     err = sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 3);
     if (err != LGW_REG_SUCCESS) {
-        printf("ERROR: %s: failed to set boosted LNA gain\n", __FUNCTION__);
+        printf("ERROR: %s: failed to set LNA RX gain\n", __FUNCTION__);
         return LGW_REG_ERROR;
     }
-    printf("SX1261: Boosted LNA gain enabled (reg 0x029F = 0x01)\n");
+    printf("SX1261: LNA RX gain set to %s (reg 0x029F = 0x%02X)\n", boosted ? "BOOSTED" : "POWER-SAVING", buff[2]);
 
     /* --- Step 10: Set DIO IRQ Parameters for LoRa RX --- */
     {
@@ -1494,10 +1500,10 @@ int sx1261_lora_rx_start(void) {
         buff[2] = buff[3] | 0x04; /* set bit 2 for standard IQ */
         sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 3);
 
-        /* Boosted LNA */
+        /* LNA RX gain (boosted or power-saving, from initial configure) */
         buff[0] = (SX1261_REG_RX_GAIN >> 8) & 0xFF;
         buff[1] = (SX1261_REG_RX_GAIN >> 0) & 0xFF;
-        buff[2] = 0x01;
+        buff[2] = sx1261_lora_rx_boosted ? 0x01 : 0x00;
         sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 3);
 
         /* Set IRQ mask */
@@ -1754,7 +1760,7 @@ int sx1261_lora_rx_fetch(struct lgw_pkt_rx_s *pkt_data, uint8_t max_pkt) {
     /* Fill in the packet structure */
     memset(&pkt_data[0], 0, sizeof(struct lgw_pkt_rx_s));
     pkt_data[0].freq_hz = sx1261_lora_rx_freq;
-    pkt_data[0].if_chain = 9;       /* Special marker for Channel F (SX1261 LoRa RX) */
+    pkt_data[0].if_chain = 9;       /* Special marker for Channel E (SX1261 LoRa RX) */
     pkt_data[0].rf_chain = 1;       /* SX1261 is on radio_1 path */
     pkt_data[0].modulation = MOD_LORA;
     pkt_data[0].bandwidth = sx1261_lora_rx_bw;
@@ -1805,6 +1811,42 @@ cleanup:
  */
 bool sx1261_lora_rx_active(void) {
     return sx1261_lora_rx_enabled;
+}
+
+
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+
+/**
+ * @brief Read instantaneous RSSI from SX1261.
+ *
+ * The SX1261 must be in RX mode (GFSK or LoRa) for this to return a valid value.
+ * Uses the GetRssiInst command (0x15) which returns the current RSSI in -dBm/2 format.
+ *
+ * @param rssi_dbm  pointer to store the RSSI value in dBm (negative integer)
+ * @return LGW_REG_SUCCESS on success, LGW_REG_ERROR on failure
+ */
+int sx1261_get_rssi_inst(int16_t *rssi_dbm) {
+    int err;
+    uint8_t buff[2];
+
+    if (rssi_dbm == NULL) {
+        printf("ERROR: %s: NULL pointer\n", __FUNCTION__);
+        return LGW_REG_ERROR;
+    }
+
+    /* GetRssiInst command: opcode 0x15, returns 1 status byte + 1 RSSI byte */
+    buff[0] = 0x00; /* dummy byte for status */
+    buff[1] = 0x00; /* RSSI value holder */
+    err = sx1261_reg_r(SX1261_GET_RSSI_INST, buff, 2);
+    if (err != LGW_REG_SUCCESS) {
+        printf("ERROR: %s: failed to read RSSI\n", __FUNCTION__);
+        return LGW_REG_ERROR;
+    }
+
+    /* RSSI in dBm = -RssiInst/2 */
+    *rssi_dbm = -(int16_t)buff[1] / 2;
+
+    return LGW_REG_SUCCESS;
 }
 
 /* --- EOF ------------------------------------------------------------------ */
