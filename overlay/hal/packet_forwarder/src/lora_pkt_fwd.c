@@ -403,6 +403,14 @@ static int8_t custom_lbt_rssi_offset = 0;    /* SX1261 RSSI calibration offset *
 static struct timespec custom_lbt_last_tx_time = {0, 0};
 static uint32_t custom_lbt_last_tx_airtime_ms = 0;
 
+/* Per-channel Custom LBT configuration (CAD + RSSI per frequency) */
+#define CUSTOM_LBT_MAX_CHANNELS 8
+static struct {
+    uint32_t freq_hz;
+    bool lbt_enabled;
+    bool cad_enabled;
+} custom_lbt_channels[CUSTOM_LBT_MAX_CHANNELS];
+static int custom_lbt_nb_channels = 0;
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DECLARATION ---------------------------------------- */
@@ -447,6 +455,34 @@ static void usage( void )
     printf(" -c <filename>  use config file other than 'global_conf.json'\n");
     printf("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
 }
+
+/* Custom LBT: look up per-channel config by frequency.
+   Returns channel index (0..nb_channels-1) or -1 if not found.
+   Uses ±100 kHz tolerance for frequency matching. */
+static int custom_lbt_find_channel(uint32_t freq_hz) {
+    int i;
+    for (i = 0; i < custom_lbt_nb_channels; i++) {
+        uint32_t diff = (freq_hz > custom_lbt_channels[i].freq_hz)
+                      ? (freq_hz - custom_lbt_channels[i].freq_hz)
+                      : (custom_lbt_channels[i].freq_hz - freq_hz);
+        if (diff <= 100000) { /* ±100 kHz tolerance */
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Convert HAL bandwidth constant to sx1261_cad_scan bw parameter.
+   Returns: 0=125kHz, 1=250kHz, 2=500kHz, or -1 if unsupported. */
+static int custom_lbt_hal_bw_to_cad(uint8_t hal_bw) {
+    switch (hal_bw) {
+        case BW_125KHZ: return 0;
+        case BW_250KHZ: return 1;
+        case BW_500KHZ: return 2;
+        default:        return -1; /* BW_62K5HZ not supported by CAD */
+    }
+}
+
 
 static void sig_handler(int sigio) {
     if (sigio == SIGQUIT) {
@@ -794,8 +830,39 @@ static int parse_SX130x_configuration(const char * conf_file) {
                     custom_lbt_rssi_target = (int8_t)json_value_get_number(val);
                 }
                 custom_lbt_rssi_offset = sx1261conf.rssi_offset;
-                MSG("INFO: Custom LBT enabled (rssi_target=%d dBm, rssi_offset=%d dB)\n",
-                    custom_lbt_rssi_target, custom_lbt_rssi_offset);
+
+                /* Parse per-channel Custom LBT config */
+                JSON_Array *conf_clbt_channels = json_object_get_array(conf_custom_lbt_obj, "channels");
+                if (conf_clbt_channels != NULL) {
+                    custom_lbt_nb_channels = (int)json_array_get_count(conf_clbt_channels);
+                    if (custom_lbt_nb_channels > CUSTOM_LBT_MAX_CHANNELS) {
+                        MSG("WARNING: Custom LBT has %d channels, truncating to %d\n",
+                            custom_lbt_nb_channels, CUSTOM_LBT_MAX_CHANNELS);
+                        custom_lbt_nb_channels = CUSTOM_LBT_MAX_CHANNELS;
+                    }
+                    for (i = 0; i < custom_lbt_nb_channels; i++) {
+                        JSON_Object *ch_obj = json_array_get_object(conf_clbt_channels, i);
+                        if (ch_obj != NULL) {
+                            custom_lbt_channels[i].freq_hz = (uint32_t)json_object_get_number(ch_obj, "freq_hz");
+                            val = json_object_get_value(ch_obj, "lbt_enabled");
+                            custom_lbt_channels[i].lbt_enabled = (val != NULL && json_value_get_type(val) == JSONBoolean)
+                                                                 ? (bool)json_value_get_boolean(val) : false;
+                            val = json_object_get_value(ch_obj, "cad_enabled");
+                            custom_lbt_channels[i].cad_enabled = (val != NULL && json_value_get_type(val) == JSONBoolean)
+                                                                 ? (bool)json_value_get_boolean(val) : false;
+                            MSG("INFO: Custom LBT channel %d: freq=%u Hz, lbt=%s, cad=%s\n",
+                                i, custom_lbt_channels[i].freq_hz,
+                                custom_lbt_channels[i].lbt_enabled ? "on" : "off",
+                                custom_lbt_channels[i].cad_enabled ? "on" : "off");
+                        }
+                    }
+                } else {
+                    MSG("INFO: Custom LBT enabled but no per-channel config — "
+                        "all frequencies will use RSSI-only check\n");
+                }
+
+                MSG("INFO: Custom LBT enabled (rssi_target=%d dBm, rssi_offset=%d dB, channels=%d)\n",
+                    custom_lbt_rssi_target, custom_lbt_rssi_offset, custom_lbt_nb_channels);
             } else {
                 MSG("INFO: Custom LBT disabled\n");
             }
@@ -3586,48 +3653,120 @@ void thread_jit(void) {
                                 MSG("WARNING: [jit%d] lgw_spectral_scan_abort failed\n", i);
                             }
                         }
-                        /* --- WM1303: Custom LBT via real-time SX1261 RSSI check --- */
-                        /* Instead of using HAL's broken AGC-based LBT, we perform a direct
-                           SX1261 RSSI measurement before each TX. This pauses Channel E
-                           LoRa RX for ~8-10ms but gives a real-time channel assessment.
-                           IMPORTANT: Skip the RSSI check if we recently transmitted,
-                           because the SX1261 would read our OWN TX signal as interference.
-                           The SX1302 status register has a pipeline delay so lgw_status()
-                           cannot be relied upon — we use a time-based guard instead. */
+                        /* --- WM1303: Custom LBT — CAD-first, then RSSI --- */
+                        /* Pre-TX channel check using the SX1261:
+                           1. Wait for TX IDLE (status register + time-based guard)
+                           2. Look up per-channel config for this frequency
+                           3. CAD check (fast LoRa preamble detection)
+                           4. RSSI check (broader energy detection)
+                           Both CAD and RSSI handle SX1261 state internally. */
                         if (custom_lbt_enable) {
-                            /* Time-based TX guard: skip RSSI check if we're still within
-                               the airtime window of a previous transmission. */
-                            struct timespec now;
-                            clock_gettime(CLOCK_MONOTONIC, &now);
-                            double elapsed_ms = difftimespec(now, custom_lbt_last_tx_time) * 1000.0;
-                            if (custom_lbt_last_tx_airtime_ms > 0 && elapsed_ms < (double)custom_lbt_last_tx_airtime_ms + 50.0) {
-                                /* Still within TX airtime window (+50ms margin).
-                                   Skip RSSI check — we'd only read our own TX signal. */
-                                MSG("INFO: [jit] Custom LBT skipped — TX guard active on rf_chain %d "
-                                    "(elapsed=%.0fms, guard=%ums)\n",
-                                    i, elapsed_ms, custom_lbt_last_tx_airtime_ms + 50);
-                            } else {
-                                /* No recent TX — perform real-time RSSI check.
-                                   NOTE: This is LOG-ONLY. We do NOT drop packets based on
-                                   the hardware RSSI check because the SX1261 can read our own
-                                   TX signal from the co-located SX1302 (-63 dBm typical),
-                                   causing false positives that drop legitimate echo/confirmation
-                                   packets. The software LBT in Python (cached spectral data)
-                                   handles actual TX blocking decisions. */
+                            bool clbt_blocked = false;
+
+                            /* --- Step 1: Wait for TX to be truly IDLE --- */
+                            /* Both hardware status AND time-based guard must confirm
+                               TX is idle before we run CAD/RSSI. If our own TX is
+                               still in progress, skip checks entirely — the SX1261
+                               would read our own signal as interference. */
+                            bool clbt_skip_checks = false;
+                            {
+                                struct timespec clbt_now;
+                                clock_gettime(CLOCK_MONOTONIC, &clbt_now);
+                                double elapsed_ms = difftimespec(clbt_now, custom_lbt_last_tx_time) * 1000.0;
+                                bool time_guard_clear = (custom_lbt_last_tx_airtime_ms == 0) ||
+                                    (elapsed_ms >= (double)custom_lbt_last_tx_airtime_ms + 50.0);
+
+                                if (!time_guard_clear) {
+                                    /* Still within TX airtime window (+50ms margin).
+                                       Skip CAD/RSSI checks — we'd read our own TX signal. */
+                                    MSG("INFO: [jit] Custom LBT TX guard active on rf_chain %d "
+                                        "(elapsed=%.0fms, guard=%ums) — skipping checks\n",
+                                        i, elapsed_ms, custom_lbt_last_tx_airtime_ms + 50);
+                                    clbt_skip_checks = true;
+                                } else {
+                                    /* Time guard clear. Also verify hardware TX status. */
+                                    uint8_t clbt_tx_status = TX_STATUS_UNKNOWN;
+                                    lgw_status(pkt.rf_chain, TX_STATUS, &clbt_tx_status);
+                                    if (clbt_tx_status == TX_EMITTING) {
+                                        MSG("INFO: [jit] Custom LBT HW still TX_EMITTING on rf_chain %d "
+                                            "despite time guard clear — skipping checks\n", i);
+                                        clbt_skip_checks = true;
+                                    }
+                                }
+                            }
+
+                            /* --- Step 2: Look up per-channel config --- */
+                            int clbt_ch_idx = custom_lbt_find_channel(pkt.freq_hz);
+                            bool ch_cad_enabled = false;
+                            bool ch_lbt_enabled = false;
+                            if (clbt_ch_idx >= 0) {
+                                ch_cad_enabled = custom_lbt_channels[clbt_ch_idx].cad_enabled;
+                                ch_lbt_enabled = custom_lbt_channels[clbt_ch_idx].lbt_enabled;
+                            }
+                            /* If no channel config found, skip all checks (proceed to TX) */
+                            if (clbt_ch_idx < 0) {
+                                MSG_DEBUG(DEBUG_PKT_FWD, "Custom LBT: no channel config for freq %u Hz, "
+                                    "skipping checks\n", pkt.freq_hz);
+                            }
+
+                            /* --- Step 3: CAD check (if enabled for this channel) --- */
+                            if (!clbt_blocked && !clbt_skip_checks && ch_cad_enabled) {
+                                int cad_bw = custom_lbt_hal_bw_to_cad(pkt.bandwidth);
+                                if (cad_bw >= 0) {
+                                    sx1261_cad_result_t cad_result;
+                                    int cad_err = sx1261_cad_scan(pkt.freq_hz, pkt.datarate,
+                                                                  (uint8_t)cad_bw, &cad_result);
+                                    if (cad_err == 0 && cad_result.detected) {
+                                        MSG("INFO: [jit] Custom LBT CAD DETECTED on rf_chain %d "
+                                            "(freq=%u Hz, SF%u, RSSI=%d dBm) — TX BLOCKED\n",
+                                            i, pkt.freq_hz, pkt.datarate, cad_result.rssi_dbm);
+                                        clbt_blocked = true;
+                                    } else if (cad_err == 0) {
+                                        MSG_DEBUG(DEBUG_PKT_FWD, "Custom LBT CAD clear on rf_chain %d "
+                                            "(freq=%u Hz, RSSI=%d dBm)\n",
+                                            i, pkt.freq_hz, cad_result.rssi_dbm);
+                                    } else {
+                                        MSG("WARNING: [jit] Custom LBT CAD scan failed on rf_chain %d "
+                                            "(err=%d) — proceeding with TX\n", i, cad_err);
+                                    }
+                                } else {
+                                    MSG_DEBUG(DEBUG_PKT_FWD, "Custom LBT: unsupported BW 0x%02x for CAD, "
+                                        "skipping CAD check\n", pkt.bandwidth);
+                                }
+                            }
+
+                            /* --- Step 4: RSSI check (if enabled and CAD was clear) --- */
+                            if (!clbt_blocked && !clbt_skip_checks && ch_lbt_enabled) {
                                 bool lbt_tx_ok = true;
                                 int16_t lbt_rssi = 0;
                                 int lbt_err = lgw_lbt_rssi_check(pkt.freq_hz, pkt.bandwidth,
                                                                  custom_lbt_rssi_target,
                                                                  custom_lbt_rssi_offset,
                                                                  &lbt_rssi, &lbt_tx_ok);
-                                if (lbt_err == 0 && lbt_tx_ok == false) {
-                                    /* Log the busy channel but DO NOT block TX.
-                                       This data is valuable for diagnostics. */
-                                    MSG("INFO: [jit] Custom LBT RSSI high on rf_chain %d "
-                                        "(freq=%u Hz, RSSI=%d dBm, threshold=%d dBm) — TX proceeding\n",
+                                if (lbt_err == 0 && !lbt_tx_ok) {
+                                    MSG("INFO: [jit] Custom LBT RSSI check BUSY on rf_chain %d "
+                                        "(freq=%u Hz, RSSI=%d dBm, threshold=%d dBm) — TX BLOCKED\n",
                                         i, pkt.freq_hz, lbt_rssi, custom_lbt_rssi_target);
+                                    clbt_blocked = true;
+                                } else if (lbt_err == 0) {
+                                    MSG_DEBUG(DEBUG_PKT_FWD, "Custom LBT RSSI clear on rf_chain %d "
+                                        "(freq=%u Hz, RSSI=%d dBm)\n",
+                                        i, pkt.freq_hz, lbt_rssi);
+                                } else {
+                                    MSG("WARNING: [jit] Custom LBT RSSI check failed on rf_chain %d "
+                                        "(err=%d) — proceeding with TX\n", i, lbt_err);
                                 }
-                                /* Always proceed with TX */
+                            }
+
+                            /* --- Step 5: Block TX if CAD or RSSI detected activity --- */
+                            if (clbt_blocked) {
+                                pthread_mutex_unlock(&mx_concent);
+                                pthread_mutex_lock(&mx_meas_dw);
+                                meas_nb_tx_fail += 1;
+                                pthread_mutex_unlock(&mx_meas_dw);
+                                MSG("INFO: [jit] Custom LBT TX BLOCKED on rf_chain %d "
+                                    "(freq=%u Hz) — skipping lgw_send\n", i, pkt.freq_hz);
+                                continue;
                             }
                         }
                         result = lgw_send(&pkt);

@@ -392,8 +392,17 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                     'channels': _lbt_channels,
                 },
                 'custom_lbt': {
-                    'enable': False,
+                    'enable': True,  # Always enable the framework; per-channel flags control behavior
                     'rssi_target': _lbt_rssi_target,
+                    'channels': [
+                        {
+                            'freq_hz': int(ch.get('frequency', 0)),
+                            'lbt_enabled': bool(ch.get('lbt_enabled', False)),
+                            'cad_enabled': bool(ch.get('cad_enabled', False)),
+                        }
+                        for ch in (all_ui_channels or [])
+                        if ch.get('active', False) and int(ch.get('frequency', 0)) > 0
+                    ],
                 },
             },
         },
