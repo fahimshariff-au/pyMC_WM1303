@@ -651,6 +651,51 @@ else
     ok "Existing config preserved"
 fi
 
+step "Normalizing wm1303_ui.json (removing legacy field names)"
+NORM_RESULT=$(${VENV_DIR}/bin/python3 << PYNORM 2>>${LOG_FILE}
+import json, sys
+try:
+    path = "${CONFIG_DIR}/wm1303_ui.json"
+    with open(path) as f:
+        ui = json.load(f)
+    fixes = []
+    for ch in ui.get("channels", []):
+        label = ch.get("friendly_name", ch.get("name", "?"))
+        for short, full in [("sf", "spreading_factor"), ("bw", "bandwidth"), ("cr", "coding_rate")]:
+            if short in ch and full in ch:
+                fixes.append(f"{label}: removed {short}={ch[short]} (kept {full}={ch[full]})")
+                del ch[short]
+            elif short in ch:
+                ch[full] = ch.pop(short)
+                fixes.append(f"{label}: renamed {short} -> {full}={ch[full]}")
+    che = ui.get("channel_e", {})
+    for short, full in [("sf", "spreading_factor"), ("bw", "bandwidth"), ("cr", "coding_rate")]:
+        if short in che and full in che:
+            fixes.append(f"channel_e: removed {short}={che[short]} (kept {full}={che[full]})")
+            del che[short]
+        elif short in che:
+            che[full] = che.pop(short)
+            fixes.append(f"channel_e: renamed {short} -> {full}={che[full]}")
+    if fixes:
+        with open(path, "w") as f:
+            json.dump(ui, f, indent=2)
+        print("fixed: " + "; ".join(fixes))
+    else:
+        print("clean")
+except Exception as e:
+    print("error: " + str(e), file=sys.stderr)
+    print("error")
+PYNORM
+)
+if [ "${NORM_RESULT}" = "clean" ]; then
+    ok "No legacy fields found"
+elif echo "${NORM_RESULT}" | grep -q "^fixed:"; then
+    ok "${NORM_RESULT}"
+else
+    warn "Normalization issue — see ${LOG_FILE}"
+fi
+
+
 step "Installing config.yaml"
 if [ ! -f "${CONFIG_DIR}/config.yaml" ]; then
     cp "${SCRIPT_DIR}/config/config.yaml.template" "${CONFIG_DIR}/config.yaml" >> "${LOG_FILE}" 2>&1
