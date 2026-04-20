@@ -423,6 +423,7 @@ cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1261.c"  "${HAL_DIR}/libloragw/src
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_spi.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_lbt.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_aux.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/src/sx1261_spi.c"      "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1302.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1261.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_hal.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1

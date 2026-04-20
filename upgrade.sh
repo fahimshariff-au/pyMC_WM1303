@@ -364,6 +364,49 @@ if update_repo "${REPO_DIR}/pyMC_Repeater" "${REPEATER_BRANCH}"; then
     REPEATER_UPDATED=true
 fi
 
+# Pre-check: detect overlay changes BEFORE copying (compare new overlay vs deployed files)
+HAL_OVERLAY_CHANGED=false
+step "Checking HAL overlay checksums (before apply)"
+OVERLAY_DIFFS=0
+for overlay_file in \
+    "libloragw/src/loragw_hal.c" \
+    "libloragw/src/loragw_sx1302.c" \
+    "libloragw/src/loragw_sx1261.c" \
+    "libloragw/src/loragw_spi.c" \
+    "libloragw/src/loragw_lbt.c" \
+    "libloragw/src/loragw_aux.c" \
+    "libloragw/src/sx1261_spi.c" \
+    "libloragw/inc/loragw_sx1302.h" \
+    "libloragw/inc/loragw_hal.h" \
+    "libloragw/inc/loragw_sx1261.h" \
+    "libloragw/inc/sx1261_defs.h" \
+    "libloragw/inc/loragw_spi.h" \
+    "libloragw/inc/loragw_lbt.h" \
+    "libloragw/Makefile" \
+    "packet_forwarder/src/lora_pkt_fwd.c" \
+    "packet_forwarder/src/capture_thread.c" \
+    "packet_forwarder/inc/capture_thread.h" \
+    "packet_forwarder/Makefile"; do
+    src="${OVERLAY_DIR}/hal/${overlay_file}"
+    dst="${HAL_DIR}/${overlay_file}"
+    if [ -f "${src}" ] && [ -f "${dst}" ]; then
+        if ! cmp -s "${src}" "${dst}"; then
+            OVERLAY_DIFFS=$((OVERLAY_DIFFS + 1))
+            echo "  Changed: ${overlay_file}" >> "${LOG_FILE}"
+        fi
+    elif [ -f "${src}" ]; then
+        OVERLAY_DIFFS=$((OVERLAY_DIFFS + 1))
+        echo "  New: ${overlay_file}" >> "${LOG_FILE}"
+    fi
+done
+if [ ${OVERLAY_DIFFS} -gt 0 ]; then
+    HAL_OVERLAY_CHANGED=true
+    ok "${OVERLAY_DIFFS} file(s) differ from deployed version"
+else
+    ok "All overlay files match deployed version"
+fi
+
+
 # =============================================================================
 # Phase 4: Re-apply Overlay Modifications
 # =============================================================================
@@ -376,6 +419,7 @@ cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_sx1261.c"  "${HAL_DIR}/libloragw/src
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_spi.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_lbt.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/src/loragw_aux.c"     "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
+cp "${OVERLAY_DIR}/hal/libloragw/src/sx1261_spi.c"      "${HAL_DIR}/libloragw/src/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1302.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_sx1261.h"  "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
 cp "${OVERLAY_DIR}/hal/libloragw/inc/loragw_hal.h"     "${HAL_DIR}/libloragw/inc/" >> "${LOG_FILE}" 2>&1
@@ -438,46 +482,6 @@ chown -R ${PI_USER}:${PI_USER} "${REPO_DIR}"
 # =============================================================================
 phase "Rebuild HAL & Packet Forwarder"
 
-# Detect overlay changes via checksums (rebuild even without git changes)
-HAL_OVERLAY_CHANGED=false
-step "Checking HAL overlay checksums"
-OVERLAY_DIFFS=0
-for overlay_file in \
-    "libloragw/src/loragw_hal.c" \
-    "libloragw/src/loragw_sx1302.c" \
-    "libloragw/src/loragw_sx1261.c" \
-    "libloragw/src/loragw_spi.c" \
-    "libloragw/src/loragw_lbt.c" \
-    "libloragw/src/loragw_aux.c" \
-    "libloragw/inc/loragw_sx1302.h" \
-    "libloragw/inc/loragw_hal.h" \
-    "libloragw/inc/loragw_sx1261.h" \
-    "libloragw/inc/sx1261_defs.h" \
-    "libloragw/inc/loragw_spi.h" \
-    "libloragw/inc/loragw_lbt.h" \
-    "libloragw/Makefile" \
-    "packet_forwarder/src/lora_pkt_fwd.c" \
-    "packet_forwarder/src/capture_thread.c" \
-    "packet_forwarder/inc/capture_thread.h" \
-    "packet_forwarder/Makefile"; do
-    src="${OVERLAY_DIR}/hal/${overlay_file}"
-    dst="${HAL_DIR}/${overlay_file}"
-    if [ -f "${src}" ] && [ -f "${dst}" ]; then
-        if ! cmp -s "${src}" "${dst}"; then
-            OVERLAY_DIFFS=$((OVERLAY_DIFFS + 1))
-            echo "  Changed: ${overlay_file}" >> "${LOG_FILE}"
-        fi
-    elif [ -f "${src}" ]; then
-        OVERLAY_DIFFS=$((OVERLAY_DIFFS + 1))
-        echo "  New: ${overlay_file}" >> "${LOG_FILE}"
-    fi
-done
-if [ ${OVERLAY_DIFFS} -gt 0 ]; then
-    HAL_OVERLAY_CHANGED=true
-    ok "${OVERLAY_DIFFS} file(s) differ from deployed version"
-else
-    ok "All overlay files match deployed version"
-fi
 
 # Check if compiled binary is missing (e.g., after manual clean or first overlay install)
 BINARY_MISSING=false
