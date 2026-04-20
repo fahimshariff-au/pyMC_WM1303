@@ -29,3 +29,4 @@ Thumbs.db
 *.a
 *.so
 *.promptinclude.md
+upgrade_bootstrap.sh

@@ -156,7 +156,6 @@ pyMC_WM1303/
 ├── scripts/                 # Utility scripts
 ├── install.sh               # Fresh installation script
 ├── upgrade.sh               # Upgrade script
-├── upgrade_bootstrap.sh     # One-liner upgrade bootstrap
 ├── bootstrap.sh             # Bootstrap helper
 ├── README.md                # Project overview
 ├── TODO.md                  # Task tracking

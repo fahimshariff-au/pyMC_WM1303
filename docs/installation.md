@@ -166,7 +166,7 @@ Expected: only actively configured channels should show `enable: true`.
 ### One-Liner Bootstrap Upgrade
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/upgrade_bootstrap.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
 ```
 
 ### Manual Upgrade
