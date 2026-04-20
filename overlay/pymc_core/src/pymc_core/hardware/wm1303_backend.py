@@ -1941,7 +1941,7 @@ class WM1303Backend:
                 send_func=self._send_for_scheduler,
                 queues=self._tx_queue_manager.queues,
                 post_tx_callback=self._update_tx_stats,
-                lbt_check=self._lbt_check,
+                lbt_check=None,  # Pre-TX check removed: C-level CAD+LBT in lora_pkt_fwd handles this
                 tx_hold_getter=lambda: self._tx_hold_until,
             )
             await self._global_tx_scheduler.start()

@@ -894,7 +894,8 @@ class RepeaterDaemon:
             return False
 
 
-    async def _bridge_repeater_handler(self, data: bytes) -> None:
+    async def _bridge_repeater_handler(self, data: bytes,
+                                        origin_channel: str | None = None) -> None:
         """Bridge-to-repeater handler: parse raw bytes, run repeater logic, re-inject result.
 
         Called by BridgeEngine when a rule forwards to 'repeater' endpoint.
@@ -902,6 +903,12 @@ class RepeaterDaemon:
         modification, then re-injects the forwarded packet back into the
         bridge engine as 'repeater' source so downstream rules (repeater -> channels)
         can fire and TX on all configured destination channels.
+
+        Args:
+            data: Raw packet bytes from the bridge engine.
+            origin_channel: Optional channel_id where the packet was originally
+                received (e.g. 'channel_a'). Passed through to inject_packet
+                so the TX serializer can prioritize the origin channel.
 
         NOTE: Do NOT call mark_seen() before process_packet()! The
         flood_forward/direct_forward methods inside process_packet check
@@ -919,8 +926,8 @@ class RepeaterDaemon:
             return
 
         logger.info(
-            "BridgeRepeaterHandler: parsed %d bytes, header=0x%02x",
-            len(data), pkt.header
+            "BridgeRepeaterHandler: parsed %d bytes, header=0x%02x, origin_channel=%s",
+            len(data), pkt.header, origin_channel
         )
 
         # Process ADVERT packets for neighbor tracking
@@ -957,14 +964,16 @@ class RepeaterDaemon:
         fwd_bytes = fwd_pkt.write_to()
 
         logger.info(
-            "BridgeRepeaterHandler: forwarding %d -> %d bytes (delay=%.3fs)",
-            len(data), len(fwd_bytes), delay
+            "BridgeRepeaterHandler: forwarding %d -> %d bytes (delay=%.3fs, origin_channel=%s)",
+            len(data), len(fwd_bytes), delay, origin_channel
         )
 
         # Re-inject into bridge engine as 'repeater' source
         # This triggers rules: repeater -> channel_a, channel_b, channel_d
+        # Pass origin_channel so the TX serializer prioritizes the original RX channel
         if self.bridge_engine:
-            await self.bridge_engine.inject_packet('repeater', fwd_bytes)
+            await self.bridge_engine.inject_packet('repeater', fwd_bytes,
+                                                   origin_channel=origin_channel)
 
     def _init_wm1303_bridge(self):
         """Initialize the WM1303 bridge engine with dual-channel radios."""

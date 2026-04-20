@@ -3737,8 +3737,9 @@ void thread_jit(void) {
                                 int cad_bw = custom_lbt_hal_bw_to_cad(pkt.bandwidth);
                                 if (cad_bw >= 0) {
                                     const int CAD_MAX_RETRIES = 5;
+                                    const int cad_delays_ms[] = {50, 100, 200, 300, 400};
                                     int cad_retry = 0;
-                                    int cad_wait_ms = 100; /* initial wait, doubles each retry */
+                                    int cad_wait_ms = 0;
                                     bool cad_clear = false;
 
                                     while (cad_retry <= CAD_MAX_RETRIES) {
@@ -3771,9 +3772,8 @@ void thread_jit(void) {
                                             sx1261_lora_rx_restart_light();
                                             if (cad_retry < CAD_MAX_RETRIES) {
                                                 pthread_mutex_unlock(&mx_concent);
-                                                wait_ms(cad_wait_ms);
-                                                pthread_mutex_lock(&mx_concent);
-                                                cad_wait_ms *= 2;
+                                                wait_ms(cad_delays_ms[cad_retry]);
+                                                cad_wait_ms = cad_delays_ms[cad_retry];
                                                 cad_retry++;
                                                 continue; /* retry loop */
                                             } else {
@@ -3818,12 +3818,12 @@ void thread_jit(void) {
                                                 "waiting %d ms (RX restored)\n",
                                                 i, pkt.freq_hz, pkt.datarate,
                                                 cad_result.rssi_dbm,
-                                                cad_retry + 1, CAD_MAX_RETRIES, cad_wait_ms);
+                                                cad_retry + 1, CAD_MAX_RETRIES, cad_delays_ms[cad_retry]);
                                             /* Release mutex during wait — RX is active */
                                             pthread_mutex_unlock(&mx_concent);
-                                            wait_ms(cad_wait_ms);
+                                            wait_ms(cad_delays_ms[cad_retry]);
                                             pthread_mutex_lock(&mx_concent);
-                                            cad_wait_ms *= 2; /* exponential backoff */
+                                            cad_wait_ms = cad_delays_ms[cad_retry];
                                             cad_retry++;
                                         } else {
                                             /* Max retries exhausted — force TX */

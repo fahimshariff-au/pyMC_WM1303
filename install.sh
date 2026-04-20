@@ -558,6 +558,21 @@ if ! sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install --upgrade pip setuptools w
 fi
 ok "Done"
 
+step "Symlinking system rrdtool module into venv"
+VENV_SITE=$(sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
+SYS_RRD=$(python3 -c "import rrdtool; print(rrdtool.__file__)" 2>/dev/null || true)
+if [ -n "${SYS_RRD}" ] && [ -f "${SYS_RRD}" ] && [ -n "${VENV_SITE}" ]; then
+    sudo -u ${PI_USER} ln -sf "${SYS_RRD}" "${VENV_SITE}/"
+    # Verify import works
+    if sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import rrdtool" 2>/dev/null; then
+        ok "Symlinked $(basename ${SYS_RRD})"
+    else
+        warn "Symlink created but import failed - RRD metrics will be unavailable"
+    fi
+else
+    warn "System rrdtool module not found - RRD metrics will be unavailable"
+fi
+
 step "Installing pyMC_core (editable/dev mode)"
 cd "${REPO_DIR}/pyMC_core"
 if ! sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install -e . >> "${LOG_FILE}" 2>&1; then

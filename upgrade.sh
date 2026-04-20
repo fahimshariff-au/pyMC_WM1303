@@ -232,7 +232,7 @@ ok "Done"
 
 step "Checking required packages"
 PKGS_NEEDED=""
-for pkg in jq i2c-tools rrdtool; do
+for pkg in jq i2c-tools rrdtool librrd-dev python3-rrdtool; do
     if ! dpkg -s "$pkg" &>/dev/null; then
         PKGS_NEEDED="${PKGS_NEEDED} ${pkg}"
     fi
@@ -242,6 +242,24 @@ if [ -n "${PKGS_NEEDED}" ]; then
     ok "Installed:${PKGS_NEEDED}"
 else
     ok "All required packages present"
+fi
+
+step "Ensuring rrdtool module available in venv"
+if [ -d "${VENV_DIR}" ]; then
+    VENV_SITE=$(sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
+    SYS_RRD=$(python3 -c "import rrdtool; print(rrdtool.__file__)" 2>/dev/null || true)
+    if [ -n "${SYS_RRD}" ] && [ -f "${SYS_RRD}" ] && [ -n "${VENV_SITE}" ]; then
+        sudo -u ${PI_USER} ln -sf "${SYS_RRD}" "${VENV_SITE}/"
+        if sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import rrdtool" 2>/dev/null; then
+            ok "Symlinked $(basename ${SYS_RRD})"
+        else
+            warn "Symlink created but import failed - RRD metrics will be unavailable"
+        fi
+    else
+        warn "System rrdtool module not found - RRD metrics will be unavailable"
+    fi
+else
+    warn "venv not found at ${VENV_DIR} - skipping rrdtool symlink"
 fi
 
 step "Checking NTP synchronization"

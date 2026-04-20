@@ -813,6 +813,7 @@ async function svcCtrl(a){
   }
 }
 let chData=[];
+function normCh(arr){return(arr||[]).map(function(c){if(c.sf!==undefined&&c.spreading_factor===undefined)c.spreading_factor=c.sf;if(c.bw!==undefined&&c.bandwidth===undefined)c.bandwidth=c.bw;if(c.cr!==undefined&&c.coding_rate===undefined)c.coding_rate=c.cr;return c;});}
 const BW=[125000,250000,500000],SF=[7,8,9,10,11,12],CR=['4/5','4/6','4/7','4/8'];
 const mkSel=(a,cur,lb)=>a.map(v=>`<option value="${v}"${cur===v?' selected':''}>${lb?lb(v):v}</option>`).join('');
 // === RF Chain Configuration ===
@@ -1551,8 +1552,8 @@ function renderRfIfChainMap(rf0f, rf1f){
 let ifChainData=[];let rfCenterData={};
 async function loadCh(){
   loadRfChains();
-  try{const d=await api('GET','/api/wm1303/channels');chData=d.channels||d||[];}
-  catch(e){chData=[{name:'ch-primary',frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,active:true},{name:'ch-secondary',frequency:915000000,bandwidth:500000,spreading_factor:10,coding_rate:'4/8',preamble_length:17,lbt_rssi_target:-80,active:false}];}
+  try{const d=await api('GET','/api/wm1303/channels');chData=normCh(d.channels||d||[]);}
+  catch(e){chData=normCh([{name:'ch-primary',frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,active:true},{name:'ch-secondary',frequency:915000000,bandwidth:500000,spreading_factor:10,coding_rate:'4/8',preamble_length:17,lbt_rssi_target:-80,active:false}]);}
   try{
     const sd=await api('GET','/api/wm1303/spectrum');
     ifChainData=sd.channels||[];
@@ -1707,7 +1708,7 @@ async function saveCh(restart){
   }
 }
 let bRules=[];
-async function loadBr(){if(!chData.length){try{const _cr=await fetch("/api/wm1303/channels");const _cj=await _cr.json();chData=Array.isArray(_cj)?_cj:(_cj.channels||[]);}catch(_e){}}if(!cheData.frequency){try{cheData=await api('GET','/api/wm1303/channel_e');}catch(_e2){}}try{const d=await api("GET","/api/wm1303/bridge");bRules=d.rules||d||[];}catch(e){bRules=[{id:"r1",from:"n1",to:"n2",filter:"all",enabled:true}];}renderBr();}
+async function loadBr(){if(!chData.length){try{const _cr=await fetch("/api/wm1303/channels");const _cj=await _cr.json();chData=normCh(Array.isArray(_cj)?_cj:(_cj.channels||[]));}catch(_e){}}if(!cheData.frequency){try{cheData=await api('GET','/api/wm1303/channel_e');}catch(_e2){}}try{const d=await api("GET","/api/wm1303/bridge");bRules=d.rules||d||[];}catch(e){bRules=[{id:"r1",from:"n1",to:"n2",filter:"all",enabled:true}];}renderBr();}
 const MC_PKT_TYPES=['REQ','RESPONSE','TXT_MSG','ACK','ADVERT','GRP_TXT','GRP_DATA','ANON_REQ','PATH','TRACE','MULTIPART','CONTROL','RAW_CUSTOM'];
 function togglePktTypes(i){var el=G('pkt-types-'+i);if(el)el.style.display=el.style.display==='none'?'flex':'none';}
 function setPktType(i,t,checked){if(!bRules[i].packet_types)bRules[i].packet_types=[];var pt=bRules[i].packet_types;if(t==='ALL'){bRules[i].packet_types=[];renderBr();return;}if(checked){if(pt.indexOf(t)===-1)pt.push(t);}else{bRules[i].packet_types=pt.filter(x=>x!==t);}renderBr();}
@@ -2105,10 +2106,10 @@ showTab = function(name, btn) {
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
     <h3 style="margin:0;font-size:14px;font-weight:600;color:var(--tx)">📈 Signal History</h3>
     <div style="display:flex;gap:4px">
-      <button class="btn sec sm" onclick="setSigHours(1)" id="sigbtn-1">1h</button>
+      <button class="btn pri sm" onclick="setSigHours(1)" id="sigbtn-1">1h</button>
       <button class="btn sec sm" onclick="setSigHours(6)" id="sigbtn-6">6h</button>
       <button class="btn sec sm" onclick="setSigHours(12)" id="sigbtn-12">12h</button>
-      <button class="btn pri sm" onclick="setSigHours(24)" id="sigbtn-24">24h</button>
+      <button class="btn sec sm" onclick="setSigHours(24)" id="sigbtn-24">24h</button>
       <button class="btn sec sm" onclick="setSigHours(72)" id="sigbtn-72">3d</button>
       <button class="btn sec sm" onclick="setSigHours(168)" id="sigbtn-168">1w</button>
     </div>
@@ -2182,14 +2183,13 @@ showTab = function(name, btn) {
     <div style="height:280px;position:relative"><canvas id="lbtHistChart"></canvas></div>
     <div id="lbtHistLegend" style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--txm)"></div>
   </div>
-  <!-- TX Activity per Channel -->
+  <!-- Channel Activity (TX + RX Origin) -->
   <div class="gl" style="padding:18px;margin-bottom:16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <span style="font-size:13px;font-weight:600;color:#f59e0b">&#128225; TX Activity per Channel</span>
-      <span style="font-size:11px;color:var(--txm)" id="txActCount">0 TX packets</span>
+      <span style="font-size:13px;font-weight:600;color:#f59e0b">&#128225; Channel Activity</span>
+      <span style="font-size:11px;color:var(--txm)" id="txActCount">0 packets</span>
     </div>
-    <div style="height:280px;position:relative"><canvas id="txActChart"></canvas></div>
-    <div id="txActLegend" style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--txm)"></div>
+    <div style="height:300px;position:relative"><canvas id="txActChart"></canvas></div>
   </div>
 
 
@@ -2204,7 +2204,7 @@ showTab = function(name, btn) {
 
 <script>
 // === Enhanced Spectrum & Signal Quality ===
-var sigHours = 24;
+var sigHours = 1;
 var sigRssiChart = null, sigSnrChart = null, sigNfChart = null;
 var sigRefreshInterval = null;
 var SIG_COLOR_LIST = ['#3b82f6', '#8b5cf6', '#10b981', '#f59e0b', '#ec4899', '#06b6d4'];
@@ -2233,7 +2233,7 @@ async function loadSignalData() {
   if (typeof Chart === 'undefined') { console.warn('Chart.js not loaded'); return; }
   // Ensure channel data is loaded for friendly name resolution in all charts
   if (!chData || !chData.length) {
-    try { var _cr = await fetch('/api/wm1303/channels'); var _cj = await _cr.json(); chData = Array.isArray(_cj) ? _cj : (_cj.channels || []); } catch(e) {}
+    try { var _cr = await fetch('/api/wm1303/channels'); var _cj = await _cr.json(); chData = normCh(Array.isArray(_cj) ? _cj : (_cj.channels || [])); } catch(e) {}
   }
   if (!cheData || !cheData.frequency) {
     try { cheData = await (await fetch('/api/wm1303/channel_e')).json(); } catch(e) {}
@@ -2656,7 +2656,7 @@ function renderNfCards(channels) {
     try {
       // Ensure channel data is loaded for friendly name resolution
       if (!chData || !chData.length) {
-        try { var _cr = await fetch('/api/wm1303/channels'); var _cj = await _cr.json(); chData = Array.isArray(_cj) ? _cj : (_cj.channels || []); } catch(e) {}
+        try { var _cr = await fetch('/api/wm1303/channels'); var _cj = await _cr.json(); chData = normCh(Array.isArray(_cj) ? _cj : (_cj.channels || [])); } catch(e) {}
       }
       if (!cheData || !cheData.frequency) {
         try { cheData = await (await fetch('/api/wm1303/channel_e')).json(); } catch(e) {}
@@ -3063,19 +3063,24 @@ function renderLbtHistChart(channels) {
 var txActChart = null;
 async function loadTxActivity() {
   try {
-    var d = await api('GET', '/api/wm1303/tx_activity?hours=' + sigHours);
-    if (d.error) { console.warn('tx_activity error:', d.error); }
-    renderTxActChart(d.channels || []);
+    var results = await Promise.all([
+      api('GET', '/api/wm1303/tx_activity?hours=' + sigHours),
+      api('GET', '/api/wm1303/origin_stats?hours=' + sigHours)
+    ]);
+    var txData = results[0], originData = results[1];
+    if (txData.error) console.warn('tx_activity error:', txData.error);
+    if (originData.error) console.warn('origin_stats error:', originData.error);
+    renderTxActChart(txData.channels || [], originData.channels || []);
   } catch(e) {
     console.error('loadTxActivity error:', e);
-    renderTxActChart([]);
+    renderTxActChart([], []);
   }
 }
-function renderTxActChart(channels) {
+function renderTxActChart(txChannels, originChannels) {
   var canvas = document.getElementById('txActChart');
   if (!canvas) return;
   if (txActChart) txActChart.destroy();
-  var datasets = [], totalTx = 0;
+  var datasets = [], totalTx = 0, totalOrigin = 0;
   var chColorScheme = {
     'channel_a': {light:'#93bbfc', normal:'#3b82f6', dark:'#1e40af'},
     'channel_b': {light:'#c4b0fa', normal:'#8b5cf6', dark:'#5b21b6'},
@@ -3084,10 +3089,10 @@ function renderTxActChart(channels) {
     'channel_e': {light:'#fdba74', normal:'#f97316', dark:'#9a3412'}
   };
   var defaultScheme = {light:'#d1d5db', normal:'#999999', dark:'#4b5563'};
-  channels.forEach(function(ch) {
+  // TX datasets
+  txChannels.forEach(function(ch) {
     if (!ch.timeseries || !ch.timeseries.length) return;
     var scheme = chColorScheme[ch.channel_id] || defaultScheme;
-    // TX sent bars
     var sentData = ch.timeseries.map(function(t) { return {x: new Date(t.timestamp * 1000), y: t.tx_sent}; });
     totalTx += ch.timeseries.reduce(function(s, t) { return s + (t.tx_sent || 0); }, 0);
     datasets.push({
@@ -3098,9 +3103,8 @@ function renderTxActChart(channels) {
       borderWidth: 1,
       barPercentage: 0.8,
       categoryPercentage: 0.9,
-      stack: 'stack_' + ch.channel_id
+      stack: 'tx_' + ch.channel_id
     });
-    // TX failed bars (stacked, red)
     var failData = ch.timeseries.map(function(t) { return {x: new Date(t.timestamp * 1000), y: t.tx_failed || 0}; });
     var hasFail = failData.some(function(d) { return d.y > 0; });
     if (hasFail) {
@@ -3112,10 +3116,9 @@ function renderTxActChart(channels) {
         borderWidth: 1,
         barPercentage: 0.8,
         categoryPercentage: 0.9,
-        stack: 'stack_' + ch.channel_id
+        stack: 'tx_' + ch.channel_id
       });
     }
-    // LBT blocked bars (stacked, orange)
     var lbtData = ch.timeseries.map(function(t) { return {x: new Date(t.timestamp * 1000), y: t.lbt_blocked || 0}; });
     var hasLbt = lbtData.some(function(d) { return d.y > 0; });
     if (hasLbt) {
@@ -3127,14 +3130,32 @@ function renderTxActChart(channels) {
         borderWidth: 1,
         barPercentage: 0.8,
         categoryPercentage: 0.9,
-        stack: 'stack_' + ch.channel_id
+        stack: 'tx_' + ch.channel_id
       });
     }
   });
+  // RX Origin datasets
+  originChannels.forEach(function(ch) {
+    if (!ch.timeseries || !ch.timeseries.length) return;
+    var scheme = chColorScheme[ch.channel_id] || defaultScheme;
+    var data = ch.timeseries.map(function(t) { return {x: new Date(t.timestamp * 1000), y: t.count}; });
+    totalOrigin += ch.timeseries.reduce(function(s, t) { return s + (t.count || 0); }, 0);
+    datasets.push({
+      label: (ch.name || ch.channel_id) + ' RX Origin',
+      data: data,
+      backgroundColor: hexToRgba(scheme.dark, 0.7),
+      borderColor: scheme.dark,
+      borderWidth: 2,
+      borderDash: [4, 2],
+      barPercentage: 0.8,
+      categoryPercentage: 0.9,
+      stack: 'rx_' + ch.channel_id
+    });
+  });
   var el = document.getElementById('txActCount');
-  if (el) el.textContent = totalTx + ' TX packets';
+  if (el) el.textContent = totalTx + ' TX  |  ' + totalOrigin + ' RX Origin';
   if (!datasets.length) {
-    datasets.push({label: 'No TX data', data: [{x: new Date(), y: 0}], backgroundColor: '#666'});
+    datasets.push({label: 'No data', data: [{x: new Date(), y: 0}], backgroundColor: '#666'});
   }
   txActChart = new Chart(canvas, {
     type: 'bar',
@@ -3151,7 +3172,7 @@ function renderTxActChart(channels) {
           stacked: true
         },
         y: {
-          title: { display: true, text: 'TX Packets', color: '#999' },
+          title: { display: true, text: 'Packets', color: '#999' },
           grid: { color: 'rgba(128,128,128,0.1)' },
           ticks: { color: '#999' },
           stacked: true,
@@ -3164,6 +3185,12 @@ function renderTxActChart(channels) {
       }
     }
   });
+}
+function hexToRgba(hex, alpha) {
+  var r = parseInt(hex.slice(1,3), 16);
+  var g = parseInt(hex.slice(3,5), 16);
+  var b = parseInt(hex.slice(5,7), 16);
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
 }
 </script>
 

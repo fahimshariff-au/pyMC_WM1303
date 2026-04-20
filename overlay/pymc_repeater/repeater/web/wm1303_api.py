@@ -3066,6 +3066,109 @@ class WM1303API:
             return _j({"error": str(e), "hours": h, "bucket_minutes": 10, "channels": []})
 
 
+    @cherrypy.expose
+    def origin_stats(self, hours='192'):
+        """GET /api/wm1303/origin_stats - Origin channel activity from origin_channel_stats table."""
+        import sqlite3
+        h = min(int(hours), 192)
+        db_path = "/var/lib/pymc_repeater/repeater.db"
+        cutoff = time.time() - (h * 3600)
+        bucket_s = 600  # 10-minute buckets
+        ui_chs = _load_ui().get("channels", [])
+        ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
+                     "channel_c": "#10b981", "channel_d": "#f59e0b",
+                     "channel_e": "#f97316"}
+        ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
+        result_channels = []
+        summary = {}
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                ch_id_map = _get_ui_channel_id_map()
+                for idx, ch_cfg in enumerate(ui_chs):
+                    ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
+                    letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
+                    friendly = ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}"))
+                    rows = conn.execute(
+                        "SELECT timestamp, count FROM origin_channel_stats "
+                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
+                        (ch_id, cutoff)
+                    ).fetchall()
+                    # Aggregate into buckets
+                    timeseries = []
+                    total_count = 0
+                    if rows:
+                        buckets = {}
+                        for row in rows:
+                            bk = int(row["timestamp"] / bucket_s) * bucket_s
+                            if bk not in buckets:
+                                buckets[bk] = 0
+                            buckets[bk] += row["count"]
+                        for bk_ts in sorted(buckets.keys()):
+                            cnt = buckets[bk_ts]
+                            total_count += cnt
+                            timeseries.append({"timestamp": bk_ts, "count": cnt})
+                    summary[ch_id] = total_count
+                    result_channels.append({
+                        "name": friendly,
+                        "channel_id": ch_id,
+                        "color": ch_colors.get(ch_id, "#999"),
+                        "active": ch_cfg.get("active", False),
+                        "timeseries": timeseries,
+                        "total": total_count
+                    })
+                # Also add channel_e if enabled
+                _che_cfg = _load_ui().get("channel_e", {})
+                if _che_cfg.get("enabled", False):
+                    che_rows = conn.execute(
+                        "SELECT timestamp, count FROM origin_channel_stats "
+                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
+                        ("channel_e", cutoff)
+                    ).fetchall()
+                    che_ts = []
+                    che_total = 0
+                    if che_rows:
+                        che_buckets = {}
+                        for row in che_rows:
+                            bk = int(row["timestamp"] / bucket_s) * bucket_s
+                            if bk not in che_buckets:
+                                che_buckets[bk] = 0
+                            che_buckets[bk] += row["count"]
+                        for bk_ts in sorted(che_buckets.keys()):
+                            cnt = che_buckets[bk_ts]
+                            che_total += cnt
+                            che_ts.append({"timestamp": bk_ts, "count": cnt})
+                    summary["channel_e"] = che_total
+                    result_channels.append({
+                        "name": _che_cfg.get("name", _che_cfg.get("friendly_name", "Channel E")),
+                        "channel_id": "channel_e",
+                        "color": "#f97316",
+                        "active": True,
+                        "timeseries": che_ts,
+                        "total": che_total
+                    })
+            # Add live (unflushed) counts from bridge engine
+            try:
+                from repeater.bridge_engine import _active_bridge
+                if _active_bridge:
+                    live_counts = _active_bridge.get_origin_counts()
+                    for ch_id, cnt in live_counts.items():
+                        if cnt > 0:
+                            summary[ch_id] = summary.get(ch_id, 0) + cnt
+                            # Find matching channel entry and add live count
+                            for ch_entry in result_channels:
+                                if ch_entry["channel_id"] == ch_id:
+                                    ch_entry["total"] += cnt
+                                    ch_entry["live_count"] = cnt
+                                    break
+            except Exception:
+                pass
+            return _j({"hours": h, "bucket_minutes": 10, "channels": result_channels, "summary": summary})
+        except Exception as e:
+            logger.error("origin_stats error: %s", e)
+            return _j({"error": str(e), "hours": h, "bucket_minutes": 10, "channels": [], "summary": {}})
+
+
 
 
 
@@ -3381,6 +3484,14 @@ def _packet_activity_recorder():
                     conn.execute(f"ALTER TABLE cad_events ADD COLUMN {_col} INTEGER DEFAULT 0")
                 except Exception:
                     pass  # Column already exists
+            # Origin channel stats table (tracks which channels source packets for the repeater)
+            conn.execute("""CREATE TABLE IF NOT EXISTS origin_channel_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                channel_id TEXT NOT NULL,
+                count INTEGER DEFAULT 0)""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_origin_ch_ts ON origin_channel_stats(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_origin_ch_id ON origin_channel_stats(channel_id)")
             conn.commit()
     except Exception as _init_e:
         logger.debug("packet_activity_recorder init: %s", _init_e)
@@ -3453,7 +3564,22 @@ def _packet_activity_recorder():
                         conn.commit()
             except Exception as _cad_e:
                 logger.debug("cad_events recorder: %s", _cad_e)
-            # Cleanup old data (older than 8 days) from all chart tables
+            # --- Origin channel stats recording ---
+            try:
+                from repeater.bridge_engine import _active_bridge
+                if _active_bridge:
+                    origin_counts = _active_bridge.get_and_reset_origin_counts()
+                    if origin_counts:
+                        origin_inserts = [(now, ch_id, cnt) for ch_id, cnt in origin_counts.items() if cnt > 0]
+                        if origin_inserts:
+                            with _sq3r.connect(_db) as conn:
+                                conn.executemany(
+                                    "INSERT INTO origin_channel_stats (timestamp, channel_id, count) VALUES (?,?,?)",
+                                    origin_inserts
+                                )
+                                conn.commit()
+            except Exception as _origin_e:
+                logger.debug("origin_channel_stats recorder: %s", _origin_e)
             cutoff = now - 8 * 86400
             with _sq3r.connect(_db) as conn:
                 conn.execute("DELETE FROM packet_activity WHERE timestamp < ?", (cutoff,))
@@ -3461,6 +3587,7 @@ def _packet_activity_recorder():
                 conn.execute("DELETE FROM noise_floor WHERE timestamp < ?", (cutoff,))
                 conn.execute("DELETE FROM noise_floor_history WHERE timestamp < ?", (cutoff,))
                 conn.execute("DELETE FROM cad_events WHERE timestamp < ?", (cutoff,))
+                conn.execute("DELETE FROM origin_channel_stats WHERE timestamp < ?", (cutoff,))
                 conn.commit()
         except Exception as _e:
             logger.debug("packet_activity_recorder: %s", _e)

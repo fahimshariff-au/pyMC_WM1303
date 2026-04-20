@@ -185,6 +185,11 @@ class BridgeEngine:
         self._repeater_engine = None     # RepeaterHandler instance for counter updates
         self._endpoint_handlers: dict[str, callable] = {}  # name -> callback
 
+        self._endpoint_handlers: dict[str, callable] = {}  # name -> callback
+
+        # Origin channel counters: track how many packets each channel sources for the repeater
+        self._origin_channel_counts: dict[str, int] = {}
+        self._origin_channel_lock = threading.Lock()
 
 
         # Dedup event logging for visualization
@@ -361,11 +366,19 @@ class BridgeEngine:
         self._endpoint_handlers['mqtt'] = callback
         logger.info('BridgeEngine: MQTT handler registered')
 
-    async def inject_packet(self, source_name: str, data: bytes) -> None:
+    async def inject_packet(self, source_name: str, data: bytes,
+                            origin_channel: str | None = None) -> None:
         """Inject a packet into the bridge as if received from the given source.
 
         Allows external components (MQTT, repeater) to feed packets into
         the bridge rule engine for forwarding.
+
+        Args:
+            source_name: The source identifier (e.g. 'repeater', 'mqtt').
+            data: Raw packet bytes.
+            origin_channel: Optional channel_id where the packet was originally
+                received. When set, radio TX for this channel is prioritized
+                (sent first) so the origin channel gets the fastest repeat.
         """
         if not self._running:
             logger.warning('BridgeEngine: inject_packet called but bridge not running')
@@ -383,13 +396,15 @@ class BridgeEngine:
         pkt_hash = hashlib.sha256(data).hexdigest()[:12]
         pkt_type_name = self._get_packet_type_name(data)
         logger.info('[HEXDUMP] dir=INJECT src=%s sz=%d hdr=%s hex=%s', source_name, len(data), _mc_hdr(data), _hexdump(data))
-        logger.info('BridgeEngine: injected %d bytes from %s (type=%s, hash=%s)',
-                   len(data), source_name, pkt_type_name, pkt_hash)
+        logger.info('BridgeEngine: injected %d bytes from %s (type=%s, hash=%s, origin_channel=%s)',
+                   len(data), source_name, pkt_type_name, pkt_hash, origin_channel)
 
-        await self._forward_by_rules(source_name, data, pkt_hash, pkt_type_name)
+        await self._forward_by_rules(source_name, data, pkt_hash, pkt_type_name,
+                                     origin_channel=origin_channel)
 
     async def _forward_by_rules(self, source_cid: str, data: bytes,
-                                 pkt_hash: str, pkt_type_name: str) -> None:
+                                 pkt_hash: str, pkt_type_name: str,
+                                 origin_channel: str | None = None) -> None:
         """Apply bridge rules to forward a packet from the given source.
 
         Uses bidirectional alias matching via _source_matches() so that
@@ -399,15 +414,22 @@ class BridgeEngine:
         Handles both radio targets (via _radio_map) and external endpoint
         targets (via _endpoint_handlers).
 
-        Radio sends are collected and fired concurrently via asyncio.gather()
-        so that packets destined for multiple channels are queued before any
-        TX burst cycle starts. This allows the WM1303 TX burst batching to
-        collect all packets in a single cycle instead of one cycle per channel.
+        Radio sends are collected and serialized sequentially.
+        When origin_channel is set, the origin channel is sent first
+        (source-channel-first priority), then remaining channels follow
+        in their normal rule order.
         """
         forwarded = False
         rules_checked = 0
+
+        # Track origin channel activity for metrics
+        if origin_channel and source_cid == 'repeater':
+            with self._origin_channel_lock:
+                resolved_oc = self._resolve_channel(origin_channel)
+                self._origin_channel_counts[resolved_oc] = self._origin_channel_counts.get(resolved_oc, 0) + 1
+
         # Collect radio send tasks to fire concurrently
-        radio_sends: list[tuple] = []  # (tcid, rule_id, tx_delay, target, data)
+        radio_sends: list[tuple] = []  # (tcid, rule_id, tx_delay, target)
 
         for rule in self.rules:
             if not rule.get('enabled', True):
@@ -442,7 +464,13 @@ class BridgeEngine:
                     try:
                         if tx_delay > 0:
                             await asyncio.sleep(tx_delay)
-                        result = handler(data)
+                        # Pass origin_channel to repeater handler so the
+                        # source RX channel is preserved through the repeater
+                        # processing pipeline and can be used for TX priority.
+                        if rule_target == 'repeater':
+                            result = handler(data, origin_channel=source_cid)
+                        else:
+                            result = handler(data)
                         if asyncio.iscoroutine(result):
                             await result
                         self.forwarded_packets += 1
@@ -477,8 +505,24 @@ class BridgeEngine:
         # Serialize radio sends because channel_a and channel_e share the same physical
         # rf_chain 0. Concurrent dispatch can overwrite one scheduled TX with another.
         if radio_sends:
-            logger.info('BridgeEngine: serializing %d radio sends for %s (type=%s, hash=%s)',
-                       len(radio_sends), source_cid, pkt_type_name, pkt_hash)
+            # Origin-channel-first priority: when a packet was originally
+            # received on a specific channel and is now being repeated to
+            # multiple channels, the origin channel gets TX priority (sent first).
+            # Remaining channels keep their existing rule order.
+            if origin_channel:
+                resolved_origin = self._resolve_channel(origin_channel)
+                origin_first = [r for r in radio_sends if r[0] == resolved_origin]
+                others = [r for r in radio_sends if r[0] != resolved_origin]
+                if origin_first:
+                    radio_sends = origin_first + others
+                    logger.info('BridgeEngine: origin-channel-first priority: '
+                               '%s goes first (%d total sends)',
+                               resolved_origin, len(radio_sends))
+
+            logger.info('BridgeEngine: serializing %d radio sends for %s '
+                       '(type=%s, hash=%s, order=%s)',
+                       len(radio_sends), source_cid, pkt_type_name, pkt_hash,
+                       [r[0] for r in radio_sends])
 
             for tcid, rule_id, tx_delay, target in radio_sends:
                 try:
@@ -845,3 +889,15 @@ class BridgeEngine:
             'channels': [getattr(r, 'channel_id', str(i)) for i, r in enumerate(self.radios)],
             'rules': self.rules,
         }
+
+    def get_origin_counts(self) -> dict:
+        """Return current origin channel counts without resetting (for live display)."""
+        with self._origin_channel_lock:
+            return dict(self._origin_channel_counts)
+
+    def get_and_reset_origin_counts(self) -> dict:
+        """Return current origin channel counts and reset them to zero."""
+        with self._origin_channel_lock:
+            counts = dict(self._origin_channel_counts)
+            self._origin_channel_counts.clear()
+            return counts
