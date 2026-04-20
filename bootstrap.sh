@@ -51,7 +51,9 @@ if [ -d "${INSTALL_DIR}/.git" ]; then
     echo "  ℹ Repository already exists, pulling latest changes..."
     chown -R ${PI_USER}:${PI_USER} "${INSTALL_DIR}"
     cd "${INSTALL_DIR}"
-    sudo -u ${PI_USER} git pull
+    sudo -u ${PI_USER} git fetch origin
+    sudo -u ${PI_USER} git reset --hard origin/main
+    sudo -u ${PI_USER} git clean -fd
     echo "  ✓ Repository updated"
 else
     echo "  ℹ Cloning repository..."
