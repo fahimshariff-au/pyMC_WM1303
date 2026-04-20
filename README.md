@@ -53,6 +53,9 @@ curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstr
 
 The script handles system updates, dependencies, HAL compilation, Python setup, and service configuration.
 
+> ⚠️ **After every upgrade**, perform a hard refresh in your browser to load the updated UI:  
+> **Ctrl+Shift+R** or **Ctrl+F5** on `http://<pi-ip>:8000/wm1303.html`
+
 ### Access the UI
 
 ```
