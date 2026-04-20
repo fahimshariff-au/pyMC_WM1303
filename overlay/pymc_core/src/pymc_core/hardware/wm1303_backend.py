@@ -319,6 +319,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             chan_configs[key] = {'enable': False, 'radio': 0, 'if': 0}
 
     # --- Channel E config from wm1303_ui.json ---
+    _che_d = {}  # default: empty dict, populated from wm1303_ui.json channel_e section
     _che_lora_rx = {'enable': True, 'freq_hz': 869618000, 'bandwidth': 62500, 'spreading_factor': 8, 'coding_rate': 1, 'boosted': True}
     try:
         _che_path = Path('/etc/pymc_repeater/wm1303_ui.json')
@@ -391,19 +392,26 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                     'nb_channel': len(_lbt_channels),
                     'channels': _lbt_channels,
                 },
-                'custom_lbt': {
-                    'enable': True,  # Always enable the framework; per-channel flags control behavior
+                'custom_lbt': (lambda _clbt_channels: {
+                    'enable': any(ch.get('lbt_enabled', False) for ch in _clbt_channels),
+                    'cad_enable': True,  # CAD is MANDATORY before every TX — always enabled
                     'rssi_target': _lbt_rssi_target,
-                    'channels': [
-                        {
-                            'freq_hz': int(ch.get('frequency', 0)),
-                            'lbt_enabled': bool(ch.get('lbt_enabled', False)),
-                            'cad_enabled': bool(ch.get('cad_enabled', False)),
-                        }
-                        for ch in (all_ui_channels or [])
-                        if ch.get('active', False) and int(ch.get('frequency', 0)) > 0
-                    ],
-                },
+                    'channels': _clbt_channels,
+                })([
+                    {
+                        'freq_hz': int(ch.get('frequency', 0)),
+                        'lbt_enabled': bool(ch.get('lbt_enabled', False)),
+                        'cad_enabled': bool(ch.get('cad_enabled', False)),
+                    }
+                    for ch in (all_ui_channels or [])
+                    if ch.get('active', False) and int(ch.get('frequency', 0)) > 0
+                ] + ([
+                    {
+                        'freq_hz': int(_che_lora_rx.get('freq_hz', 0)),
+                        'lbt_enabled': bool(_che_d.get('lbt_enabled', False)),
+                        'cad_enabled': bool(_che_d.get('cad_enabled', False)),
+                    }
+                ] if _che_lora_rx.get('enable', True) and int(_che_lora_rx.get('freq_hz', 0)) > 0 else [])),
             },
         },
         'gateway_conf': {
@@ -1652,42 +1660,14 @@ class WM1303Backend:
             return {}
 
     def _get_channel_cad_config(self, channel_id: str) -> bool:
-        """Check if CAD is enabled for a channel (cached)."""
-        now = time.time()
-        if now - self._cad_config_cache_time < self._lbt_config_cache_ttl:
-            cached = self._cad_config_cache.get(channel_id)
-            if cached is not None:
-                return cached
-        # Refresh from UI config
-        try:
-            ui_path = Path('/etc/pymc_repeater/wm1303_ui.json')
-            if not ui_path.exists():
-                self._cad_config_cache = {}
-                self._cad_config_cache_time = now
-                return False
-            ui = json.loads(ui_path.read_text())
-            new_cache = {}
-            for ch in ui.get('channels', []):
-                ch_name = ch.get('name', '')
-                # CAD defaults to True when LBT is enabled
-                cad_enabled = ch.get('cad_enabled', ch.get('lbt_enabled', False))
-                new_cache[ch_name] = cad_enabled
-                fn = ch.get('friendly_name', '')
-                if fn:
-                    fn_key = fn.lower().replace(' ', '_')
-                    new_cache[fn_key] = cad_enabled
-            # --- Also include channel_e from its separate UI section ---
-            che = ui.get('channel_e', {})
-            if che:
-                cad_e = che.get('cad_enabled', che.get('lbt_enabled', False))
-                new_cache['channel_e'] = cad_e
-            self._cad_config_cache = new_cache
-            self._cad_config_cache_time = now
-            # Write CAD config for the C HAL whenever config is refreshed
-            self._write_cad_config_json()
-            return new_cache.get(channel_id, False)
-        except Exception:
-            return False
+        """Check if CAD is enabled for a channel.
+
+        CAD is MANDATORY before every TX — always returns True.
+        The per-channel UI toggle is kept for future use (e.g. to control
+        the Python-side software pre-filter sensitivity) but does not
+        disable the hardware CAD scan in pkt_fwd.
+        """
+        return True
 
     def _cad_check(self, channel_id: str, freq_hz: int, rssi: float, sf: int = 0) -> dict:
         """Channel Activity Detection — prefers hardware CAD from SX1261.
@@ -1783,45 +1763,89 @@ class WM1303Backend:
         }
 
 
-    def _lbt_check(self, channel_id: str, freq_hz: int, sf: int = 0) -> dict:
-        """Enhanced LBT check with spectral-scan harvest and noise-floor fallback.
+    def _pre_tx_check(self, channel_id: str, freq_hz: int, sf: int = 0) -> dict:
+        """Pre-TX channel assessment — CAD and LBT are independent checks.
 
-        Data sources (tried in order):
-          1. Spectral scan JSON file (max_age 120 s – covers several monitor cycles)
+        Order:  ① CAD (if enabled)  →  ② LBT / RSSI (if enabled)  →  ③ Allow TX
+
+        CAD and LBT are independently configurable per channel.
+        Either can block TX on its own.  Both disabled = immediate allow.
+
+        Data sources (tried in order for RSSI):
+          1. Spectral scan JSON file (max_age 120 s)
           2. Spectrum history DB      (max_age 300 s)
-          3. Per-channel noise floor cache (always available after first monitor cycle)
-
-        When real scan data is available the full flow runs:
-          ① RSSI check (fast) – broadband interference detection
-          ② CAD check (spectral pattern analysis) – LoRa signal detection
-          ③ Allow TX if both pass
-
-        When only the noise-floor estimate is available the check still returns
-        a valid RSSI value so the rolling buffer in ChannelTXQueue gets populated.
+          3. Per-channel noise floor cache
         """
+        cad_enabled = self._get_channel_cad_config(channel_id)
         lbt_cfg = self._get_channel_lbt_config(channel_id)
-        if not lbt_cfg.get('lbt_enabled', False):
-            return {'allow': True, 'lbt_enabled': False, 'reason': 'lbt_disabled'}
+        lbt_enabled = lbt_cfg.get('lbt_enabled', False)
+
+        # Neither enabled → skip all checks
+        if not cad_enabled and not lbt_enabled:
+            logger.info('_pre_tx_check(%s): BOTH DISABLED (cad=%s, lbt=%s)',
+                         channel_id, cad_enabled, lbt_enabled)
+            return {'allow': True, 'cad_enabled': False, 'lbt_enabled': False,
+                    'reason': 'checks_disabled'}
+
+        logger.info('_pre_tx_check(%s): cad=%s lbt=%s freq=%.3fMHz sf=%d',
+                    channel_id, cad_enabled, lbt_enabled, freq_hz/1e6, sf)
 
         freq_mhz = freq_hz / 1e6
-        threshold = lbt_cfg.get('lbt_rssi_target', -80)
 
-        # Use per-channel noise floor for adaptive threshold if available
-        # Map freq_hz -> UI config name -> noise floor value
+        # --- Gather noise floor ---
         with self._nf_lock:
             _ui_name = self._freq_to_ui_name.get(int(freq_hz), '')
             ch_nf = self._channel_noise_floors.get(_ui_name)
+
+        # --- ① CAD check (if enabled) — always runs first ---
+        cad_result = None
+        if cad_enabled:
+            cad_result = self._cad_check(channel_id, freq_hz,
+                                          rssi=ch_nf or -120.0, sf=sf)
+            if cad_result.get('detected', False):
+                self._store_cad_event(channel_id, 'detected',
+                                     ch_nf, 'pre_tx_cad')
+                return {
+                    'allow': False,
+                    'cad_enabled': True,
+                    'lbt_enabled': lbt_enabled,
+                    'rssi': ch_nf,
+                    'threshold': lbt_cfg.get('lbt_rssi_target', -80),
+                    'noise_floor': ch_nf,
+                    'freq_mhz': freq_mhz,
+                    'reason': 'cad_signal_detected',
+                    'cad_result': cad_result,
+                }
+            else:
+                self._store_cad_event(channel_id, 'clear',
+                                     ch_nf, 'pre_tx_cad')
+
+        # --- ② LBT / RSSI check (if enabled) ---
+        if not lbt_enabled:
+            # CAD passed (or was the only check), LBT disabled → allow
+            return {
+                'allow': True,
+                'cad_enabled': cad_enabled,
+                'lbt_enabled': False,
+                'rssi': ch_nf,
+                'noise_floor': ch_nf,
+                'freq_mhz': freq_mhz,
+                'reason': 'cad_clear_lbt_disabled',
+                'cad_result': cad_result,
+            }
+
+        # LBT is enabled — need RSSI data
+        threshold = lbt_cfg.get('lbt_rssi_target', -80)
         if ch_nf is not None:
             adaptive_threshold = min(threshold, ch_nf + 10.0)
         else:
             adaptive_threshold = threshold
 
-        # --- Try to get spectral scan data (multiple sources) ---
+        # Try spectral scan data
         scan_data = self._read_spectral_scan(max_age=120.0)
         if not scan_data:
             scan_data = self._read_spectrum_from_db(max_age=300.0)
 
-        # --- If we have scan data, find closest point to our frequency ---
         rssi = None
         best_freq = None
         if scan_data:
@@ -1834,67 +1858,56 @@ class WM1303Backend:
             if best_freq is not None and best_dist <= 0.5:
                 rssi = scan_data[best_freq]
 
-        # --- Fallback: use noise floor cache as RSSI estimate ---
+        # Fallback: noise floor as RSSI estimate
         if rssi is None and ch_nf is not None:
             rssi = ch_nf
             return {
                 'allow': True,
+                'cad_enabled': cad_enabled,
                 'lbt_enabled': True,
                 'rssi': rssi,
                 'threshold': adaptive_threshold,
                 'noise_floor': ch_nf,
                 'freq_mhz': freq_mhz,
                 'reason': 'noise_floor_estimate',
+                'cad_result': cad_result,
             }
 
-        # --- No data at all: allow TX but report no measurement ---
+        # No data at all
         if rssi is None:
             return {
                 'allow': True,
+                'cad_enabled': cad_enabled,
                 'lbt_enabled': True,
                 'rssi': None,
                 'threshold': adaptive_threshold,
                 'noise_floor': ch_nf,
                 'reason': 'no_scan_data',
+                'cad_result': cad_result,
             }
 
-        # ① RSSI above threshold → block (broadband interference)
+        # RSSI above threshold → block
         if rssi > adaptive_threshold:
             self._store_cad_event(channel_id, 'detected', rssi, 'rssi_block')
             return {
                 'allow': False,
+                'cad_enabled': cad_enabled,
                 'lbt_enabled': True,
                 'rssi': rssi,
                 'threshold': adaptive_threshold,
                 'noise_floor': ch_nf,
                 'freq_mhz': best_freq,
                 'reason': 'channel_busy',
-                'cad_result': {'detected': False, 'reason': 'skipped_rssi_blocked', 'source': 'none'},
+                'cad_result': cad_result or {
+                    'detected': False,
+                    'reason': 'skipped_rssi_blocked',
+                    'source': 'none'},
             }
 
-        # ② CAD check (if enabled for this channel)
-        cad_enabled = self._get_channel_cad_config(channel_id)
-        cad_result = None
-        if cad_enabled:
-            cad_result = self._cad_check(channel_id, freq_hz, rssi, sf=sf)
-            if cad_result.get('detected', False):
-                self._store_cad_event(channel_id, 'detected', rssi, 'lbt_check')
-                return {
-                    'allow': False,
-                    'lbt_enabled': True,
-                    'rssi': rssi,
-                    'threshold': adaptive_threshold,
-                    'noise_floor': ch_nf,
-                    'freq_mhz': best_freq,
-                    'reason': 'cad_signal_detected',
-                    'cad_result': cad_result,
-                }
-            else:
-                self._store_cad_event(channel_id, 'clear', rssi, 'lbt_check')
-
-        # ③ Both checks passed – allow TX
+        # Both checks passed
         return {
             'allow': True,
+            'cad_enabled': cad_enabled,
             'lbt_enabled': True,
             'rssi': rssi,
             'threshold': adaptive_threshold,
@@ -1903,6 +1916,9 @@ class WM1303Backend:
             'reason': 'clear',
             'cad_result': cad_result,
         }
+
+    # Backward-compatible alias
+    _lbt_check = _pre_tx_check
 
     def _store_cad_event(self, channel_id: str, result: str,
                          rssi: float = None, context: str = 'lbt_check') -> None:
@@ -1929,8 +1945,19 @@ class WM1303Backend:
                 tx_hold_getter=lambda: self._tx_hold_until,
             )
             await self._global_tx_scheduler.start()
-            logger.info('WM1303Backend: GlobalTXScheduler started with %d queues',
-                        len(self._tx_queue_manager.queues))
+
+            # Configure random TX delay for collision avoidance between repeaters
+            try:
+                import json as _json
+                _ui_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+                _ui_data = _json.loads(_ui_path.read_text()) if _ui_path.exists() else {}
+                _rnd_delay = _ui_data.get('tx_random_delay_max_ms', 200)
+            except Exception:
+                _rnd_delay = 200
+            self._global_tx_scheduler._tx_random_delay_max_ms = float(_rnd_delay)
+            logger.info('WM1303Backend: GlobalTXScheduler started with %d queues '
+                        '(random_delay_max=%dms)',
+                        len(self._tx_queue_manager.queues), _rnd_delay)
             # Start per-channel noise floor monitor
             self._start_noise_floor_monitor()
         else:

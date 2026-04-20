@@ -737,19 +737,48 @@ if rep.get('cache_ttl', 0) >= 60:
     rep['cache_ttl'] = 30
     changes.append('repeater.cache_ttl=30')
 
-# tx_delay_factor: ensure 0.5
-if rep.get('tx_delay_factor', 1.0) > 0.5:
-    rep['tx_delay_factor'] = 0.5
-    changes.append('repeater.tx_delay_factor=0.5')
+# tx_delay_factor: set to 0 (v2.1.0: CAD handles collision avoidance)
+if rep.get('tx_delay_factor', 0) != 0:
+    rep['tx_delay_factor'] = 0
+    changes.append('repeater.tx_delay_factor=0')
+
+# direct_tx_delay_factor: set to 0 (v2.1.0: CAD handles collision avoidance)
+if rep.get('direct_tx_delay_factor', 0) != 0:
+    rep['direct_tx_delay_factor'] = 0
+    changes.append('repeater.direct_tx_delay_factor=0')
 
 cfg['repeater'] = rep
 
 # --- Delays section ---
 dly = cfg.get('delays', {})
-if dly.get('tx_delay_factor', 1.0) > 0.5:
-    dly['tx_delay_factor'] = 0.5
-    changes.append('delays.tx_delay_factor=0.5')
+if dly.get('tx_delay_factor', 0) != 0:
+    dly['tx_delay_factor'] = 0
+    changes.append('delays.tx_delay_factor=0')
+if dly.get('direct_tx_delay_factor', 0) != 0:
+    dly['direct_tx_delay_factor'] = 0
+    changes.append('delays.direct_tx_delay_factor=0')
 cfg['delays'] = dly
+
+# --- WM1303 TX Queue section ---
+wm = cfg.get('wm1303', {})
+tq = wm.get('tx_queue', {})
+if tq.get('tx_delay_ms', 0) != 0:
+    tq['tx_delay_ms'] = 0
+    changes.append('wm1303.tx_queue.tx_delay_ms=0')
+wm['tx_queue'] = tq
+cfg['wm1303'] = wm
+
+# --- Bridge rules: set tx_delay_ms to 0 on all rules ---
+for section_key in ['bridge', 'wm1303']:
+    section = cfg.get(section_key, {})
+    rules = section.get('bridge_rules', [])
+    if isinstance(rules, list):
+        for rule in rules:
+            if isinstance(rule, dict) and rule.get('tx_delay_ms', 0) != 0:
+                rule['tx_delay_ms'] = 0
+                changes.append(section_key + '.bridge_rules.' + rule.get('name', '?') + '.tx_delay_ms=0')
+        section['bridge_rules'] = rules
+        cfg[section_key] = section
 
 if changes:
     with open(live_path, 'w') as f:
@@ -1051,6 +1080,25 @@ def migrate(db_path):
             name TEXT UNIQUE NOT NULL,
             applied_at REAL NOT NULL
         )''',
+        'packet_activity': '''CREATE TABLE IF NOT EXISTS packet_activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            channel_id TEXT NOT NULL,
+            rx_count INTEGER DEFAULT 0,
+            tx_count INTEGER DEFAULT 0
+        )''',
+        'cad_events': '''CREATE TABLE IF NOT EXISTS cad_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            channel_id TEXT NOT NULL,
+            cad_clear INTEGER DEFAULT 0,
+            cad_detected INTEGER DEFAULT 0,
+            cad_skipped INTEGER DEFAULT 0,
+            cad_hw_clear INTEGER DEFAULT 0,
+            cad_hw_detected INTEGER DEFAULT 0,
+            cad_sw_clear INTEGER DEFAULT 0,
+            cad_sw_detected INTEGER DEFAULT 0
+        )''',
     }
     for tname, ddl in tables.items():
         # Check if table exists
@@ -1090,6 +1138,8 @@ def migrate(db_path):
         ('idx_noise_timestamp', 'noise_floor', 'timestamp'),
         ('idx_stats_channel_ts', 'channel_stats_history', 'channel_id, timestamp'),
         ('idx_packets_timestamp', 'packets', 'timestamp'),
+        ('idx_pktact_ts', 'packet_activity', 'timestamp'),
+        ('idx_cadevt_ts', 'cad_events', 'timestamp'),
     ]
     for idx_name, table, cols in indexes:
         try:
@@ -1170,6 +1220,41 @@ except Exception:
 else
     info "Database not found at ${DB_PATH}, skipping migration"
 fi
+
+# Clean up orphaned tables in spectrum_history.db
+# Since v2.x, CAD and LBT data is tracked in repeater.db by _packet_activity_recorder.
+# The spectrum_collector no longer writes to lbt_events/cad_events in spectrum_history.db.
+if [ -f "${SPECTRUM_DB}" ]; then
+    step "Cleaning orphaned CAD/LBT data from spectrum_history.db"
+    ORPHAN_COUNT=$(${VENV_DIR}/bin/python3 -c "
+import sqlite3
+try:
+    conn = sqlite3.connect('${SPECTRUM_DB}')
+    cur = conn.cursor()
+    total = 0
+    for table in ['lbt_events', 'cad_events']:
+        try:
+            count = cur.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0]
+            if count > 0:
+                cur.execute('DELETE FROM ' + table)
+                total += count
+        except Exception:
+            pass
+    conn.commit()
+    print(total)
+    conn.close()
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+    if [ "${ORPHAN_COUNT}" -gt 0 ]; then
+        ok "Removed ${ORPHAN_COUNT} orphaned rows from spectrum_history.db"
+    else
+        ok "No orphaned data found"
+    fi
+else
+    info "spectrum_history.db not found, skipping cleanup"
+fi
+
 
 # =============================================================================
 # Phase 8: Restart and Verify Service

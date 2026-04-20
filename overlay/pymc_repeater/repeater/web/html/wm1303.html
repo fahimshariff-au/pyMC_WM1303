@@ -199,9 +199,6 @@ select.ci option{background:#1e293b}
         </div>
         <div class="text-xs mt-2 p-2 rounded" style="background:var(--bgr);color:var(--txm)" id="rf-shared-range">Range: -- to -- MHz</div>
       </div>
-      <div class="sc p-4" style="border:1px solid var(--brd)" id="rf-info-block">
-        <div class="text-center py-4" style="color:var(--txm)">Loading RF info...</div>
-      </div>
     </div>
 
     <!-- Visual Bandwidth Diagram -->
@@ -242,8 +239,8 @@ select.ci option{background:#1e293b}
         <button class="btn sec sm" onclick="saveCh(true)" title="Save and restart service"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>Save &amp; Restart</button>
       </div>
     </div>
-    <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 52px 44px 32px;color:var(--txm)">
-      <span>Channel</span><span>Channel Name</span><span>Freq (MHz)</span><span>BW (kHz)</span><span>SF</span><span>CR</span><span>Preamble</span><span>LBT (dBm)</span><span>LBT</span><span>CAD</span><span>TX (dBm)</span><span></span><span>Active</span><span></span>
+    <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 68px 52px 44px 32px;color:var(--txm)">
+      <span>Channel</span><span>Channel Name</span><span>Freq (MHz)</span><span>BW (kHz)</span><span>SF</span><span>CR</span><span>Preamble</span><span>LBT (dBm)</span><span>LBT</span><span>TX (dBm)</span><span></span><span>Active</span><span></span>
     </div>
     <div id="ch-list"><div class="text-center py-8" style="color:var(--txm)"><div class="spn mx-auto mb-2"></div>Loading...</div></div>
   </div>
@@ -259,11 +256,11 @@ select.ci option{background:#1e293b}
       </div>
     </div>
     <!-- Column headers matching Channel Configuration -->
-    <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 52px 44px 32px;color:var(--txm)">
-      <span>Channel</span><span>Channel Name</span><span>Freq (MHz)</span><span>BW (kHz)</span><span>SF</span><span>CR</span><span>Preamble</span><span>LBT (dBm)</span><span>LBT</span><span>CAD</span><span>TX (dBm)</span><span>RX Boost</span><span>Active</span>
+    <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 68px 52px 44px 32px;color:var(--txm)">
+      <span>Channel</span><span>Channel Name</span><span>Freq (MHz)</span><span>BW (kHz)</span><span>SF</span><span>CR</span><span>Preamble</span><span>LBT (dBm)</span><span>LBT</span><span>TX (dBm)</span><span>RX Boost</span><span>Active</span>
     </div>
     <!-- Single row for Channel E -->
-    <div class="crow con" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 52px 44px 32px">
+    <div class="crow con" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 68px 52px 44px 32px">
       <span class="bdg text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;white-space:nowrap;text-align:center;padding:6px 4px;text-transform:none;">Channel E</span>
       <input class="ci" id="che-name" type="text" value="Channel E" style="width:100%">
       <input class="ci" id="che-frequency" type="text" lang="en" pattern="[0-9]*[.]?[0-9]*" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" style="width:100%">
@@ -286,9 +283,8 @@ select.ci option{background:#1e293b}
       </select>
       <input class="ci" id="che-preamble" type="number" min="6" max="65535" value="17" style="width:100%">
       <input class="ci" id="che-lbt-rssi" type="number" min="-120" max="0" value="-80" style="width:100%">
-      <label class="tgl"><input type="checkbox" id="che-lbt-enabled" checked onchange="var c=G('che-cad-enabled');var l=c.closest('label');if(!this.checked){c.checked=false;c.disabled=true;l.style.opacity='0.35';l.style.pointerEvents='none';}else{c.disabled=false;l.style.opacity='1';l.style.pointerEvents='auto';}" ><span class="tsl"></span></label>
-      <label class="tgl"><input type="checkbox" id="che-cad-enabled"><span class="tsl"></span></label>
-      <input class="ci" id="che-tx-power" type="number" min="0" max="27" value="14" style="width:100%">
+      <label class="tgl"><input type="checkbox" id="che-lbt-enabled" checked><span class="tsl"></span></label>
+      <select class="ci" id="che-tx-power" onchange=""><option value='12'>12</option><option value='14' selected>14</option><option value='17'>17</option><option value='20'>20</option><option value='27'>27</option></select>
       <label class="tgl"><input type="checkbox" id="che-boosted-rx"><span class="tsl"></span></label>
       <label class="tgl"><input type="checkbox" id="che-enable" checked><span class="tsl"></span></label>
     </div>
@@ -341,6 +337,20 @@ select.ci option{background:#1e293b}
         <button class="btn sec sm" onclick="loadBr()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9H3"/><path d="M3 3v6h6"/></svg>Reload</button>
         <button class="btn pri sm" onclick="addRule()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add Rule</button>
       </div>
+    </div>
+    <div style="background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.28);border-radius:12px;padding:14px 16px;margin-bottom:14px">
+      <div style="font-weight:600;color:var(--tx);margin-bottom:6px">&#9989; CAD-based Collision Avoidance</div>
+      <div style="color:var(--txm);font-size:12px;line-height:1.55">
+        <strong>Channel Activity Detection (CAD)</strong> is performed automatically before every transmission.
+        CAD checks whether the channel is clear before sending, which effectively prevents TX collisions.
+        Because of this, the per-rule <strong>TX delay can safely remain at 0&nbsp;ms</strong> (default).
+      </div>
+      <div style="margin-top:8px;color:var(--txm);font-size:12px;line-height:1.55">
+        The TX delay field is still available if you need a fixed offset for other purposes
+        (e.g. coordinating timing between multiple repeaters on the same frequency).
+        For normal operation, <strong>0&nbsp;ms is recommended</strong>.
+      </div>
+    </div>
     </div>
     <div id="rules-list"><div class="text-center py-8" style="color:var(--txm)"><div class="spn mx-auto mb-2"></div>Loading...</div></div>
     <div class="flex justify-end mt-4" style="gap:8px">
@@ -527,6 +537,13 @@ select.ci option{background:#1e293b}
         </select>
         <small style="color:var(--txm);display:block;margin-top:4px">When queue is full: which packet gets dropped</small>
       </div>
+
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">TX Delay Factor</label>
+        <input id="ac-tx-delay-factor" type="number" min="0" max="5" step="0.1" value="0" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:var(--txm);display:block;margin-top:4px">Airtime-based random TX delay factor. Default: 0. With mandatory CAD before every TX, this is no longer needed. Increase only for specific pre-TX jitter needs.</small>
+      </div>
+
 
     </div>
     <div style="margin-top:16px;text-align:right">
@@ -1541,7 +1558,7 @@ async function loadCh(){
     ifChainData=sd.channels||[];
     rfCenterData={rf0:sd.radio_0_freq_mhz,rf1:sd.radio_1_freq_mhz};
   }catch(e){ifChainData=[];}
-  chData.forEach(function(c,i){if(c.lbt_enabled===undefined)c.lbt_enabled=false;if(c.cad_enabled===undefined)c.cad_enabled=false;if(!c.lbt_enabled)c.cad_enabled=false;if(!c.friendly_name)c.friendly_name='Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[i];});
+  chData.forEach(function(c,i){if(c.lbt_enabled===undefined)c.lbt_enabled=false;if(!c.friendly_name)c.friendly_name='Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[i];});
   renderCh();
   renderIfChains();
 }
@@ -1554,7 +1571,7 @@ function buildChDropdown(i,ch){
 function renderCh(){
   const l=G('ch-list');
   if(!chData.length){l.innerHTML='<div class="text-center py-8" style="color:var(--txm)">No channels. Add one or apply a preset.</div>';return;}
-  l.innerHTML=chData.map((ch,i)=>`<div class="crow${ch.active?' con':''}" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 44px 68px 52px 44px 32px">
+  l.innerHTML=chData.map((ch,i)=>`<div class="crow${ch.active?' con':''}" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 68px 52px 44px 32px">
     <select class="ci" style="font-weight:500" onchange="chData[${i}].friendly_name=this.value;renderCh()">${buildChDropdown(i,ch)}</select>
     <input class="ci" value="${esc(ch.name)}" onchange="chData[${i}].name=this.value" placeholder="name">
     <input class="ci" lang="en" type="text" pattern="[0-9]*[.]?[0-9]*" value="${(ch.frequency/1e6).toFixed(3)}" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" onchange="chData[${i}].frequency=Math.round(parseFloat(this.value.replace(/,/g,'.'))*1e6)">
@@ -1563,15 +1580,14 @@ function renderCh(){
     <select class="ci" onchange="chData[${i}].coding_rate=this.value">${mkSel(CR,ch.coding_rate)}</select>
     <input class="ci" type="number" min="6" max="65535" value="${ch.preamble_length||17}" onchange="chData[${i}].preamble_length=parseInt(this.value)">
     <input class="ci" type="number" min="-120" max="0" value="${ch.lbt_rssi_target||-80}" onchange="chData[${i}].lbt_rssi_target=parseInt(this.value)">
-    <div style="display:flex;align-items:center;justify-content:center"><label class="tgl"><input type="checkbox" ${ch.lbt_enabled?' checked':''} onchange="chData[${i}].lbt_enabled=this.checked;if(!this.checked){chData[${i}].cad_enabled=false;}renderCh()"><span class="tsl"></span></label></div>
-    <div style="display:flex;align-items:center;justify-content:center"><label class="tgl" ${!ch.lbt_enabled?'style="opacity:0.35;pointer-events:none"':''}><input type="checkbox" ${ch.cad_enabled?' checked':''} ${!ch.lbt_enabled?'disabled':''} onchange="chData[${i}].cad_enabled=this.checked"><span class="tsl"></span></label></div>
+    <div style="display:flex;align-items:center;justify-content:center"><label class="tgl"><input type="checkbox" ${ch.lbt_enabled?' checked':''} onchange="chData[${i}].lbt_enabled=this.checked;renderCh()"><span class="tsl"></span></label></div>
     <select class="ci" onchange="chData[${i}].tx_power=parseInt(this.value)"><option value='12' ${(ch.tx_power||14)==12?'selected':''}>12</option><option value='14' ${(ch.tx_power||14)==14?'selected':''}>14</option><option value='17' ${(ch.tx_power||14)==17?'selected':''}>17</option><option value='20' ${(ch.tx_power||14)==20?'selected':''}>20</option><option value='27' ${(ch.tx_power||14)==27?'selected':''}>27</option></select>
     <div></div>
     <div style="display:flex;align-items:center;justify-content:center"><label class="tgl"><input type="checkbox" ${ch.active?'checked':''}  onchange="chData[${i}].active=this.checked;renderCh()"><span class="tsl"></span></label></div>
     <button class="btn ber ic" onclick="chData.splice(${i},1);renderCh()" title="Delete"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
   </div>`).join('');
 }
-function addCh(){var _fn='Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[chData.length];chData.push({name:'ch-new',friendly_name:_fn,frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,tx_power:14,lbt_rssi_target:-80,lbt_enabled:false,cad_enabled:false,active:false});renderCh();G('ch-list').lastElementChild?.scrollIntoView({behavior:'smooth'});}
+function addCh(){var _fn='Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[chData.length];chData.push({name:'ch-new',friendly_name:_fn,frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,tx_power:14,lbt_rssi_target:-80,lbt_enabled:false,active:false});renderCh();G('ch-list').lastElementChild?.scrollIntoView({behavior:'smooth'});}
 // -- Channel E load/save --
 let cheData={};
 async function loadChE(){
@@ -1587,10 +1603,6 @@ async function loadChE(){
     G('che-preamble').value=d.preamble_length||17;
     G('che-lbt-rssi').value=d.lbt_rssi_target||-80;
     G('che-lbt-enabled').checked=!!d.lbt_enabled;
-    G('che-cad-enabled').checked=!!d.cad_enabled;
-    var _cadEl=G('che-cad-enabled'),_cadLbl=_cadEl.closest('label');
-    if(!d.lbt_enabled){_cadEl.disabled=true;_cadLbl.style.opacity='0.35';_cadLbl.style.pointerEvents='none';}
-    else{_cadEl.disabled=false;_cadLbl.style.opacity='1';_cadLbl.style.pointerEvents='auto';}
     G('che-tx-power').value=d.tx_power||14;
     G('che-boosted-rx').checked=d.boosted_rx!==false;
   }catch(e){console.error('loadChE err:',e);}
@@ -1606,7 +1618,6 @@ async function saveChE(restart){
     preamble_length:parseInt(G('che-preamble').value)||17,
     lbt_rssi_target:parseInt(G('che-lbt-rssi').value)||-80,
     lbt_enabled:G('che-lbt-enabled').checked,
-    cad_enabled:G('che-cad-enabled').checked,
     tx_power:parseInt(G('che-tx-power').value)||14,
     boosted_rx:G('che-boosted-rx').checked,
     restart:!!restart
@@ -1712,9 +1723,9 @@ function renderBr(){
     var hasPt=pt.length>0;
     var ptLabel=hasPt?pt.join(', '):'All types';
     var ptBtnCl=hasPt?'background:rgba(99,102,241,0.15);color:#818cf8;border-color:#818cf8':'';
-    return `<div class="rrw${r.enabled?'':' rdis'}" style="flex-wrap:wrap"><label class="tgl" style="flex-shrink:0"><input type="checkbox" ${r.enabled?'checked':''}  onchange="bRules[${i}].enabled=this.checked;renderBr()"><span class="tsl"></span></label><select class="ci" style="flex:1;min-width:100px" onchange="bRules[${i}].from=this.value">${nO.replace('"'+r.from+'"','"'+r.from+'" selected')}</select><svg width="16" height="16" fill="none" stroke="var(--txm)" stroke-width="2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M5 12h14M12 5l7 7-7 7"/></svg><select class="ci" style="flex:1;min-width:100px" onchange="bRules[${i}].to=this.value">${nO.replace('"'+r.to+'"','"'+r.to+'" selected')}</select><button class="btn sec sm" style="font-size:10px;padding:2px 8px;${ptBtnCl}" onclick="togglePktTypes(${i})" title="Configure packet type filter">${hasPt?'\u25B6 '+esc(ptLabel):'\u25B6 Pkt Types'}</button><span style="flex-shrink:0;display:flex;align-items:center;gap:4px"><label style="font-size:11px;color:var(--txm)">TX delay</label><input type="number" class="ci" style="width:65px" min="0" max="5000" value="${r.tx_delay_ms||50}" onchange="bRules[${i}].tx_delay_ms=+this.value"><span style="font-size:11px;color:var(--txm)">ms</span></span><button class="btn ber ic" onclick="bRules.splice(${i},1);renderBr()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button><div id="pkt-types-${i}" style="display:${hasPt?'flex':'none'};width:100%;flex-wrap:wrap;gap:6px;padding:6px 0 2px 32px;border-top:1px solid rgba(128,128,128,0.15);margin-top:4px"><label style="font-size:11px;color:var(--txm);display:flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" ${pt.length===0?'checked':''} onchange="setPktType(${i},'ALL',this.checked)" style="accent-color:#6366f1"><span>ALL</span></label>${MC_PKT_TYPES.map(t=>'<label style="font-size:11px;color:var(--txm);display:flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" '+(pt.indexOf(t)>=0?'checked':'')+' onchange="setPktType('+i+',\''+t+'\',this.checked)" style="accent-color:#6366f1"><span>'+t+'</span></label>').join('')}</div></div>`}).join('');
+    return `<div class="rrw${r.enabled?'':' rdis'}" style="flex-wrap:wrap"><label class="tgl" style="flex-shrink:0"><input type="checkbox" ${r.enabled?'checked':''}  onchange="bRules[${i}].enabled=this.checked;renderBr()"><span class="tsl"></span></label><select class="ci" style="flex:1;min-width:100px" onchange="bRules[${i}].from=this.value">${nO.replace('"'+r.from+'"','"'+r.from+'" selected')}</select><svg width="16" height="16" fill="none" stroke="var(--txm)" stroke-width="2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M5 12h14M12 5l7 7-7 7"/></svg><select class="ci" style="flex:1;min-width:100px" onchange="bRules[${i}].to=this.value">${nO.replace('"'+r.to+'"','"'+r.to+'" selected')}</select><button class="btn sec sm" style="font-size:10px;padding:2px 8px;${ptBtnCl}" onclick="togglePktTypes(${i})" title="Configure packet type filter">${hasPt?'\u25B6 '+esc(ptLabel):'\u25B6 Pkt Types'}</button><span style="flex-shrink:0;display:flex;align-items:center;gap:4px"><label style="font-size:11px;color:var(--txm)">TX delay</label><input type="number" class="ci" style="width:65px" min="0" max="5000" value="${r.tx_delay_ms||0}" onchange="bRules[${i}].tx_delay_ms=+this.value"><span style="font-size:11px;color:var(--txm)">ms</span></span><button class="btn ber ic" onclick="bRules.splice(${i},1);renderBr()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button><div id="pkt-types-${i}" style="display:${hasPt?'flex':'none'};width:100%;flex-wrap:wrap;gap:6px;padding:6px 0 2px 32px;border-top:1px solid rgba(128,128,128,0.15);margin-top:4px"><label style="font-size:11px;color:var(--txm);display:flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" ${pt.length===0?'checked':''} onchange="setPktType(${i},'ALL',this.checked)" style="accent-color:#6366f1"><span>ALL</span></label>${MC_PKT_TYPES.map(t=>'<label style="font-size:11px;color:var(--txm);display:flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" '+(pt.indexOf(t)>=0?'checked':'')+' onchange="setPktType('+i+',\''+t+'\',this.checked)" style="accent-color:#6366f1"><span>'+t+'</span></label>').join('')}</div></div>`}).join('');
 }
-function addRule(){bRules.push({id:'r'+Date.now(),from:'',to:'',packet_types:[],tx_delay_ms:50,enabled:true});renderBr();}
+function addRule(){bRules.push({id:'r'+Date.now(),from:'',to:'',packet_types:[],tx_delay_ms:0,enabled:true});renderBr();}
 async function saveBr(restart){
   try{
     const payload = {rules: bRules};
@@ -1854,8 +1865,8 @@ async function specLoad() {
   if (!d || d.error) return;
   specData = d;
 
-  // Update info cards
-  G('specSpiPath').textContent = d.sx1261_spi || '/dev/spidev0.1';
+  // Update info cards (removed from UI, null-guard for safety)
+  if(G('specSpiPath'))G('specSpiPath').textContent = d.sx1261_spi || '/dev/spidev0.1';
   if(G('specSx1261Role'))G('specSx1261Role').textContent='LBT / CAD / Spectrum';
   if(G('specSx1261Status')){var sx=d.sx1261_status||{};var halActive=sx.managed_by_hal||!d.sx1261_status||d.spectral_scan_enabled||(d.last_scan&&d.last_scan.scan_points);if(halActive){G('specSx1261Status').textContent='Active (HAL)';G('specSx1261Status').style.color='#6366f1';}else{G('specSx1261Status').textContent=sx.initialized?'Initialized':'Not Available';G('specSx1261Status').style.color=sx.initialized?'#22c55e':'#f59e0b';}}
   if(G('specSx1261ConnStatus')){var sx2=d.sx1261_status||{};var ha2=sx2.managed_by_hal||!d.sx1261_status||d.spectral_scan_enabled||(d.last_scan&&d.last_scan.scan_points);G('specSx1261ConnStatus').textContent=ha2?'HAL Controlled':(sx2.initialized?'Connected':'Disconnected');}
@@ -1865,10 +1876,10 @@ async function specLoad() {
   if(G('specHalSubtitle'))G('specHalSubtitle').style.display=sxH.managed_by_hal?'inline':'none';
   if(G('specSx1261Role'))G('specSx1261Role').textContent=sxH.role||'LBT / CAD / Spectrum';
   if(sxH.spi_path&&G('specSpiPath'))G('specSpiPath').textContent=sxH.spi_path;
-  G('specChCount').textContent = (d.active_channel_count !== undefined ? d.active_channel_count : (d.channels || []).length) + ' active';
+  if(G('specChCount'))G('specChCount').textContent = (d.active_channel_count !== undefined ? d.active_channel_count : (d.channels || []).length) + ' active';
 
-  const scanEl = G('specScanStatus');
-  if(d.spectral_scan_enabled){scanEl.innerHTML='<span style="background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);padding:2px 8px;border-radius:6px;font-size:12px">✅ Spectral Scan Active</span>';}else{scanEl.innerHTML='<span style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);padding:2px 8px;border-radius:6px;font-size:12px">Spectral Scan Disabled</span>';}
+  var scanEl = G('specScanStatus');
+  if(scanEl){if(d.spectral_scan_enabled){scanEl.innerHTML='<span style="background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);padding:2px 8px;border-radius:6px;font-size:12px">✅ Spectral Scan Active</span>';}else{scanEl.innerHTML='<span style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);padding:2px 8px;border-radius:6px;font-size:12px">Spectral Scan Disabled</span>';}}
 
 
   const lbtEl = G('specLbtStatus');
@@ -2017,8 +2028,7 @@ async function specToggleSx1261() {
   const d = await api('POST', '/api/wm1303/spectrum', {action:'toggle', enable:enabled});
   if (d && d.status === 'ok') {
     if(G('specEnableLabel'))G('specEnableLabel').textContent = enabled ? 'Enabled (restarting...)' : 'Disabled';
-    G('specScanStatus').textContent = enabled ? 'Enabled' : 'Disabled';
-    G('specScanStatus').style.color = enabled ? '#10b981' : '#ef4444';
+    if(G('specScanStatus')){G('specScanStatus').textContent = enabled ? 'Enabled' : 'Disabled';G('specScanStatus').style.color = enabled ? '#10b981' : '#ef4444';}
   } else {
     if(G('specEnableCheck'))G('specEnableCheck').checked = !enabled;
     if(G('specEnableLabel'))G('specEnableLabel').textContent = !enabled ? 'Enabled' : 'Disabled';
@@ -2066,42 +2076,6 @@ showTab = function(name, btn) {
 </script>
 
 <div id="tab-spectrum" class="tp">
-  <!-- Header -->
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:12px">
-    <div>
-      <h2 style="margin:0;font-size:18px;font-weight:600;color:var(--tx)">📊 Channel E Spectrum & Signal Quality</h2>
-      
-      <p style="margin:4px 0 0;font-size:12px;color:var(--txm)">RF Signal Monitoring — Per-Channel RSSI, SNR, Noise Floor</p>
-    </div>
-  </div>
-
-  <!-- Info cards -->
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px">
-    <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Channel E SPI</div>
-      <div id="specSpiPath" style="font-size:14px;font-weight:600;color:#6366f1">/dev/spidev0.1</div>
-    </div>
-    <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Channel E Role</div>
-      <div id="specSx1261Role" style="font-size:14px;font-weight:600;color:#10b981">LBT / CAD / Spectrum</div>
-    </div>
-    <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Channel E Status</div>
-      <div id="specSx1261Status" style="font-size:14px;font-weight:600;color:#f59e0b">Checking...</div>
-    </div>
-    <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Active Channels</div>
-      <div id="specChCount" style="font-size:14px;font-weight:600;color:var(--tx)">—</div>
-    </div>
-    <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Spectral Scan</div>
-      <div id="specScanStatus" style="font-size:14px;font-weight:600;color:#ef4444">Disabled</div>
-    </div>
-    <div class="gl" style="padding:14px">
-      <div style="font-size:11px;color:var(--txm);margin-bottom:4px">Noise Floor</div>
-      <div id="specNoiseFloor" style="font-size:14px;font-weight:600;color:#f59e0b">— dBm</div>
-    </div>
-  </div>
 
   <!-- Channel Activity Monitor -->
   <div class="gl" style="padding:18px;margin-bottom:16px">
@@ -2187,6 +2161,7 @@ showTab = function(name, btn) {
       </div>
     </div>
     <div style="position:relative;height:260px"><canvas id="cadTimelineChart"></canvas></div>
+    <div style="font-size:10px;color:var(--txm);opacity:0.6;margin-top:6px;padding:0 4px">&#x1F7E2; <b>Clear</b> = channel free, TX sent &nbsp;|&nbsp; &#x1F534; <b>Detected</b> = activity detected after all CAD retries, TX force-sent anyway</div>
     <div id="cadChartNoData" style="display:none;text-align:center;padding:40px 0;color:var(--txm)">
       <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="margin:0 auto 12px;opacity:0.4"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
       <div>No CAD events recorded yet</div>
@@ -2589,7 +2564,6 @@ function renderPerChannelNfChart(channels) {
       borderColor: color,
       backgroundColor: 'transparent',
       borderWidth: 2,
-      borderDash: getChDash(idx),
       pointRadius: 0,
       tension: 0.3
     });
@@ -2763,50 +2737,23 @@ function renderNfCards(channels) {
       var rgb = cadGetColor(chId, idx);
       var dataMap = {};
       (buckets[chId] || []).forEach(function(pt) { dataMap[pt.ts] = pt; });
-      var hwClearData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].hw_clear || 0) : 0; });
-      var swClearData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].sw_clear || 0) : 0; });
-      var hwDetData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].hw_detected || 0) : 0; });
-      var swDetData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].sw_detected || 0) : 0; });
-      var skipData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].skipped || 0) : 0; });
+      var clearData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].clear || 0) : 0; });
+      var detData = timestamps.map(function(ts) { return dataMap[ts] ? (dataMap[ts].detected || 0) : 0; });
       var label = chFriendly[chId] || formatChannelName(chId);
 
       datasets.push({
-        label: label + ' HW Clear',
-        data: hwClearData,
-        backgroundColor: 'rgba(' + rgb + ',0.95)',
+        label: label + ' Clear',
+        data: clearData,
+        backgroundColor: 'rgba(' + rgb + ',0.85)',
         borderColor: 'rgba(' + rgb + ',1)',
         borderWidth: 1, borderRadius: 2,
         stack: 'cad_' + chId
       });
       datasets.push({
-        label: label + ' SW Clear',
-        data: swClearData,
-        backgroundColor: 'rgba(' + rgb + ',0.5)',
-        borderColor: 'rgba(' + rgb + ',0.7)',
-        borderWidth: 1, borderRadius: 2, borderDash: [2,2],
-        stack: 'cad_' + chId
-      });
-      datasets.push({
-        label: label + ' HW Detected',
-        data: hwDetData,
+        label: label + ' Detected',
+        data: detData,
         backgroundColor: 'rgba(239,68,68,0.9)',
         borderColor: 'rgba(239,68,68,1)',
-        borderWidth: 1, borderRadius: 2,
-        stack: 'cad_' + chId
-      });
-      datasets.push({
-        label: label + ' SW Detected',
-        data: swDetData,
-        backgroundColor: 'rgba(239,68,68,0.45)',
-        borderColor: 'rgba(239,68,68,0.7)',
-        borderWidth: 1, borderRadius: 2,
-        stack: 'cad_' + chId
-      });
-      datasets.push({
-        label: label + ' Skipped',
-        data: skipData,
-        backgroundColor: 'rgba(156,163,175,0.3)',
-        borderColor: 'rgba(156,163,175,0.5)',
         borderWidth: 1, borderRadius: 2,
         stack: 'cad_' + chId
       });
@@ -2827,7 +2774,7 @@ function renderNfCards(channels) {
               color: "rgba(255,255,255,0.6)", padding: 10, usePointStyle: true,
               pointStyle: "rectRounded", font: { size: 10 },
               filter: function(item) {
-                return item.text.indexOf('HW Clear') >= 0;
+                return item.text.indexOf('Clear') >= 0;
               }
             }
           },
@@ -2836,20 +2783,12 @@ function renderNfCards(channels) {
             callbacks: {
               title: function(items) { return items[0].label; },
               footer: function(items) {
-                var hw_clear=0, sw_clear=0, hw_det=0, sw_det=0, skip=0;
+                var totalClear=0, totalDet=0;
                 items.forEach(function(it) {
                   var lbl = it.dataset.label;
-                  if (lbl.indexOf('HW Clear') >= 0) hw_clear += it.raw;
-                  else if (lbl.indexOf('SW Clear') >= 0) sw_clear += it.raw;
-                  else if (lbl.indexOf('HW Detected') >= 0) hw_det += it.raw;
-                  else if (lbl.indexOf('SW Detected') >= 0) sw_det += it.raw;
-                  else if (lbl.indexOf('Skipped') >= 0) skip += it.raw;
+                  if (lbl.indexOf('Clear') >= 0) totalClear += it.raw;
+                  else if (lbl.indexOf('Detected') >= 0) totalDet += it.raw;
                 });
-                var lines = [];
-                lines.push('HW: Clear ' + hw_clear + ' / Det ' + hw_det);
-                lines.push('SW: Clear ' + sw_clear + ' / Det ' + sw_det);
-                if (skip > 0) lines.push('Skipped: ' + skip);
-                return lines.join('\n');
               }
             }
           }
@@ -2903,7 +2842,7 @@ function renderNfCards(channels) {
     var html = '';
     var idx = 0;
     Object.keys(allChIds).forEach(function(chId) {
-      var ch = channels[chId] || { clear: 0, detected: 0, skipped: 0, total: 0, hw_clear: 0, hw_detected: 0, sw_clear: 0, sw_detected: 0 };
+      var ch = channels[chId] || { clear: 0, detected: 0, total: 0 };
       var txCad = txQueueCad[chId] || {};
       var rgb = cadGetColor(chId, idx);
       var color = 'rgb(' + rgb + ')';
@@ -2911,33 +2850,19 @@ function renderNfCards(channels) {
       var clearPct = total > 0 ? Math.round(ch.clear / total * 100) : 0;
       var detPct = total > 0 ? Math.round(ch.detected / total * 100) : 0;
       var statusIcon = (ch.detected || 0) > 0 ? '&#x1F534;' : '&#x1F7E2;';
-      var lastSrc = txCad.cad_last_source || '';
-      var srcBadge = lastSrc.indexOf('hardware') >= 0 ? '<span style="background:#22c55e;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;font-weight:600">HW</span>' : (lastSrc.indexOf('software') >= 0 ? '<span style="background:#f59e0b;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;font-weight:600">SW</span>' : '');
 
       html += '<div style="background:rgba(' + rgb + ',0.06);border:1px solid rgba(' + rgb + ',0.25);border-radius:10px;padding:10px">';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
       html += '<span style="font-weight:600;font-size:12px;color:' + color + '">' + (chFriendly[chId] || formatChannelName(chId)) + '</span>';
-      html += '<span style="font-size:11px;display:flex;gap:4px;align-items:center">' + srcBadge + ' ' + statusIcon + '</span>';
+      html += '<span style="font-size:11px">' + statusIcon + '</span>';
       html += '</div>';
       html += '<div style="font-size:11px;color:var(--txm);display:grid;grid-template-columns:1fr 1fr;gap:2px">';
       html += '<span>&#x2705; ' + (ch.clear||0) + ' (' + clearPct + '%)</span>';
       html += '<span>&#x1F534; ' + (ch.detected||0) + ' (' + detPct + '%)</span>';
-      html += '<span>&#x23E9; Skip: ' + (ch.skipped||0) + '</span>';
       html += '<span>Total: ' + total + '</span>';
       html += '</div>';
-      // HW/SW breakdown
-      var hwTotal = (ch.hw_clear||0) + (ch.hw_detected||0);
-      var swTotal = (ch.sw_clear||0) + (ch.sw_detected||0);
-      if (hwTotal > 0 || swTotal > 0) {
-        html += '<div style="font-size:10px;color:var(--txm);margin-top:4px;display:grid;grid-template-columns:1fr 1fr;gap:2px">';
-        html += '<span title="Hardware CAD (Channel E)">&#x1F4E1; HW: C:' + (ch.hw_clear||0) + ' D:' + (ch.hw_detected||0) + '</span>';
-        html += '<span title="Software CAD (pattern)">&#x1F4BB; SW: C:' + (ch.sw_clear||0) + ' D:' + (ch.sw_detected||0) + '</span>';
-        html += '</div>';
-      }
       if (txCad.cad_clear !== undefined) {
-        html += '<div style="font-size:10px;color:var(--txm);margin-top:2px;opacity:0.5">Live: C:' + (txCad.cad_clear||0) + ' D:' + (txCad.cad_detected||0) + ' S:' + (txCad.cad_skipped||0);
-        html += ' (HW:' + ((txCad.cad_hw_clear||0)+(txCad.cad_hw_detected||0)) + ' SW:' + ((txCad.cad_sw_clear||0)+(txCad.cad_sw_detected||0)) + ')';
-        html += '</div>';
+        html += '<div style="font-size:10px;color:var(--txm);margin-top:2px;opacity:0.5">Live: C:' + (txCad.cad_clear||0) + ' D:' + (txCad.cad_detected||0) + '</div>';
       }
       if (total > 0) {
         html += '<div style="margin-top:4px;height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;display:flex">';
@@ -3151,18 +3076,25 @@ function renderTxActChart(channels) {
   if (!canvas) return;
   if (txActChart) txActChart.destroy();
   var datasets = [], totalTx = 0;
-  var chColors = {'channel_a':'#3b82f6','channel_b':'#8b5cf6','channel_c':'#10b981','channel_d':'#f59e0b','channel_e':'#f97316'};
+  var chColorScheme = {
+    'channel_a': {light:'#93bbfc', normal:'#3b82f6', dark:'#1e40af'},
+    'channel_b': {light:'#c4b0fa', normal:'#8b5cf6', dark:'#5b21b6'},
+    'channel_c': {light:'#6ee7b7', normal:'#10b981', dark:'#065f46'},
+    'channel_d': {light:'#fcd34d', normal:'#f59e0b', dark:'#92400e'},
+    'channel_e': {light:'#fdba74', normal:'#f97316', dark:'#9a3412'}
+  };
+  var defaultScheme = {light:'#d1d5db', normal:'#999999', dark:'#4b5563'};
   channels.forEach(function(ch) {
     if (!ch.timeseries || !ch.timeseries.length) return;
-    var color = chColors[ch.channel_id] || ch.color || '#999';
+    var scheme = chColorScheme[ch.channel_id] || defaultScheme;
     // TX sent bars
     var sentData = ch.timeseries.map(function(t) { return {x: new Date(t.timestamp * 1000), y: t.tx_sent}; });
     totalTx += ch.timeseries.reduce(function(s, t) { return s + (t.tx_sent || 0); }, 0);
     datasets.push({
       label: (ch.name || ch.channel_id) + ' TX Sent',
       data: sentData,
-      backgroundColor: color + 'cc',
-      borderColor: color,
+      backgroundColor: scheme.light,
+      borderColor: scheme.normal,
       borderWidth: 1,
       barPercentage: 0.8,
       categoryPercentage: 0.9,
@@ -3175,8 +3107,8 @@ function renderTxActChart(channels) {
       datasets.push({
         label: (ch.name || ch.channel_id) + ' TX Failed',
         data: failData,
-        backgroundColor: '#ef4444cc',
-        borderColor: '#ef4444',
+        backgroundColor: scheme.dark,
+        borderColor: scheme.dark,
         borderWidth: 1,
         barPercentage: 0.8,
         categoryPercentage: 0.9,
@@ -3190,8 +3122,8 @@ function renderTxActChart(channels) {
       datasets.push({
         label: (ch.name || ch.channel_id) + ' LBT Blocked',
         data: lbtData,
-        backgroundColor: '#f97316cc',
-        borderColor: '#f97316',
+        backgroundColor: scheme.normal,
+        borderColor: scheme.normal,
         borderWidth: 1,
         barPercentage: 0.8,
         categoryPercentage: 0.9,
@@ -3596,6 +3528,7 @@ function renderTxActChart(channels) {
     'ac-tx-delay':    { key: 'inter_packet_delay',           source: 'config' },
     'ac-pkt-ttl':     { key: 'packet_ttl',                   source: 'ui' },
     'ac-overflow':    { key: 'overflow_policy',              source: 'ui' },
+    'ac-tx-delay-factor': { key: 'tx_delay_factor',           source: 'config' },
     'ac-nf-interval': { key: 'nf_interval',                  source: 'ui' },
     'ac-nf-hold':     { key: 'nf_tx_hold',                   source: 'ui' },
     'ac-nf-buffer':   { key: 'nf_buffer_size',               source: 'ui' },
@@ -3614,7 +3547,7 @@ function renderTxActChart(channels) {
 
   var AC_GROUPS = {
     dedup_cache:  ['ac-dedup-ttl', 'ac-cache-ttl', 'ac-max-cache'],
-    tx_queue:     ['ac-queue-size', 'ac-tx-delay', 'ac-pkt-ttl', 'ac-overflow'],
+    tx_queue:     ['ac-queue-size', 'ac-tx-delay', 'ac-pkt-ttl', 'ac-overflow', 'ac-tx-delay-factor'],
     noise_floor:  ['ac-nf-interval', 'ac-nf-hold', 'ac-nf-buffer'],
     hal_advanced: ['ac-force-fe', 'ac-lna-lut', 'ac-pa-lut', 'ac-agc-ana', 'ac-agc-dec', 'ac-chan-fixed'],
     gpio_pins:    ['ac-gpio-base', 'ac-gpio-sx1302-rst', 'ac-gpio-sx1302-pwr', 'ac-gpio-sx1261-rst', 'ac-gpio-ad5338r-rst']

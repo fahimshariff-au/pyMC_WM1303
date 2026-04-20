@@ -1,7 +1,7 @@
 # TODO — pyMC WM1303 Bridge/Repeater
 
 > List of open and completed tasks with description of content and motivation.
-> Last updated: 2026-04-17
+> Last updated: 2026-04-19
 
 ---
 
@@ -17,7 +17,7 @@
 | 3 | **Dynamic TX power** | Adjust TX power based on link quality (RSSI/SNR of received ACK) | Saves airtime, reduces interference for nearby nodes, extends PA lifespan | Low |
 | 4 | **RX sensitivity fine-tuning** | IF chain bandwidth/SF optimization specific to each channel | Current IF chain config is generic; channel-specific tuning can yield 1–3 dB improvement | Low |
 | 5 | **AD5338R DAC investigation** | Investigate whether the AD5338R DAC is physically present on the WM1303 HAT and what possibilities exist for full-duplex or gain control | WM1302 wiki references `AD5338R_RESET_PIN=13` — CN490 full-duplex reference design. Not in use; GPIO 13 not driven. Potentially relevant for noise floor/TX power optimization | Low |
-| 6 | **LBT and CAD optimization research** | Further research into LBT (Listen Before Talk) and CAD (Channel Activity Detection) parameter tuning and behavior | Current LBT/CAD defaults work but may not be optimal for all environments; research into threshold adaptation, timing parameters, and real-world performance data is needed for fine-tuning | Medium |
+| 6 | **~~LBT and CAD optimization research~~** | ~~Further research into LBT/CAD parameter tuning~~ → **Completed: SX1261 CAD is incompatible with SX1302 TX when Channel E (SX1261 LoRa RX) is active.** CAD scan changes FEM state to LNA, preventing PA activation during TX. Multiple C-level workarounds attempted (SPI settle delay, RX stop, TX inhibit flag, non-blocking timestamps) — all failed. **Solution: Python-level random TX delay (0-200ms) per repeater for collision avoidance.** Implemented in `GlobalTXScheduler._tx_random_delay_max_ms`, configurable via `tx_random_delay_max_ms` in `wm1303_ui.json` (default: 200ms). | Research completed — hardware limitation documented. Random delay provides effective collision avoidance without SX1261 interaction. | ✅ Done |
 
 ---
 

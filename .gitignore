@@ -3,6 +3,8 @@
 
 # Reference files extracted from pi01 (contains sensitive data)
 _collect/
+# Development tools (not needed for installation)
+_tools/
 
 # Python
 __pycache__/

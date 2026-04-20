@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
+import random
 import re
 import time
 from collections import deque
@@ -37,6 +39,53 @@ def _bw_hz_to_str(bw_hz: int) -> str:
 def _datr_str(sf: int, bw_hz: int) -> str:
     """Build datr string like SF8BW125."""
     return f"SF{sf}BW{_bw_hz_to_str(bw_hz)}"
+
+
+def estimate_lora_airtime_ms(
+    payload_size: int,
+    sf: int = 8,
+    bw_hz: int = 125000,
+    cr: int = 5,
+    preamble: int = 17,
+    explicit_header: bool = True,
+    crc_on: bool = True,
+    low_dr_optimize: bool | None = None,
+) -> float:
+    """Estimate LoRa packet airtime in milliseconds.
+
+    Uses the standard Semtech airtime formula for LoRa modulation.
+
+    Args:
+        payload_size: Payload size in bytes.
+        sf: Spreading factor (7-12).
+        bw_hz: Bandwidth in Hz (e.g. 125000, 62500).
+        cr: Coding rate denominator (5-8 for 4/5 to 4/8).
+        preamble: Preamble symbol count.
+        explicit_header: True for explicit header mode.
+        crc_on: True if CRC is enabled.
+        low_dr_optimize: Low data-rate optimization; auto-detected if None.
+
+    Returns:
+        Estimated airtime in milliseconds.
+    """
+    if low_dr_optimize is None:
+        # Auto-enable for SF11/SF12 with BW125 or lower
+        low_dr_optimize = (sf >= 11 and bw_hz <= 125000)
+
+    t_sym_ms = (2 ** sf) / (bw_hz / 1000.0)  # symbol duration in ms
+    t_preamble_ms = (preamble + 4.25) * t_sym_ms
+
+    de = 1 if low_dr_optimize else 0
+    ih = 0 if explicit_header else 1
+    crc_val = 1 if crc_on else 0
+
+    numerator = 8 * payload_size - 4 * sf + 28 + 16 * crc_val - 20 * ih
+    denominator = 4 * (sf - 2 * de)
+    n_payload = 8 + max(0, math.ceil(numerator / denominator)) * (cr if cr <= 4 else cr)
+
+    t_payload_ms = n_payload * t_sym_ms
+    return t_preamble_ms + t_payload_ms
+
 
 
 class ChannelTXQueue:
@@ -94,13 +143,7 @@ class ChannelTXQueue:
             "cad_clear": 0,
             "cad_detected": 0,
             "cad_timeout": 0,
-            "cad_skipped": 0,
-            "cad_hw_clear": 0,
-            "cad_hw_detected": 0,
-            "cad_sw_clear": 0,
-            "cad_sw_detected": 0,
             "cad_last_result": None,
-            "cad_last_source": None,
             # LBT RSSI noise floor stats (rolling buffer)
             "noise_floor_lbt_avg": None,
             "noise_floor_lbt_min": None,
@@ -378,6 +421,11 @@ class GlobalTXScheduler:
         self._packets_scheduled = 0
         self._round_index = 0  # Rotating start index for fair round-robin
 
+        # Random TX delay for collision avoidance between repeaters.
+        # With mandatory CAD before every TX, this delay is no longer needed
+        # for collision avoidance. Default: 0 (disabled).
+        self._tx_delay_factor: float = 0.0
+
         # Per-channel LBT blocked state for non-blocking retry.
         # Key: channel_id, Value: dict with:
         #   request: the original dequeued request dict
@@ -427,31 +475,37 @@ class GlobalTXScheduler:
 
         queue.stats["lbt_last_threshold"] = lbt_result.get("threshold")
 
-        # Track CAD stats from enhanced LBT result
+        # Track CAD stats from LBT result
         _cad = lbt_result.get('cad_result')
         if _cad is not None:
-            _src = _cad.get('source', 'unknown')
             if _cad.get('detected', False):
                 queue.stats["cad_detected"] += 1
-                if 'hardware' in _src:
-                    queue.stats["cad_hw_detected"] += 1
-                else:
-                    queue.stats["cad_sw_detected"] += 1
             else:
                 queue.stats["cad_clear"] += 1
-                if 'hardware' in _src:
-                    queue.stats["cad_hw_clear"] += 1
-                else:
-                    queue.stats["cad_sw_clear"] += 1
             queue.stats["cad_last_result"] = _cad.get('reason', 'unknown')
-            queue.stats["cad_last_source"] = _src
-        elif passed:
-            # No CAD result but LBT passed
-            queue.stats["cad_skipped"] += 1
 
     async def _do_send(self, channel_id: str, queue: ChannelTXQueue,
                        request: dict, txpk: dict, queue_wait_ms: float) -> None:
         """Execute the actual TX send and handle result/stats/future."""
+        # Airtime-proportional random TX delay (MeshCore/pymc style)
+        airtime_est_ms = estimate_lora_airtime_ms(
+            payload_size=len(request["payload"]),
+            sf=queue.sf,
+            bw_hz=int(queue.bw_khz * 1000),
+            cr=queue.cr,
+            preamble=queue.preamble,
+        )
+        tx_delay_factor = max(0.0, float(self._tx_delay_factor))
+        if tx_delay_factor > 0:
+            base_delay_ms = (airtime_est_ms * 52.0 / 50.0) / 2.0
+            delay_ms = random.uniform(0.0, 5.0) * base_delay_ms * tx_delay_factor
+            if delay_ms > 1:
+                logger.info(
+                    "GlobalTXScheduler: airtime TX delay %.0fms on %s (factor=%.3f, airtime_est=%.1fms)",
+                    delay_ms, channel_id, tx_delay_factor, airtime_est_ms,
+                )
+                await asyncio.sleep(delay_ms / 1000.0)
+
         # TX Hold check: if RX batching window active, wait before TX
         if self._tx_hold_getter:
             _hold_until = self._tx_hold_getter()
@@ -510,13 +564,22 @@ class GlobalTXScheduler:
             future.set_result(result)
 
         self._packets_scheduled += 1
-
         # Shared RF-chain guard: all channels transmit via the same physical
-        # rf_chain 0. Wait for airtime + AGC reload (~20ms) + small margin
-        # before sending the next packet.
-        _shared_rf_guard_ms = max(50.0, float(airtime_ms) + 50.0)
-        logger.info("GlobalTXScheduler: rf-chain guard after %s, waiting %.1fms",
-                    channel_id, _shared_rf_guard_ms)
+        # rf_chain 0.  The SX1302 can only transmit one packet at a time —
+        # calling lgw_send() while a previous TX is still in progress will
+        # OVERWRITE the TX buffer, silently killing the first packet.
+        # We must wait at least the full estimated airtime of the packet we
+        # just sent, plus a safety margin, before sending the next one.
+        # The margin accounts for:
+        #   - JIT thread processing delay (~100ms from Python lgw_send to C pickup)
+        #   - CAD scan overhead (~50ms when CAD is enabled)
+        #   - SX1302 TX scheduling latency (~50ms)
+        #   - Safety buffer
+        _rf_guard_margin_ms = 250.0  # margin to cover JIT + CAD + scheduling
+        _shared_rf_guard_ms = airtime_est_ms + _rf_guard_margin_ms
+        logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
+                    "(airtime_est=%.1fms + %.0fms margin)",
+                    channel_id, _shared_rf_guard_ms, airtime_est_ms, _rf_guard_margin_ms)
         await asyncio.sleep(_shared_rf_guard_ms / 1000.0)
 
     async def _scheduler_loop(self):
@@ -585,7 +648,7 @@ class GlobalTXScheduler:
                         queue.stats["lbt_force_sent"] += 1
                         last_lbt = blocked.get("last_lbt_result", {})
                         logger.warning("GlobalTXScheduler: FORCE SENDING packet on %s "
-                                      "despite LBT block (rssi=%.1f, threshold=%.1f)",
+                                      "despite pre-TX block (rssi=%.1f, threshold=%.1f)",
                                       channel_id,
                                       last_lbt.get("rssi", 0),
                                       last_lbt.get("threshold", 0))
@@ -594,7 +657,7 @@ class GlobalTXScheduler:
                         sent_any = True
                         continue
 
-                    # Retry LBT check
+                    # Retry pre-TX check
                     attempt = blocked["attempt"]
                     lbt_result = self._lbt_check(channel_id, queue.freq_hz, queue.sf)
 
@@ -604,13 +667,14 @@ class GlobalTXScheduler:
                         queue.record_lbt_rssi(_lbt_rssi)
 
                     if lbt_result.get("allow", True):
-                        # LBT passed on retry!
+                        # Pre-TX check passed on retry!
                         self._record_lbt_cad_stats(queue, lbt_result, passed=True)
-                        logger.info("GlobalTXScheduler: LBT PASSED on %s "
-                                   "after %d attempts (rssi=%.1f, threshold=%.1f)",
-                                   channel_id, attempt + 1,
-                                   lbt_result.get("rssi", 0),
-                                   lbt_result.get("threshold", 0))
+                        _reason = lbt_result.get("reason", "clear")
+                        logger.info("GlobalTXScheduler: pre-TX PASSED on %s "
+                                   "after %d attempts (reason=%s, rssi=%s, threshold=%s)",
+                                   channel_id, attempt + 1, _reason,
+                                   lbt_result.get("rssi", "n/a"),
+                                   lbt_result.get("threshold", "n/a"))
                         del self._blocked[channel_id]
                         await self._do_send(channel_id, queue, request, txpk, queue_wait_ms)
                         sent_any = True
@@ -624,25 +688,27 @@ class GlobalTXScheduler:
                         blocked["attempt"] = next_attempt
                         blocked["retry_after"] = time.monotonic() + delay
                         blocked["last_lbt_result"] = lbt_result
-                        logger.info("GlobalTXScheduler: LBT retry %d/%d on %s, "
-                                   "will retry in %.1fs (rssi=%.1f, threshold=%.1f)",
+                        logger.info("GlobalTXScheduler: pre-TX retry %d/%d on %s, "
+                                   "will retry in %.1fs (reason=%s, rssi=%s, threshold=%s)",
                                    next_attempt + 1, len(self.LBT_RETRY_DELAYS),
                                    channel_id, delay,
-                                   lbt_result.get("rssi", 0),
-                                   lbt_result.get("threshold", 0))
+                                   lbt_result.get("reason", "unknown"),
+                                   lbt_result.get("rssi", "n/a"),
+                                   lbt_result.get("threshold", "n/a"))
                     else:
                         # All retries exhausted - schedule force-send after delay
                         self._record_lbt_cad_stats(queue, lbt_result, passed=False)
                         blocked["force_send"] = True
                         blocked["retry_after"] = time.monotonic() + self.LBT_FORCE_DELAY
                         blocked["last_lbt_result"] = lbt_result
-                        logger.warning("GlobalTXScheduler: LBT BLOCKED on %s after %d "
+                        logger.warning("GlobalTXScheduler: pre-TX BLOCKED on %s after %d "
                                       "attempts - will FORCE SEND in %.1fs "
-                                      "(rssi=%.1f, threshold=%.1f, freq=%.3fMHz)",
+                                      "(reason=%s, rssi=%s, threshold=%s, freq=%.3fMHz)",
                                       channel_id, len(self.LBT_RETRY_DELAYS),
                                       self.LBT_FORCE_DELAY,
-                                      lbt_result.get("rssi", 0),
-                                      lbt_result.get("threshold", 0),
+                                      lbt_result.get("reason", "unknown"),
+                                      lbt_result.get("rssi", "n/a"),
+                                      lbt_result.get("threshold", "n/a"),
                                       queue.freq_hz / 1e6)
                     # Skip this channel for now, move to next
                     continue
@@ -685,25 +751,26 @@ class GlobalTXScheduler:
                 # Measure queue wait BEFORE calling send_func
                 queue_wait_ms = (time.time() - request["enqueue_time"]) * 1000
 
-                # --- Software LBT check ---
+                # --- Pre-TX check (CAD and/or LBT, independently configurable) ---
                 if self._lbt_check:
                     lbt_result = self._lbt_check(channel_id, queue.freq_hz, queue.sf)
-                    if not lbt_result.get("lbt_enabled", False):
-                        # LBT disabled on this channel - send immediately
+                    _cad_on = lbt_result.get("cad_enabled", False)
+                    _lbt_on = lbt_result.get("lbt_enabled", False)
+                    if not _cad_on and not _lbt_on:
+                        # Both checks disabled on this channel - send immediately
                         queue.stats["lbt_skipped"] += 1
-                        queue.stats["cad_skipped"] += 1
                     else:
-                        # LBT enabled - check if channel is clear
-                        # Record LBT RSSI
+                        # At least one check is active
+                        # Record RSSI in rolling buffer (if available)
                         _lbt_rssi = lbt_result.get("rssi")
                         if _lbt_rssi is not None:
                             queue.record_lbt_rssi(_lbt_rssi)
 
                         if lbt_result.get("allow", True):
-                            # LBT passed on first attempt
+                            # Pre-TX check passed
                             self._record_lbt_cad_stats(queue, lbt_result, passed=True)
                         else:
-                            # LBT blocked on first attempt - store as blocked
+                            # Blocked (by CAD or LBT) - store as blocked
                             # and skip to next channel (non-blocking)
                             next_attempt = 1
                             if next_attempt < len(self.LBT_RETRY_DELAYS):
@@ -719,13 +786,14 @@ class GlobalTXScheduler:
                                 "force_send": next_attempt >= len(self.LBT_RETRY_DELAYS),
                                 "last_lbt_result": lbt_result,
                             }
-                            logger.info("GlobalTXScheduler: LBT blocked on %s (attempt 1/%d), "
-                                       "will retry in %.1fs - skipping to next channel "
-                                       "(rssi=%.1f, threshold=%.1f)",
-                                       channel_id, len(self.LBT_RETRY_DELAYS),
-                                       delay,
-                                       lbt_result.get("rssi", 0),
-                                       lbt_result.get("threshold", 0))
+                            _reason = lbt_result.get("reason", "unknown")
+                            logger.info("GlobalTXScheduler: pre-TX blocked on %s "
+                                       "(reason=%s, attempt 1/%d, retry in %.1fs, "
+                                       "rssi=%s, threshold=%s)",
+                                       channel_id, _reason,
+                                       len(self.LBT_RETRY_DELAYS), delay,
+                                       lbt_result.get("rssi", "n/a"),
+                                       lbt_result.get("threshold", "n/a"))
                             continue  # Non-blocking: move to next channel
 
                 # --- Send the packet ---
@@ -737,7 +805,7 @@ class GlobalTXScheduler:
                 self._round_index += 1
             else:
                 # No packets in any queue - brief sleep to avoid busy-wait
-                await asyncio.sleep(0.01)  # 10ms poll interval
+                await asyncio.sleep(0.001)  # 1ms poll interval (was 10ms)
 
         logger.info("GlobalTXScheduler: loop exited")
 

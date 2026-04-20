@@ -945,7 +945,7 @@ class WM1303API:
             ch.setdefault("lbt_rssi_target", -80)
             ch.setdefault("tx_power", 14)
             ch.setdefault("lbt_enabled", False)
-            ch.setdefault("cad_enabled", True)
+            ch.setdefault("cad_enabled", False)
         return _j(chs)
 
     def _channels_post(self):
@@ -2250,15 +2250,8 @@ class WM1303API:
             logger.error("lbt_history error: %s", e)
             return {"error": str(e), "channels": []}
 
-    @cherrypy.expose
-    @cherrypy.tools.json_out()
-    def cad_history(self, hours='24'):
-        if not _COLLECTOR_AVAILABLE:
-            return {"error": "Spectrum collector not available", "data": []}
-        h = min(int(hours), 168)
-        collector = get_collector()
-        data = collector.get_cad_history(hours=h)
-        return {"hours": h, "total_events": len(data), "data": data}
+    # cad_history endpoint removed — CAD data is now served by cad_stats
+    # which reads from repeater.db (populated by _packet_activity_recorder).
 
 
     # ---------- Signal Quality & Enhanced Spectrum ----------
@@ -2730,11 +2723,6 @@ class WM1303API:
                         SELECT channel_id,
                             SUM(cad_clear) as total_clear,
                             SUM(cad_detected) as total_detected,
-                            SUM(cad_skipped) as total_skipped,
-                            SUM(cad_hw_clear) as total_hw_clear,
-                            SUM(cad_hw_detected) as total_hw_detected,
-                            SUM(cad_sw_clear) as total_sw_clear,
-                            SUM(cad_sw_detected) as total_sw_detected,
                             COUNT(*) as sample_count
                         FROM cad_events
                         WHERE {where_str}
@@ -2745,20 +2733,10 @@ class WM1303API:
                         ch_id = row["channel_id"]
                         t_clear = row["total_clear"] or 0
                         t_det = row["total_detected"] or 0
-                        t_skip = row["total_skipped"] or 0
-                        t_hw_clear = row["total_hw_clear"] or 0
-                        t_hw_det = row["total_hw_detected"] or 0
-                        t_sw_clear = row["total_sw_clear"] or 0
-                        t_sw_det = row["total_sw_detected"] or 0
                         channels[ch_id] = {
                             "clear": t_clear,
                             "detected": t_det,
-                            "skipped": t_skip,
-                            "total": t_clear + t_det + t_skip,
-                            "hw_clear": t_hw_clear,
-                            "hw_detected": t_hw_det,
-                            "sw_clear": t_sw_clear,
-                            "sw_detected": t_sw_det,
+                            "total": t_clear + t_det,
                         }
 
                     # Time-bucketed aggregation
@@ -2767,12 +2745,7 @@ class WM1303API:
                             channel_id,
                             CAST((timestamp / {bucket_secs}) AS INTEGER) * {bucket_secs} AS bucket_ts,
                             SUM(cad_clear) as sum_clear,
-                            SUM(cad_detected) as sum_detected,
-                            SUM(cad_skipped) as sum_skipped,
-                            SUM(cad_hw_clear) as sum_hw_clear,
-                            SUM(cad_hw_detected) as sum_hw_detected,
-                            SUM(cad_sw_clear) as sum_sw_clear,
-                            SUM(cad_sw_detected) as sum_sw_detected
+                            SUM(cad_detected) as sum_detected
                         FROM cad_events
                         WHERE {where_str}
                         GROUP BY channel_id, bucket_ts
@@ -2787,17 +2760,11 @@ class WM1303API:
                             "ts": int(row["bucket_ts"]),
                             "clear": row["sum_clear"] or 0,
                             "detected": row["sum_detected"] or 0,
-                            "skipped": row["sum_skipped"] or 0,
-                            "hw_clear": row["sum_hw_clear"] or 0,
-                            "hw_detected": row["sum_hw_detected"] or 0,
-                            "sw_clear": row["sum_sw_clear"] or 0,
-                            "sw_detected": row["sum_sw_detected"] or 0,
                         })
 
                     # Recent rows (last 100)
                     recent_rows = conn.execute(f"""
-                        SELECT timestamp, channel_id, cad_clear, cad_detected, cad_skipped,
-                               cad_hw_clear, cad_hw_detected, cad_sw_clear, cad_sw_detected
+                        SELECT timestamp, channel_id, cad_clear, cad_detected
                         FROM cad_events
                         WHERE {where_str}
                         ORDER BY timestamp DESC
@@ -2809,11 +2776,6 @@ class WM1303API:
                         "channel": row["channel_id"],
                         "clear": row["cad_clear"] or 0,
                         "detected": row["cad_detected"] or 0,
-                        "skipped": row["cad_skipped"] or 0,
-                        "hw_clear": row["cad_hw_clear"] or 0,
-                        "hw_detected": row["cad_hw_detected"] or 0,
-                        "sw_clear": row["cad_sw_clear"] or 0,
-                        "sw_detected": row["cad_sw_detected"] or 0,
                     } for row in recent_rows]
 
         except Exception as e:
@@ -2831,13 +2793,7 @@ class WM1303API:
                     tx_cad_stats[ch_id] = {
                         "cad_clear": q.stats.get("cad_clear", 0),
                         "cad_detected": q.stats.get("cad_detected", 0),
-                        "cad_skipped": q.stats.get("cad_skipped", 0),
-                        "cad_hw_clear": q.stats.get("cad_hw_clear", 0),
-                        "cad_hw_detected": q.stats.get("cad_hw_detected", 0),
-                        "cad_sw_clear": q.stats.get("cad_sw_clear", 0),
-                        "cad_sw_detected": q.stats.get("cad_sw_detected", 0),
                         "cad_last_result": q.stats.get("cad_last_result"),
-                        "cad_last_source": q.stats.get("cad_last_source"),
                     }
         except Exception:
             pass
@@ -3135,7 +3091,7 @@ class WM1303API:
                 "cache_ttl":            cfg.get("repeater", {}).get("cache_ttl", 60),
                 "max_cache_size":       adv.get("max_cache_size", 1000),
                 "queue_size":           cfg.get("wm1303", {}).get("tx_queue", {}).get("queue_size", 15),
-                "inter_packet_delay":   cfg.get("wm1303", {}).get("tx_queue", {}).get("tx_delay_ms", 20),
+                "inter_packet_delay":   cfg.get("wm1303", {}).get("tx_queue", {}).get("tx_delay_ms", 0),
                 "packet_ttl":           adv.get("tx_packet_ttl_seconds", 5),
                 "overflow_policy":      adv.get("tx_overflow_policy", "drop_oldest"),
                 "nf_interval":          adv.get("noise_floor_interval_seconds", 30),
@@ -3152,6 +3108,7 @@ class WM1303API:
                 "sx1302_power_en_pin":  gpio.get("sx1302_power_en", 18),
                 "sx1261_reset_pin":     gpio.get("sx1261_reset", 5),
                 "ad5338r_reset_pin":    gpio.get("ad5338r_reset", 13),
+                "tx_delay_factor":      cfg.get("delays", {}).get("tx_delay_factor", 0.5),
             }
             return _j(result)
         except Exception as e:
@@ -3207,6 +3164,12 @@ class WM1303API:
                     adv["tx_packet_ttl_seconds"] = int(params["packet_ttl"])
                 if "overflow_policy" in params:
                     adv["tx_overflow_policy"] = str(params["overflow_policy"])
+
+            elif group == "config":
+                delays = cfg.setdefault("delays", {})
+                if "tx_delay_factor" in params:
+                    delays["tx_delay_factor"] = float(params["tx_delay_factor"])
+                    cfg_changed = True
 
             elif group == "noise_floor":
                 if "nf_interval" in params:
@@ -3470,31 +3433,16 @@ def _packet_activity_recorder():
                     for ch_id, q in _bk._tx_queue_manager.queues.items():
                         cur_clear = q.stats.get("cad_clear", 0) or 0
                         cur_det = q.stats.get("cad_detected", 0) or 0
-                        cur_skip = q.stats.get("cad_skipped", 0) or 0
-                        cur_hw_clear = q.stats.get("cad_hw_clear", 0) or 0
-                        cur_hw_det = q.stats.get("cad_hw_detected", 0) or 0
-                        cur_sw_clear = q.stats.get("cad_sw_clear", 0) or 0
-                        cur_sw_det = q.stats.get("cad_sw_detected", 0) or 0
                         prev_cad = _cad_last_counts.get(ch_id)
                         if prev_cad is not None:
                             d_clear = max(0, cur_clear - prev_cad["cad_clear"])
                             d_det = max(0, cur_det - prev_cad["cad_detected"])
-                            d_skip = max(0, cur_skip - prev_cad["cad_skipped"])
-                            d_hw_clear = max(0, cur_hw_clear - prev_cad.get("cad_hw_clear", 0))
-                            d_hw_det = max(0, cur_hw_det - prev_cad.get("cad_hw_detected", 0))
-                            d_sw_clear = max(0, cur_sw_clear - prev_cad.get("cad_sw_clear", 0))
-                            d_sw_det = max(0, cur_sw_det - prev_cad.get("cad_sw_detected", 0))
-                            cad_inserts.append((now, ch_id, d_clear, d_det, d_skip, d_hw_clear, d_hw_det, d_sw_clear, d_sw_det))
+                            cad_inserts.append((now, ch_id, d_clear, d_det, 0, d_clear, 0, 0, 0))
                         else:
                             cad_inserts.append((now, ch_id, 0, 0, 0, 0, 0, 0, 0))
                         _cad_last_counts[ch_id] = {
                             "cad_clear": cur_clear,
                             "cad_detected": cur_det,
-                            "cad_skipped": cur_skip,
-                            "cad_hw_clear": cur_hw_clear,
-                            "cad_hw_detected": cur_hw_det,
-                            "cad_sw_clear": cur_sw_clear,
-                            "cad_sw_detected": cur_sw_det,
                         }
                 if cad_inserts:
                     with _sq3r.connect(_db) as conn:

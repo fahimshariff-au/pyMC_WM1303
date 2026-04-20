@@ -84,7 +84,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #define PUSH_TIMEOUT_MS     100
 #define PULL_TIMEOUT_MS     200
 #define GPS_REF_MAX_AGE     30          /* maximum admitted delay in seconds of GPS loss before considering latest GPS sync unusable */
-#define FETCH_SLEEP_MS      10          /* nb of ms waited when a fetch return no packets */
+#define FETCH_SLEEP_MS      1           /* WM1303: reduced from 10ms to 1ms for faster TX pickup */
 #define BEACON_POLL_MS      50          /* time in ms between polling of beacon TX status */
 
 #define PROTOCOL_VERSION    2           /* v1.6 */
@@ -391,17 +391,24 @@ static spectral_scan_t spectral_scan_params = {
     .pace_s = 10
 };
 
-/* Custom LBT: real-time SX1261 RSSI check before TX (replaces broken HAL LBT) */
-static bool custom_lbt_enable = false;
+/* Custom pre-TX checks: CAD and LBT are independent features */
+static bool custom_lbt_enable = false;  /* RSSI-based Listen Before Talk */
+static bool custom_cad_enable = false;  /* LoRa Channel Activity Detection */
 static int8_t custom_lbt_rssi_target = -80;  /* dBm threshold */
 static int8_t custom_lbt_rssi_offset = 0;    /* SX1261 RSSI calibration offset */
 
-/* Time-based TX guard: track when last TX started and expected airtime.
-   The SX1302 status register has a pipeline delay, so lgw_status may report
-   TX_FREE even while the radio is still emitting. This guard prevents the
-   SX1261 RSSI check from reading our OWN TX signal as interference. */
-static struct timespec custom_lbt_last_tx_time = {0, 0};
-static uint32_t custom_lbt_last_tx_airtime_ms = 0;
+/* Time-based TX guard: track when the current TX window expires.
+   Instead of storing last_tx_time + airtime (which gets overwritten by
+   shorter TXs on other channels), we store the absolute expiry time.
+   Only updates if the new expiry extends beyond the current one.
+   This prevents a short Channel A TX from shortening a long Channel E guard. */
+static struct timespec custom_lbt_guard_expiry = {0, 0};
+
+/* Non-blocking LoRa RX restart after TX: stores the time at which
+   the SX1261 LoRa RX should be restarted (after TX airtime completes).
+   Checked at the top of each JIT loop iteration. */
+static struct timespec custom_lbt_rx_restart_after = {0, 0};
+static bool custom_lbt_rx_restart_pending = false;
 
 /* Per-channel Custom LBT configuration (CAD + RSSI per frequency) */
 #define CUSTOM_LBT_MAX_CHANNELS 8
@@ -409,6 +416,7 @@ static struct {
     uint32_t freq_hz;
     bool lbt_enabled;
     bool cad_enabled;
+    int8_t rssi_threshold_dbm;
 } custom_lbt_channels[CUSTOM_LBT_MAX_CHANNELS];
 static int custom_lbt_nb_channels = 0;
 
@@ -473,13 +481,14 @@ static int custom_lbt_find_channel(uint32_t freq_hz) {
 }
 
 /* Convert HAL bandwidth constant to sx1261_cad_scan bw parameter.
-   Returns: 0=125kHz, 1=250kHz, 2=500kHz, or -1 if unsupported. */
+   Returns: 0=125kHz, 1=250kHz, 2=500kHz, 3=62.5kHz, or -1 if unsupported. */
 static int custom_lbt_hal_bw_to_cad(uint8_t hal_bw) {
     switch (hal_bw) {
         case BW_125KHZ: return 0;
         case BW_250KHZ: return 1;
         case BW_500KHZ: return 2;
-        default:        return -1; /* BW_62K5HZ not supported by CAD */
+        case BW_62K5HZ: return 3;
+        default:        return -1;
     }
 }
 
@@ -815,28 +824,42 @@ static int parse_SX130x_configuration(const char * conf_file) {
             }
         }
 
-        /* Custom LBT: real-time SX1261 RSSI check before TX (replaces broken HAL LBT) */
+        /* Custom pre-TX checks: CAD and LBT are independent features.
+           CAD = LoRa preamble detection (fast, LoRa-specific)
+           LBT = RSSI energy detection (broader, any signal) */
         JSON_Object *conf_custom_lbt_obj = json_object_get_object(conf_sx1261_obj, "custom_lbt");
         if (conf_custom_lbt_obj != NULL) {
+            /* Read LBT enable flag */
             val = json_object_get_value(conf_custom_lbt_obj, "enable");
-            if (json_value_get_type(val) == JSONBoolean) {
+            if (val != NULL && json_value_get_type(val) == JSONBoolean) {
                 custom_lbt_enable = (bool)json_value_get_boolean(val);
             }
-            if (custom_lbt_enable == true) {
+            /* Read CAD enable flag (independent of LBT) */
+            val = json_object_get_value(conf_custom_lbt_obj, "cad_enable");
+            if (val != NULL && json_value_get_type(val) == JSONBoolean) {
+                custom_cad_enable = (bool)json_value_get_boolean(val);
+            }
+
+            /* Parse config if EITHER CAD or LBT is active */
+            if (custom_lbt_enable || custom_cad_enable) {
                 /* Enable the sx1261 radio hardware if not already enabled */
                 sx1261conf.enable = true;
-                val = json_object_get_value(conf_custom_lbt_obj, "rssi_target");
-                if (json_value_get_type(val) == JSONNumber) {
-                    custom_lbt_rssi_target = (int8_t)json_value_get_number(val);
-                }
-                custom_lbt_rssi_offset = sx1261conf.rssi_offset;
 
-                /* Parse per-channel Custom LBT config */
+                /* LBT-specific settings */
+                if (custom_lbt_enable) {
+                    val = json_object_get_value(conf_custom_lbt_obj, "rssi_target");
+                    if (val != NULL && json_value_get_type(val) == JSONNumber) {
+                        custom_lbt_rssi_target = (int8_t)json_value_get_number(val);
+                    }
+                    custom_lbt_rssi_offset = sx1261conf.rssi_offset;
+                }
+
+                /* Parse per-channel config (shared by CAD and LBT) */
                 JSON_Array *conf_clbt_channels = json_object_get_array(conf_custom_lbt_obj, "channels");
                 if (conf_clbt_channels != NULL) {
                     custom_lbt_nb_channels = (int)json_array_get_count(conf_clbt_channels);
                     if (custom_lbt_nb_channels > CUSTOM_LBT_MAX_CHANNELS) {
-                        MSG("WARNING: Custom LBT has %d channels, truncating to %d\n",
+                        MSG("WARNING: Pre-TX check has %d channels, truncating to %d\n",
                             custom_lbt_nb_channels, CUSTOM_LBT_MAX_CHANNELS);
                         custom_lbt_nb_channels = CUSTOM_LBT_MAX_CHANNELS;
                     }
@@ -847,28 +870,36 @@ static int parse_SX130x_configuration(const char * conf_file) {
                             val = json_object_get_value(ch_obj, "lbt_enabled");
                             custom_lbt_channels[i].lbt_enabled = (val != NULL && json_value_get_type(val) == JSONBoolean)
                                                                  ? (bool)json_value_get_boolean(val) : false;
+                            val = json_object_get_value(ch_obj, "lbt_rssi_target");
+                            custom_lbt_channels[i].rssi_threshold_dbm = (val != NULL && json_value_get_type(val) == JSONNumber)
+                                                                       ? (int8_t)json_value_get_number(val) : -80;
                             val = json_object_get_value(ch_obj, "cad_enabled");
                             custom_lbt_channels[i].cad_enabled = (val != NULL && json_value_get_type(val) == JSONBoolean)
                                                                  ? (bool)json_value_get_boolean(val) : false;
-                            MSG("INFO: Custom LBT channel %d: freq=%u Hz, lbt=%s, cad=%s\n",
+                            MSG("INFO: Pre-TX channel %d: freq=%u Hz, cad=%s, lbt=%s (rssi_thr=%d dBm)\n",
                                 i, custom_lbt_channels[i].freq_hz,
+                                custom_lbt_channels[i].cad_enabled ? "on" : "off",
                                 custom_lbt_channels[i].lbt_enabled ? "on" : "off",
-                                custom_lbt_channels[i].cad_enabled ? "on" : "off");
+                                custom_lbt_channels[i].rssi_threshold_dbm);
                         }
                     }
-                } else {
-                    MSG("INFO: Custom LBT enabled but no per-channel config — "
-                        "all frequencies will use RSSI-only check\n");
                 }
 
-                MSG("INFO: Custom LBT enabled (rssi_target=%d dBm, rssi_offset=%d dB, channels=%d)\n",
-                    custom_lbt_rssi_target, custom_lbt_rssi_offset, custom_lbt_nb_channels);
+                MSG("INFO: Pre-TX checks enabled (CAD=%s, LBT=%s, channels=%d)\n",
+                    custom_cad_enable ? "on" : "off",
+                    custom_lbt_enable ? "on" : "off",
+                    custom_lbt_nb_channels);
+                if (custom_lbt_enable) {
+                    MSG("INFO: LBT settings: rssi_target=%d dBm, rssi_offset=%d dB\n",
+                        custom_lbt_rssi_target, custom_lbt_rssi_offset);
+                }
             } else {
-                MSG("INFO: Custom LBT disabled\n");
+                MSG("INFO: Pre-TX checks disabled (CAD=off, LBT=off)\n");
             }
         } else {
-            MSG("INFO: no configuration for custom LBT\n");
+            MSG("INFO: no configuration for pre-TX checks\n");
         }
+
 
 
         /* LoRa RX (Channel E) configuration */
@@ -3599,7 +3630,23 @@ void thread_jit(void) {
     int i;
 
     while (!exit_sig && !quit_sig) {
-        wait_ms(10);
+        wait_ms(1); /* WM1303: reduced from 10ms to 1ms for faster TX pickup */
+
+        /* Non-blocking LoRa RX restart: check if the TX airtime has elapsed
+           and it's safe to put the SX1261 back into LoRa RX mode.
+           This runs every ~1ms without blocking the JIT thread. */
+        if (custom_lbt_rx_restart_pending) {
+            struct timespec now_ts;
+            clock_gettime(CLOCK_MONOTONIC, &now_ts);
+            if (difftimespec(now_ts, custom_lbt_rx_restart_after) >= 0) {
+                pthread_mutex_lock(&mx_concent);
+                sx1261_set_tx_inhibit_rx(false);
+                sx1261_lora_rx_restart_light();
+                pthread_mutex_unlock(&mx_concent);
+                custom_lbt_rx_restart_pending = false;
+                MSG("INFO: [jit] TX airtime elapsed, LoRa RX restarted (non-blocking)\n");
+            }
+        }
 
         for (i = 0; i < LGW_RF_CHAIN_NB; i++) {
             /* transfer data and metadata to the concentrator, and schedule TX */
@@ -3626,130 +3673,197 @@ void thread_jit(void) {
                             MSG("INFO: Beacon dequeued (count_us=%u)\n", pkt.count_us);
                         }
 
-                        /* check if concentrator is free for sending new packet */
-                        pthread_mutex_lock(&mx_concent); /* may have to wait for a fetch to finish */
+                        /* WM1303: Single mutex lock for status check + pre-TX block
+                           to eliminate one lock/unlock cycle (~5-10ms saving) */
+                        pthread_mutex_lock(&mx_concent);
                         result = lgw_status(pkt.rf_chain, TX_STATUS, &tx_status);
-                        pthread_mutex_unlock(&mx_concent); /* free concentrator ASAP */
                         if (result == LGW_HAL_ERROR) {
+                            pthread_mutex_unlock(&mx_concent);
                             MSG("WARNING: [jit%d] lgw_status failed\n", i);
-                        } else {
-                            if (tx_status == TX_EMITTING) {
-                                MSG("ERROR: concentrator is currently emitting on rf_chain %d\n", i);
-                                print_tx_status(tx_status);
-                                continue;
-                            } else if (tx_status == TX_SCHEDULED) {
-                                MSG("WARNING: a downlink was already scheduled on rf_chain %d, overwritting it...\n", i);
-                                print_tx_status(tx_status);
+                            continue; /* cannot proceed without valid status */
+                        } else if (tx_status == TX_EMITTING) {
+                            pthread_mutex_unlock(&mx_concent);
+                            MSG("ERROR: concentrator is currently emitting on rf_chain %d\n", i);
+                            print_tx_status(tx_status);
+                            continue;
+                        }
+                        /* tx_status is TX_FREE, TX_OFF or TX_SCHEDULED — mutex stays locked */
+                        if (tx_status == TX_SCHEDULED) {
+                            MSG("WARNING: [jit] TX stuck in TX_SCHEDULED on rf_chain %d — aborting before CAD\n", i);
+                            print_tx_status(tx_status);
+                            /* WM1303: Clear stuck TX_SCHEDULED state.
+                               After a CAD scan, the SX1302 TX FSM can get stuck in
+                               TX_SCHEDULED (0x91) and never transition to TX_EMITTING.
+                               lgw_abort_tx() clears all TX triggers and waits for TX_FREE,
+                               ensuring a clean state before the next CAD + lgw_send(). */
+                            int abort_err = lgw_abort_tx(pkt.rf_chain);
+                            if (abort_err != LGW_HAL_SUCCESS) {
+                                MSG("WARNING: [jit] lgw_abort_tx failed on rf_chain %d\n", i);
                             } else {
-                                /* Nothing to do */
+                                MSG("INFO: [jit] TX abort successful, TX FSM cleared on rf_chain %d\n", i);
                             }
                         }
-
-                        /* send packet to concentrator */
-                        pthread_mutex_lock(&mx_concent); /* may have to wait for a fetch to finish */
                         if (spectral_scan_params.enable == true) {
                             result = lgw_spectral_scan_abort();
                             if (result != LGW_HAL_SUCCESS) {
                                 MSG("WARNING: [jit%d] lgw_spectral_scan_abort failed\n", i);
                             }
                         }
-                        /* --- WM1303: Custom LBT — CAD-first, then RSSI --- */
+                        /* --- WM1303: Mandatory Pre-TX CAD — always check before sending --- */
                         /* Pre-TX channel check using the SX1261:
-                           1. Wait for TX IDLE (status register + time-based guard)
-                           2. Look up per-channel config for this frequency
-                           3. CAD check (fast LoRa preamble detection)
-                           4. RSSI check (broader energy detection)
-                           Both CAD and RSSI handle SX1261 state internally. */
-                        if (custom_lbt_enable) {
+                           1. Look up per-channel config for this frequency (RSSI/LBT only)
+                           2. CAD check (MANDATORY — always runs before every TX)
+                           3. RSSI check (optional — per-channel LBT config)
+                           Both CAD and RSSI handle SX1261 state internally.
+                           Note: HW TX_EMITTING is already checked above (consolidated mutex
+                           block) so no redundant status check needed here. */
+                        {
                             bool clbt_blocked = false;
 
-                            /* --- Step 1: Wait for TX to be truly IDLE --- */
-                            /* Both hardware status AND time-based guard must confirm
-                               TX is idle before we run CAD/RSSI. If our own TX is
-                               still in progress, skip checks entirely — the SX1261
-                               would read our own signal as interference. */
-                            bool clbt_skip_checks = false;
-                            {
-                                struct timespec clbt_now;
-                                clock_gettime(CLOCK_MONOTONIC, &clbt_now);
-                                double elapsed_ms = difftimespec(clbt_now, custom_lbt_last_tx_time) * 1000.0;
-                                bool time_guard_clear = (custom_lbt_last_tx_airtime_ms == 0) ||
-                                    (elapsed_ms >= (double)custom_lbt_last_tx_airtime_ms + 50.0);
+                            /* Note: TX inhibit is set/cleared inside the CAD retry loop
+                               (Step 2) to maximize Channel E RX availability. */
 
-                                if (!time_guard_clear) {
-                                    /* Still within TX airtime window (+50ms margin).
-                                       Skip CAD/RSSI checks — we'd read our own TX signal. */
-                                    MSG("INFO: [jit] Custom LBT TX guard active on rf_chain %d "
-                                        "(elapsed=%.0fms, guard=%ums) — skipping checks\n",
-                                        i, elapsed_ms, custom_lbt_last_tx_airtime_ms + 50);
-                                    clbt_skip_checks = true;
-                                } else {
-                                    /* Time guard clear. Also verify hardware TX status. */
-                                    uint8_t clbt_tx_status = TX_STATUS_UNKNOWN;
-                                    lgw_status(pkt.rf_chain, TX_STATUS, &clbt_tx_status);
-                                    if (clbt_tx_status == TX_EMITTING) {
-                                        MSG("INFO: [jit] Custom LBT HW still TX_EMITTING on rf_chain %d "
-                                            "despite time guard clear — skipping checks\n", i);
-                                        clbt_skip_checks = true;
-                                    }
-                                }
-                            }
-
-                            /* --- Step 2: Look up per-channel config --- */
+                            /* --- Step 2: Look up per-channel config (for optional RSSI/LBT) --- */
                             int clbt_ch_idx = custom_lbt_find_channel(pkt.freq_hz);
-                            bool ch_cad_enabled = false;
                             bool ch_lbt_enabled = false;
+                            int8_t ch_rssi_threshold = -80; /* default */
                             if (clbt_ch_idx >= 0) {
-                                ch_cad_enabled = custom_lbt_channels[clbt_ch_idx].cad_enabled;
                                 ch_lbt_enabled = custom_lbt_channels[clbt_ch_idx].lbt_enabled;
-                            }
-                            /* If no channel config found, skip all checks (proceed to TX) */
-                            if (clbt_ch_idx < 0) {
-                                MSG_DEBUG(DEBUG_PKT_FWD, "Custom LBT: no channel config for freq %u Hz, "
-                                    "skipping checks\n", pkt.freq_hz);
+                                ch_rssi_threshold = custom_lbt_channels[clbt_ch_idx].rssi_threshold_dbm;
                             }
 
-                            /* --- Step 3: CAD check (if enabled for this channel) --- */
-                            if (!clbt_blocked && !clbt_skip_checks && ch_cad_enabled) {
+                            /* --- Step 3: MANDATORY CAD check with retry --- */
+                            if (!clbt_blocked) {
                                 int cad_bw = custom_lbt_hal_bw_to_cad(pkt.bandwidth);
                                 if (cad_bw >= 0) {
-                                    sx1261_cad_result_t cad_result;
-                                    int cad_err = sx1261_cad_scan(pkt.freq_hz, pkt.datarate,
-                                                                  (uint8_t)cad_bw, &cad_result);
-                                    if (cad_err == 0 && cad_result.detected) {
-                                        MSG("INFO: [jit] Custom LBT CAD DETECTED on rf_chain %d "
-                                            "(freq=%u Hz, SF%u, RSSI=%d dBm) — TX BLOCKED\n",
-                                            i, pkt.freq_hz, pkt.datarate, cad_result.rssi_dbm);
+                                    const int CAD_MAX_RETRIES = 5;
+                                    int cad_retry = 0;
+                                    int cad_wait_ms = 100; /* initial wait, doubles each retry */
+                                    bool cad_clear = false;
+
+                                    while (cad_retry <= CAD_MAX_RETRIES) {
+                                        /* Inhibit LoRa RX restart before CAD scan.
+                                           cad_scan() calls spectral_scan_abort() which
+                                           normally restarts LoRa RX — we must prevent that
+                                           so the FEM stays neutral for the upcoming TX. */
+                                        sx1261_set_tx_inhibit_rx(true);
+
+                                        sx1261_cad_result_t cad_result;
+                                        int cad_err = sx1261_cad_scan(pkt.freq_hz, pkt.datarate,
+                                                                      (uint8_t)cad_bw, &cad_result);
+                                        if (cad_err != 0) {
+                                            MSG("WARNING: [jit] CAD scan failed on rf_chain %d "
+                                                "(err=%d) — proceeding with TX\n", i, cad_err);
+                                            cad_clear = true;
+                                            /* Keep inhibit ON — going to lgw_send */
+                                            break;
+                                        }
+                                        /* --- RSSI-based LBT check (per-channel) --- */
+                                        if (ch_lbt_enabled && cad_result.rssi_dbm > ch_rssi_threshold) {
+                                            MSG("INFO: [jit] LBT BLOCKED on rf_chain %d "
+                                                "(freq=%u Hz, RSSI=%d dBm > threshold %d dBm) "
+                                                "— retry %d/%d\n",
+                                                i, pkt.freq_hz, cad_result.rssi_dbm,
+                                                ch_rssi_threshold,
+                                                cad_retry + 1, CAD_MAX_RETRIES);
+                                            /* Treat as busy — same retry logic as CAD detection */
+                                            sx1261_set_tx_inhibit_rx(false);
+                                            sx1261_lora_rx_restart_light();
+                                            if (cad_retry < CAD_MAX_RETRIES) {
+                                                pthread_mutex_unlock(&mx_concent);
+                                                wait_ms(cad_wait_ms);
+                                                pthread_mutex_lock(&mx_concent);
+                                                cad_wait_ms *= 2;
+                                                cad_retry++;
+                                                continue; /* retry loop */
+                                            } else {
+                                                MSG("WARNING: [jit] LBT still blocked after %d retries "
+                                                    "on rf_chain %d — FORCING TX\n",
+                                                    CAD_MAX_RETRIES, i);
+                                                sx1261_set_tx_inhibit_rx(true);
+                                                cad_clear = true;
+                                                break;
+                                            }
+                                        }
+                                        if (!cad_result.detected) {
+                                            if (cad_retry == 0) {
+                                                if (ch_lbt_enabled) {
+                                                    MSG("INFO: [jit] CAD+LBT clear on rf_chain %d "
+                                                        "(freq=%u Hz, RSSI=%d dBm, thr=%d dBm)\n",
+                                                        i, pkt.freq_hz, cad_result.rssi_dbm,
+                                                        ch_rssi_threshold);
+                                                } else {
+                                                    MSG("INFO: [jit] CAD clear on rf_chain %d "
+                                                        "(freq=%u Hz, RSSI=%d dBm)\n",
+                                                        i, pkt.freq_hz, cad_result.rssi_dbm);
+                                                }
+                                            } else {
+                                                MSG("INFO: [jit] CAD clear on rf_chain %d after %d "
+                                                    "retries (freq=%u Hz, RSSI=%d dBm)\n",
+                                                    i, cad_retry, pkt.freq_hz, cad_result.rssi_dbm);
+                                            }
+                                            cad_clear = true;
+                                            /* Keep inhibit ON — going to lgw_send */
+                                            break;
+                                        }
+                                        /* CAD detected activity — restore Channel E RX
+                                           immediately so we don't miss incoming packets
+                                           during the retry wait period. */
+                                        sx1261_set_tx_inhibit_rx(false);
+                                        sx1261_lora_rx_restart_light();
+
+                                        if (cad_retry < CAD_MAX_RETRIES) {
+                                            MSG("INFO: [jit] CAD DETECTED on rf_chain %d "
+                                                "(freq=%u Hz, SF%u, RSSI=%d dBm) — retry %d/%d, "
+                                                "waiting %d ms (RX restored)\n",
+                                                i, pkt.freq_hz, pkt.datarate,
+                                                cad_result.rssi_dbm,
+                                                cad_retry + 1, CAD_MAX_RETRIES, cad_wait_ms);
+                                            /* Release mutex during wait — RX is active */
+                                            pthread_mutex_unlock(&mx_concent);
+                                            wait_ms(cad_wait_ms);
+                                            pthread_mutex_lock(&mx_concent);
+                                            cad_wait_ms *= 2; /* exponential backoff */
+                                            cad_retry++;
+                                        } else {
+                                            /* Max retries exhausted — force TX */
+                                            MSG("WARNING: [jit] CAD still active after %d retries "
+                                                "on rf_chain %d (freq=%u Hz, SF%u, RSSI=%d dBm) "
+                                                "— FORCING TX\n",
+                                                CAD_MAX_RETRIES, i, pkt.freq_hz,
+                                                pkt.datarate, cad_result.rssi_dbm);
+                                            /* Re-inhibit for forced TX */
+                                            sx1261_set_tx_inhibit_rx(true);
+                                            cad_clear = true; /* force through */
+                                            break;
+                                        }
+                                    }
+                                    /* Post-CAD: SX1261 is already in STDBY after CAD exit.
+                                       No additional cleanup needed. */
+                                    if (!cad_clear) {
                                         clbt_blocked = true;
-                                    } else if (cad_err == 0) {
-                                        MSG_DEBUG(DEBUG_PKT_FWD, "Custom LBT CAD clear on rf_chain %d "
-                                            "(freq=%u Hz, RSSI=%d dBm)\n",
-                                            i, pkt.freq_hz, cad_result.rssi_dbm);
-                                    } else {
-                                        MSG("WARNING: [jit] Custom LBT CAD scan failed on rf_chain %d "
-                                            "(err=%d) — proceeding with TX\n", i, cad_err);
                                     }
                                 } else {
-                                    MSG_DEBUG(DEBUG_PKT_FWD, "Custom LBT: unsupported BW 0x%02x for CAD, "
+                                    MSG_DEBUG(DEBUG_PKT_FWD, "Pre-TX: unsupported BW 0x%02x for CAD, "
                                         "skipping CAD check\n", pkt.bandwidth);
                                 }
                             }
 
                             /* --- Step 4: RSSI check (if enabled and CAD was clear) --- */
-                            if (!clbt_blocked && !clbt_skip_checks && ch_lbt_enabled) {
+                            if (!clbt_blocked && ch_lbt_enabled) {
                                 bool lbt_tx_ok = true;
                                 int16_t lbt_rssi = 0;
                                 int lbt_err = lgw_lbt_rssi_check(pkt.freq_hz, pkt.bandwidth,
-                                                                 custom_lbt_rssi_target,
+                                                                 ch_rssi_threshold,
                                                                  custom_lbt_rssi_offset,
                                                                  &lbt_rssi, &lbt_tx_ok);
                                 if (lbt_err == 0 && !lbt_tx_ok) {
                                     MSG("INFO: [jit] Custom LBT RSSI check BUSY on rf_chain %d "
                                         "(freq=%u Hz, RSSI=%d dBm, threshold=%d dBm) — TX BLOCKED\n",
-                                        i, pkt.freq_hz, lbt_rssi, custom_lbt_rssi_target);
+                                        i, pkt.freq_hz, lbt_rssi, ch_rssi_threshold);
                                     clbt_blocked = true;
                                 } else if (lbt_err == 0) {
-                                    MSG_DEBUG(DEBUG_PKT_FWD, "Custom LBT RSSI clear on rf_chain %d "
+                                    MSG("INFO: [jit] Custom LBT RSSI clear on rf_chain %d "
                                         "(freq=%u Hz, RSSI=%d dBm)\n",
                                         i, pkt.freq_hz, lbt_rssi);
                                 } else {
@@ -3760,6 +3874,21 @@ void thread_jit(void) {
 
                             /* --- Step 5: Block TX if CAD or RSSI detected activity --- */
                             if (clbt_blocked) {
+                                /* Double-check: is the radio currently transmitting?
+                                   If so, CAD/RSSI likely read our own TX signal.
+                                   Override the block — it's a false positive. */
+                                uint8_t verify_status = TX_STATUS_UNKNOWN;
+                                lgw_status(pkt.rf_chain, TX_STATUS, &verify_status);
+                                if (verify_status == TX_EMITTING) {
+                                    MSG("INFO: [jit] Custom LBT block overridden on rf_chain %d "
+                                        "— TX_EMITTING detected (self-signal), allowing TX\n", i);
+                                    clbt_blocked = false;
+                                }
+                            }
+                            if (clbt_blocked) {
+                                /* Release TX inhibit and restart LoRa RX before skipping */
+                                sx1261_set_tx_inhibit_rx(false);
+                                sx1261_lora_rx_restart_light();
                                 pthread_mutex_unlock(&mx_concent);
                                 pthread_mutex_lock(&mx_meas_dw);
                                 meas_nb_tx_fail += 1;
@@ -3769,9 +3898,36 @@ void thread_jit(void) {
                                 continue;
                             }
                         }
+                        /* --- Ensure SX1261 is NOT in RX mode before TX --- */
+                        /* The mandatory pre-TX CAD scan leaves the SX1261 in standby
+                           with tx_inhibit_rx=true. As an additional safety net, we
+                           explicitly stop any LoRa RX that may have been restarted
+                           by other threads. This prevents the FEM from routing to
+                           LNA (receive path) which would cause silent TX failures. */
+                        sx1261_lora_rx_stop();
+                        MSG("INFO: [jit] SX1261 LoRa RX stopped before lgw_send on rf_chain %d\n", i);
+                        /* WM1303: Force IMMEDIATE TX mode after CAD scan.
+                           The CAD scan adds significant delay (up to 500ms with
+                           GPIO reset + PRAM reload). In TIMESTAMPED mode, the
+                           original count_us is now in the past, causing the
+                           SX1302 TX FSM to stay in TX_SCHEDULED (0x91) forever
+                           because the timer trigger never fires.
+                           IMMEDIATE mode sends the packet right away — the CAD
+                           scan already confirmed the channel is clear. */
+                        pkt.tx_mode = IMMEDIATE;
+                        MSG("INFO: [jit] TX mode forced to IMMEDIATE after CAD on rf_chain %d\n", i);
                         result = lgw_send(&pkt);
+                        /* Do NOT restart LoRa RX here — SX1302 TX is in progress.
+                           The FEM must stay in TX/neutral mode for the full airtime.
+                           We release the mutex but keep the inhibit active. */
                         pthread_mutex_unlock(&mx_concent); /* free concentrator ASAP */
                         if (result != LGW_HAL_SUCCESS) {
+                            /* TX failed — release inhibit and restart RX immediately */
+                            pthread_mutex_lock(&mx_concent);
+                            sx1261_set_tx_inhibit_rx(false);
+                            sx1261_lora_rx_restart_light();
+                            pthread_mutex_unlock(&mx_concent);
+                            MSG("INFO: [jit] TX failed, LoRa RX restarted on rf_chain %d\n", i);
                             pthread_mutex_lock(&mx_meas_dw);
                             meas_nb_tx_fail += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
@@ -3782,43 +3938,73 @@ void thread_jit(void) {
                             meas_nb_tx_ok += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
                             MSG_DEBUG(DEBUG_PKT_FWD, "lgw_send done on rf_chain %d: count_us=%u\n", i, pkt.count_us);
-                            /* Record TX timestamp and estimated airtime for Custom LBT guard */
-                            if (custom_lbt_enable) {
-                                clock_gettime(CLOCK_MONOTONIC, &custom_lbt_last_tx_time);
-                                /* Estimate LoRa airtime from packet parameters.
-                                   Rough formula: symbol_time = 2^SF / BW
-                                   For safety, use generous estimates per SF/BW combo. */
-                                uint32_t est_airtime_ms = 500; /* default fallback */
-                                if (pkt.bandwidth == BW_125KHZ) {
-                                    switch (pkt.datarate) {
-                                        case DR_LORA_SF7:  est_airtime_ms = 50 + pkt.size * 2;   break;
-                                        case DR_LORA_SF8:  est_airtime_ms = 100 + pkt.size * 3;  break;
-                                        case DR_LORA_SF9:  est_airtime_ms = 200 + pkt.size * 5;  break;
-                                        case DR_LORA_SF10: est_airtime_ms = 400 + pkt.size * 9;  break;
-                                        case DR_LORA_SF11: est_airtime_ms = 800 + pkt.size * 17; break;
-                                        case DR_LORA_SF12: est_airtime_ms = 1600 + pkt.size * 33; break;
-                                        default: est_airtime_ms = 500; break;
-                                    }
-                                } else if (pkt.bandwidth == BW_250KHZ) {
-                                    switch (pkt.datarate) {
-                                        case DR_LORA_SF7:  est_airtime_ms = 30 + pkt.size * 1;   break;
-                                        case DR_LORA_SF8:  est_airtime_ms = 50 + pkt.size * 2;   break;
-                                        default: est_airtime_ms = 250; break;
-                                    }
-                                } else if (pkt.bandwidth == BW_500KHZ) {
-                                    est_airtime_ms = 25 + pkt.size * 1;
-                                } else {
-                                    /* BW_62K5HZ (Channel E) */
-                                    switch (pkt.datarate) {
-                                        case DR_LORA_SF7:  est_airtime_ms = 100 + pkt.size * 4;  break;
-                                        case DR_LORA_SF8:  est_airtime_ms = 200 + pkt.size * 7;  break;
-                                        case DR_LORA_SF9:  est_airtime_ms = 400 + pkt.size * 13; break;
-                                        default: est_airtime_ms = 1000; break;
-                                    }
+
+                            /* Compute estimated airtime for this packet */
+                            uint32_t est_airtime_ms = 500; /* default fallback */
+                            if (pkt.bandwidth == BW_125KHZ) {
+                                switch (pkt.datarate) {
+                                    case DR_LORA_SF7:  est_airtime_ms = 50 + pkt.size * 2;   break;
+                                    case DR_LORA_SF8:  est_airtime_ms = 100 + pkt.size * 3;  break;
+                                    case DR_LORA_SF9:  est_airtime_ms = 200 + pkt.size * 5;  break;
+                                    case DR_LORA_SF10: est_airtime_ms = 400 + pkt.size * 9;  break;
+                                    case DR_LORA_SF11: est_airtime_ms = 800 + pkt.size * 17; break;
+                                    case DR_LORA_SF12: est_airtime_ms = 1600 + pkt.size * 33; break;
+                                    default: est_airtime_ms = 500; break;
                                 }
-                                custom_lbt_last_tx_airtime_ms = est_airtime_ms;
-                                MSG("INFO: [jit] Custom LBT TX guard set: %u ms (SF%u, BW=%u, size=%u)\n",
-                                    est_airtime_ms, pkt.datarate, pkt.bandwidth, pkt.size);
+                            } else if (pkt.bandwidth == BW_250KHZ) {
+                                switch (pkt.datarate) {
+                                    case DR_LORA_SF7:  est_airtime_ms = 30 + pkt.size * 1;   break;
+                                    case DR_LORA_SF8:  est_airtime_ms = 50 + pkt.size * 2;   break;
+                                    default: est_airtime_ms = 250; break;
+                                }
+                            } else if (pkt.bandwidth == BW_500KHZ) {
+                                est_airtime_ms = 25 + pkt.size * 1;
+                            } else {
+                                /* BW_62K5HZ (Channel E) */
+                                switch (pkt.datarate) {
+                                    case DR_LORA_SF7:  est_airtime_ms = 100 + pkt.size * 4;  break;
+                                    case DR_LORA_SF8:  est_airtime_ms = 200 + pkt.size * 7;  break;
+                                    case DR_LORA_SF9:  est_airtime_ms = 400 + pkt.size * 13; break;
+                                    default: est_airtime_ms = 1000; break;
+                                }
+                            }
+
+                            /* Record TX guard expiry */
+                            {
+                                struct timespec new_expiry;
+                                clock_gettime(CLOCK_MONOTONIC, &new_expiry);
+                                uint64_t add_ns = (uint64_t)(est_airtime_ms + 50) * 1000000ULL;
+                                new_expiry.tv_nsec += add_ns;
+                                new_expiry.tv_sec  += new_expiry.tv_nsec / 1000000000;
+                                new_expiry.tv_nsec  = new_expiry.tv_nsec % 1000000000;
+                                if (difftimespec(new_expiry, custom_lbt_guard_expiry) > 0) {
+                                    custom_lbt_guard_expiry = new_expiry;
+                                    MSG("INFO: [jit] TX guard extended: %u ms (SF%u, BW=%u, size=%u)\n",
+                                        est_airtime_ms + 50, pkt.datarate, pkt.bandwidth, pkt.size);
+                                }
+                            }
+
+                            /* Schedule non-blocking LoRa RX restart after TX airtime.
+                               The SX1302 emits RF autonomously after lgw_send; we must
+                               keep the SX1261 off (FEM in neutral) for the full airtime
+                               so the PA can drive the antenna. The JIT loop checks the
+                               timestamp at each iteration and restarts RX when it expires. */
+                            {
+                                struct timespec rx_ts;
+                                clock_gettime(CLOCK_MONOTONIC, &rx_ts);
+                                uint64_t rx_add_ns = (uint64_t)(est_airtime_ms + 20) * 1000000ULL;
+                                rx_ts.tv_nsec += rx_add_ns;
+                                rx_ts.tv_sec  += rx_ts.tv_nsec / 1000000000;
+                                rx_ts.tv_nsec  = rx_ts.tv_nsec % 1000000000;
+                                /* Only extend, never shorten the restart window */
+                                if (!custom_lbt_rx_restart_pending ||
+                                    difftimespec(rx_ts, custom_lbt_rx_restart_after) > 0) {
+                                    custom_lbt_rx_restart_after = rx_ts;
+                                }
+                                custom_lbt_rx_restart_pending = true;
+                                MSG("INFO: [jit] LoRa RX restart scheduled in %u ms "
+                                    "(rf_chain %d, freq=%u Hz)\n",
+                                    est_airtime_ms + 20, i, pkt.freq_hz);
                             }
                         }
                     } else {
@@ -4133,6 +4319,7 @@ void thread_spectral_scan(void) {
         uint64_t last_rx_ms;
         uint32_t last_rx_toa_ms = 0;
         uint32_t rx_guard_ms;
+        static int deferred_count = 0; /* track consecutive deferrals across loop iterations */
 
         while ((!exit_sig && !quit_sig) && (retries < 50)) {
             now_ms = spectral_now_ms();
@@ -4148,6 +4335,7 @@ void thread_spectral_scan(void) {
             if (((raw0 & 0xFF) == 0x80) && ((raw1 & 0xFF) == 0x80) &&
                 ((last_rx_ms == 0) || ((now_ms - last_rx_ms) >= rx_guard_ms))) {
                 scan_ready = 1;
+                deferred_count = 0; /* reset on success */
                 break;
             }
             retries++;
@@ -4155,10 +4343,45 @@ void thread_spectral_scan(void) {
         }
 
         if (!scan_ready) {
-            printf("INFO: spectral scan deferred (tx0=0x%02X tx1=0x%02X last_rx_toa=%ums retries=%d)\n",
-                   raw0 & 0xFF, raw1 & 0xFF, last_rx_toa_ms, retries);
+            deferred_count++;
+            printf("INFO: spectral scan deferred (tx0=0x%02X tx1=0x%02X last_rx_toa=%ums retries=%d deferred_count=%d)\n",
+                   raw0 & 0xFF, raw1 & 0xFF, last_rx_toa_ms, retries, deferred_count);
             fflush(stdout);
-            continue;
+
+            /* Recovery: after 3 consecutive deferrals, force SX1261 reinit and start scan anyway.
+             * The TX FSM being stuck at 0x91 is likely caused by CAD RF coupling.
+             * The SX1302 is not actually transmitting, so it's safe to proceed. */
+            if (deferred_count >= 3) {
+                printf("WARNING: spectral scan stuck for %d cycles, attempting SX1261 recovery + forced scan start\n", deferred_count);
+                fflush(stdout);
+
+                pthread_mutex_lock(&mx_concent);
+
+                /* Reinit SX1261: setup (STDBY) + set_rx_params (FSK mode for spectral scan) */
+                int reinit_err = sx1261_setup();
+                if (reinit_err != 0) {
+                    printf("ERROR: spectral scan recovery: sx1261_setup failed\n");
+                } else {
+                    reinit_err = sx1261_set_rx_params(freq_hz, BW_125KHZ);
+                    if (reinit_err != 0) {
+                        printf("ERROR: spectral scan recovery: sx1261_set_rx_params failed\n");
+                    } else {
+                        printf("INFO: spectral scan recovery: SX1261 reinit OK, forcing scan start\n");
+                    }
+                }
+
+                /* Force start spectral scan regardless of TX FSM status */
+                x = lgw_spectral_scan_start(freq_hz, spectral_scan_params.nb_scan);
+                spectral_scan_started = true;
+                printf("INFO: spectral scan FORCED start on freq=%u Hz (chan %d/%d), sweep_idx=%d (recovery after %d deferrals)\n",
+                       freq_hz, sweep_idx+1, sweep_total, sweep_idx, deferred_count);
+                fflush(stdout);
+
+                pthread_mutex_unlock(&mx_concent);
+                deferred_count = 0; /* reset after recovery attempt */
+            } else {
+                continue;
+            }
         }
 
         if (retries > 0) {

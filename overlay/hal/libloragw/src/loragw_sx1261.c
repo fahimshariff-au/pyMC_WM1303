@@ -20,6 +20,8 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #include <stdint.h>     /* C99 types */
 #include <stdio.h>      /* printf fprintf */
 #include <string.h>     /* strncmp */
+#include <fcntl.h>      /* open */
+#include <unistd.h>     /* write, close */
 
 #include "loragw_sx1261.h"
 #include "loragw_spi.h"
@@ -87,6 +89,13 @@ static uint8_t sx1261_lora_rx_bw = 0;
 static uint8_t sx1261_lora_rx_sf = 0;
 static uint8_t sx1261_lora_rx_cr = 0;
 static bool sx1261_lora_rx_boosted = true; /* default: boosted LNA for max sensitivity */
+
+/* TX inhibit flag: when true, prevents automatic LoRa RX restart.
+   Used during the CAD → lgw_send window to keep the SX1261 in STDBY
+   so the FEM stays in a neutral state and doesn't route to LNA (RX path)
+   which would prevent the SX1302 PA from activating for TX.
+   Channel E RX resumes immediately after lgw_send completes. */
+static volatile bool sx1261_tx_inhibit_rx = false;
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS ---------------------------------------------------- */
@@ -225,7 +234,24 @@ int sx1261_load_pram(void) {
     int i, err;
     uint8_t buff[32];
     char pram_version[SX1261_PRAM_VERSION_FULL_SIZE];
-    uint32_t val, addr;
+
+    /* Bulk PRAM buffer: 2 bytes address + 386*4 bytes data = 1546 bytes */
+    static uint8_t pram_bulk[2 + PRAM_COUNT * 4];
+    static int pram_bulk_ready = 0;
+
+    /* Pre-build the bulk buffer once (start address + all PRAM data MSB-first) */
+    if (!pram_bulk_ready) {
+        pram_bulk[0] = 0x80; /* Start address MSB: 0x8000 */
+        pram_bulk[1] = 0x00; /* Start address LSB */
+        for (i = 0; i < (int)PRAM_COUNT; i++) {
+            uint32_t val = pram[i];
+            pram_bulk[2 + i*4 + 0] = (val >> 24) & 0xFF;
+            pram_bulk[2 + i*4 + 1] = (val >> 16) & 0xFF;
+            pram_bulk[2 + i*4 + 2] = (val >>  8) & 0xFF;
+            pram_bulk[2 + i*4 + 3] = (val >>  0) & 0xFF;
+        }
+        pram_bulk_ready = 1;
+    }
 
     /* Set Radio in Standby mode */
     buff[0] = (uint8_t)SX1261_STDBY_RC;
@@ -249,29 +275,18 @@ int sx1261_load_pram(void) {
     buff[0] = 0x06;
     buff[1] = 0x10;
     buff[2] = 0x10;
-    err = sx1261_reg_w( SX1261_WRITE_REGISTER, buff, 3);
+    err = sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 3);
     CHECK_ERR(err);
 
-    /* Load patch */
-    for (i = 0; i < (int)PRAM_COUNT; i++) {
-        val = pram[i];
-        addr = 0x8000 + 4*i;
-
-        buff[0] = (addr >> 8) & 0xFF;
-        buff[1] = (addr >> 0) & 0xFF;
-        buff[2] = (val >> 24) & 0xFF;
-        buff[3] = (val >> 16) & 0xFF;
-        buff[4] = (val >> 8)  & 0xFF;
-        buff[5] = (val >> 0)  & 0xFF;
-        err = sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 6);
-        CHECK_ERR(err);
-    }
+    /* Load patch — single bulk SPI write instead of 386 individual writes */
+    err = sx1261_reg_w(SX1261_WRITE_REGISTER, pram_bulk, 2 + PRAM_COUNT * 4);
+    CHECK_ERR(err);
 
     /* Disable patch update */
     buff[0] = 0x06;
     buff[1] = 0x10;
     buff[2] = 0x00;
-    err = sx1261_reg_w( SX1261_WRITE_REGISTER, buff, 3);
+    err = sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 3);
     CHECK_ERR(err);
 
     /* Update pram */
@@ -329,7 +344,7 @@ int sx1261_calibrate(uint32_t freq_hz) {
     CHECK_ERR(err);
 
     /* Wait for calibration to complete */
-    wait_ms(10);
+    wait_ms(4); /* Image cal wait (was 10ms, datasheet max 3.5ms) */
 
     buff[0] = 0x00;
     buff[1] = 0x00;
@@ -728,6 +743,11 @@ int sx1261_lora_rx_restart_light(void) {
         return LGW_REG_SUCCESS; /* nothing to restart */
     }
 
+    if (sx1261_tx_inhibit_rx) {
+        printf("SX1261: LoRa RX restart INHIBITED (TX in progress)\n");
+        return LGW_REG_SUCCESS; /* TX window active, don't restart RX */
+    }
+
     printf("SX1261: LoRa RX light restart (post-scan)\n");
 
     /* Use bulk write mode for speed */
@@ -860,10 +880,12 @@ int sx1261_spectral_scan_abort(void) {
 
     _meas_time_stop(4, tm, __FUNCTION__);
 
-    /* Restart LoRa RX if it was configured */
-    if (sx1261_lora_rx_enabled) {
+    /* Restart LoRa RX if it was configured and not inhibited by TX */
+    if (sx1261_lora_rx_enabled && !sx1261_tx_inhibit_rx) {
         printf("SX1261: Restarting LoRa RX after spectral scan abort\n");
         sx1261_lora_rx_restart_light();
+    } else if (sx1261_lora_rx_enabled && sx1261_tx_inhibit_rx) {
+        printf("SX1261: LoRa RX restart skipped after scan abort (TX inhibit active)\n");
     }
 
     return LGW_REG_SUCCESS;
@@ -896,8 +918,8 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
     uint8_t cad_det_peak;
     uint16_t irq_status;
     int timeout_cnt;
-    /* performances variables */
-    struct timeval tm;
+    struct timeval tm, t0, t1;
+    double ms_abort, ms_setup, ms_cad, ms_cleanup, ms_total;
 
     /* Check input parameters */
     if (result == NULL) {
@@ -913,26 +935,27 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
     result->detected = false;
     result->rssi_dbm = -128;
     result->status = 2; /* error until proven otherwise */
+    ms_abort = ms_setup = ms_cad = ms_cleanup = 0.0;
 
-    /* Record function start time */
     _meas_time_start(&tm);
 
-    /* Stop LoRa RX if active (will be restarted after CAD completes) */
+    /* Stop LoRa RX if active */
     if (sx1261_lora_rx_enabled) {
         sx1261_lora_rx_stop();
     }
 
     /* Map BW parameter to SX126x register value */
     switch (bw) {
-        case 0: bw_reg = 0x04; break;  /* 125 kHz - LORA_BW_125 */
-        case 1: bw_reg = 0x05; break;  /* 250 kHz - LORA_BW_250 */
-        case 2: bw_reg = 0x06; break;  /* 500 kHz - LORA_BW_500 */
+        case 0: bw_reg = 0x04; break;  /* 125 kHz */
+        case 1: bw_reg = 0x05; break;  /* 250 kHz */
+        case 2: bw_reg = 0x06; break;  /* 500 kHz */
+        case 3: bw_reg = 0x03; break;  /* 62.5 kHz */
         default:
-            printf("ERROR: %s: invalid BW %u (0=125, 1=250, 2=500)\n", __FUNCTION__, bw);
+            printf("ERROR: %s: invalid BW %u\n", __FUNCTION__, bw);
             return LGW_REG_ERROR;
     }
 
-    /* Determine cadDetPeak based on SF (from SX126x datasheet recommendations) */
+    /* CAD detection peak based on SF (SX126x datasheet) */
     switch (sf) {
         case 7:  cad_det_peak = 22; break;
         case 8:  cad_det_peak = 22; break;
@@ -943,29 +966,42 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
         default: cad_det_peak = 22; break;
     }
 
-    /* --- Step 1: Abort spectral scan and go to Standby --- */
+    /* ============ Phase 1: Abort spectral scan + standby ============ */
+    gettimeofday(&t0, NULL);
+
     err = sx1261_spectral_scan_abort();
     if (err != LGW_REG_SUCCESS) {
         printf("ERROR: %s: failed to abort spectral scan\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        result->status = 2;
+        goto cad_done;
     }
+
+    wait_ms(2); /* CRITICAL: race condition fix between abort and standby */
 
     buff[0] = SX1261_STDBY_RC;
     err = sx1261_reg_w(SX1261_SET_STANDBY, buff, 1);
     if (err != LGW_REG_SUCCESS) {
         printf("ERROR: %s: failed to set standby\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        result->status = 2;
+        goto cad_done;
     }
 
-    /* --- Step 2: Set Packet Type to LoRa --- */
+    gettimeofday(&t1, NULL);
+    ms_abort = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+
+    /* ============ Phase 2: Configure LoRa registers for CAD ============ */
+    gettimeofday(&t0, NULL);
+
+    /* Set LoRa packet type */
     buff[0] = 0x01; /* PACKET_TYPE_LORA */
     err = sx1261_reg_w(SX1261_SET_PACKET_TYPE, buff, 1);
     if (err != LGW_REG_SUCCESS) {
-        printf("ERROR: %s: failed to set packet type LoRa\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        printf("ERROR: %s: failed to set packet type\n", __FUNCTION__);
+        result->status = 2;
+        goto cad_done;
     }
 
-    /* --- Step 3: Set RF Frequency --- */
+    /* Set RF frequency */
     freq_reg = SX1261_FREQ_TO_REG(freq_hz);
     buff[0] = (uint8_t)(freq_reg >> 24);
     buff[1] = (uint8_t)(freq_reg >> 16);
@@ -973,97 +1009,95 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
     buff[3] = (uint8_t)(freq_reg >> 0);
     err = sx1261_reg_w(SX1261_SET_RF_FREQUENCY, buff, 4);
     if (err != LGW_REG_SUCCESS) {
-        printf("ERROR: %s: failed to set RF frequency\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        printf("ERROR: %s: failed to set frequency\n", __FUNCTION__);
+        result->status = 2;
+        goto cad_done;
     }
 
-    /* --- Step 4: Set LoRa Modulation Parameters --- */
-    /* SF, BW, CR=4/5 (0x01), LowDataRateOptimize=0 */
-    buff[0] = sf;       /* Spreading Factor */
-    buff[1] = bw_reg;   /* Bandwidth */
-    buff[2] = 0x01;     /* CodingRate CR4/5 */
-    buff[3] = 0x00;     /* LowDataRateOptimize off */
+    /* Set modulation parameters */
+    buff[0] = sf;      /* SF */
+    buff[1] = bw_reg;  /* BW */
+    buff[2] = 0x01;    /* CR 4/5 */
+    buff[3] = 0x00;    /* Low data rate optimize off */
     err = sx1261_reg_w(SX1261_SET_MODULATION_PARAMS, buff, 4);
     if (err != LGW_REG_SUCCESS) {
-        printf("ERROR: %s: failed to set LoRa modulation params\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        printf("ERROR: %s: failed to set modulation params\n", __FUNCTION__);
+        result->status = 2;
+        goto cad_done;
     }
 
-    /* --- Step 5: Set CAD Parameters --- */
-    /* cadSymbolNum=2 (detect over 2 symbols), cadDetPeak, cadDetMin=10,
-     * cadExitMode=STDBY (return to standby after CAD), timeout=0 */
-    buff[0] = 0x02;              /* cadSymbolNum: 2 symbols */
-    buff[1] = cad_det_peak;      /* cadDetPeak (SF-dependent) */
-    buff[2] = 10;                /* cadDetMin: 10 */
-    buff[3] = SX1261_CAD_EXIT_STDBY; /* cadExitMode: return to STDBY_RC */
-    buff[4] = 0x00;              /* cadTimeout[23:16] = 0 */
-    buff[5] = 0x00;              /* cadTimeout[15:8]  = 0 */
-    buff[6] = 0x00;              /* cadTimeout[7:0]   = 0 */
+    /* Set CAD parameters */
+    buff[0] = 0x02;            /* cadSymbolNum: 2 symbols */
+    buff[1] = cad_det_peak;    /* cadDetPeak */
+    buff[2] = 10;              /* cadDetMin */
+    buff[3] = 0x00;            /* cadExitMode: STDBY after CAD */
+    buff[4] = 0x00;            /* cadTimeout (MSB) */
+    buff[5] = 0x00;            /* cadTimeout */
+    buff[6] = 0x00;            /* cadTimeout (LSB) */
     err = sx1261_reg_w(SX1261_SET_CAD_PARAMS, buff, 7);
     if (err != LGW_REG_SUCCESS) {
         printf("ERROR: %s: failed to set CAD params\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        result->status = 2;
+        goto cad_done;
     }
 
-    /* --- Step 6: Clear all IRQ flags --- */
+    /* Clear IRQ and configure DIO for CAD */
     buff[0] = (SX1261_IRQ_ALL >> 8) & 0xFF;
     buff[1] = (SX1261_IRQ_ALL >> 0) & 0xFF;
     err = sx1261_reg_w(SX1261_CLR_IRQ_STATUS, buff, 2);
     if (err != LGW_REG_SUCCESS) {
-        printf("ERROR: %s: failed to clear IRQ status\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        printf("ERROR: %s: failed to clear IRQ\n", __FUNCTION__);
+        result->status = 2;
+        goto cad_done;
     }
 
-    /* --- Step 7: Set DIO IRQ Params --- */
-    /* Enable CadDone and CadDetected on IRQ line (DIO1) */
-    {
-        uint16_t irq_mask = SX1261_IRQ_CAD_DONE | SX1261_IRQ_CAD_DETECTED;
-        buff[0] = (irq_mask >> 8) & 0xFF;  /* IrqMask MSB */
-        buff[1] = (irq_mask >> 0) & 0xFF;  /* IrqMask LSB */
-        buff[2] = (irq_mask >> 8) & 0xFF;  /* DIO1 mask MSB */
-        buff[3] = (irq_mask >> 0) & 0xFF;  /* DIO1 mask LSB */
-        buff[4] = 0x00;                     /* DIO2 mask MSB */
-        buff[5] = 0x00;                     /* DIO2 mask LSB */
-        buff[6] = 0x00;                     /* DIO3 mask MSB */
-        buff[7] = 0x00;                     /* DIO3 mask LSB */
-    }
+    buff[0] = ((SX1261_IRQ_CAD_DONE | SX1261_IRQ_CAD_DETECTED) >> 8) & 0xFF;
+    buff[1] = ((SX1261_IRQ_CAD_DONE | SX1261_IRQ_CAD_DETECTED) >> 0) & 0xFF;
+    buff[2] = 0x00; buff[3] = 0x00;
+    buff[4] = 0x00; buff[5] = 0x00;
+    buff[6] = 0x00; buff[7] = 0x00;
     err = sx1261_reg_w(SX1261_SET_DIO_IRQ_PARAMS, buff, 8);
     if (err != LGW_REG_SUCCESS) {
         printf("ERROR: %s: failed to set DIO IRQ params\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        result->status = 2;
+        goto cad_done;
     }
 
-    /* --- Step 8: Get instantaneous RSSI before CAD --- */
-    buff[0] = 0x00;
-    err = sx1261_reg_r(SX1261_GET_RSSI_INST, buff, 2);
-    if (err == LGW_REG_SUCCESS) {
-        result->rssi_dbm = -((int16_t)buff[1]) / 2;
-    }
+    /* NOTE: RSSI measurement inside the CAD flow is not possible.
+     * Any FSK/LoRa mode switching corrupts the CAD state, causing timeouts.
+     * RSSI-based LBT is handled separately by the Custom LBT check in
+     * the JIT thread (lora_pkt_fwd.c) which runs after the CAD scan. */
 
-    /* --- Step 9: Issue SetCad command --- */
+    gettimeofday(&t1, NULL);
+    ms_setup = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+
+    /* ============ Phase 3: Execute CAD scan ============ */
+    gettimeofday(&t0, NULL);
+
+    buff[0] = 0x00; /* dummy byte */
     err = sx1261_reg_w(SX1261_SET_CAD, buff, 0);
     if (err != LGW_REG_SUCCESS) {
-        printf("ERROR: %s: failed to issue SetCad command\n", __FUNCTION__);
-        return LGW_REG_ERROR;
+        printf("ERROR: %s: failed to start CAD\n", __FUNCTION__);
+        result->status = 2;
+        goto cad_done;
     }
 
-    /* --- Step 10: Poll IRQ status until CadDone (with timeout) --- */
-    /* CAD typically takes ~1-5ms depending on SF and symbol count */
+    /* Poll IRQ status until CadDone (with timeout) */
     timeout_cnt = 0;
-    while (timeout_cnt < 100) { /* max 100 x 1ms = 100ms timeout */
+    while (timeout_cnt < 100) { /* max 100ms timeout */
         buff[0] = 0x00;
         buff[1] = 0x00;
         buff[2] = 0x00;
         err = sx1261_reg_r(SX1261_GET_IRQ_STATUS, buff, 3);
         if (err != LGW_REG_SUCCESS) {
             printf("ERROR: %s: failed to get IRQ status\n", __FUNCTION__);
-            return LGW_REG_ERROR;
+            result->status = 2;
+            goto cad_done;
         }
 
         irq_status = ((uint16_t)buff[1] << 8) | (uint16_t)buff[2];
 
         if (irq_status & SX1261_IRQ_CAD_DONE) {
-            /* CAD completed */
             result->detected = (irq_status & SX1261_IRQ_CAD_DETECTED) ? true : false;
             result->status = 0; /* success */
 
@@ -1071,47 +1105,79 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
             buff[0] = (SX1261_IRQ_ALL >> 8) & 0xFF;
             buff[1] = (SX1261_IRQ_ALL >> 0) & 0xFF;
             sx1261_reg_w(SX1261_CLR_IRQ_STATUS, buff, 2);
-
-            DEBUG_PRINTF("SX1261 CAD: freq=%uHz SF%u BW%u detected=%d rssi=%d (took %dms)\n",
-                        freq_hz, sf, bw, result->detected, result->rssi_dbm, timeout_cnt);
-
-            /* Restart LoRa RX if it was configured */
-            if (sx1261_lora_rx_enabled) {
-                printf("SX1261: Restarting LoRa RX after CAD\n");
-                sx1261_lora_rx_start();
-            }
-
-            _meas_time_stop(4, tm, __FUNCTION__);
-            return LGW_REG_SUCCESS;
+            break;
         }
 
         wait_ms(1);
         timeout_cnt++;
     }
 
-    /* Timeout — CAD did not complete in time */
-    printf("WARNING: %s: CAD timeout after %dms on freq=%uHz SF%u\n",
-           __FUNCTION__, timeout_cnt, freq_hz, sf);
-    result->status = 1; /* timeout */
-
-    /* Clean up: go back to standby */
-    buff[0] = SX1261_STDBY_RC;
-    sx1261_reg_w(SX1261_SET_STANDBY, buff, 1);
-
-    /* Clear IRQ flags */
-    buff[0] = (SX1261_IRQ_ALL >> 8) & 0xFF;
-    buff[1] = (SX1261_IRQ_ALL >> 0) & 0xFF;
-    sx1261_reg_w(SX1261_CLR_IRQ_STATUS, buff, 2);
-
-    /* Restart LoRa RX if it was configured */
-    if (sx1261_lora_rx_enabled) {
-        printf("SX1261: Restarting LoRa RX after CAD timeout\n");
-        sx1261_lora_rx_start();
+    if (timeout_cnt >= 100) {
+        printf("WARNING: %s: CAD timeout after %dms on freq=%uHz SF%u\n",
+               __FUNCTION__, timeout_cnt, freq_hz, sf);
+        result->status = 1; /* timeout */
     }
 
-    _meas_time_stop(4, tm, __FUNCTION__);
+    gettimeofday(&t1, NULL);
+    ms_cad = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
 
-    return LGW_REG_SUCCESS; /* return success even on timeout - result.status indicates timeout */
+cad_done:
+    /* ============ Phase 4: GPIO reset + full reinit (with FAST bulk PRAM load) ============
+     * After CAD, the SX1261 LoRa mode corrupts its internal state and PRAM.
+     * A GPIO reset clears the hardware completely. The PRAM firmware patch is
+     * then reloaded using an optimized bulk SPI write (~5ms vs ~430ms).
+     * The JIT thread's lgw_abort_tx() handles SX1302 TX FSM recovery. */
+    gettimeofday(&t0, NULL);
+
+    /* Step 1: GPIO reset SX1261 via sysfs (GPIO517 = BCM5) */
+    {
+        int fd;
+        const char *gpio_path = "/sys/class/gpio/gpio517/value";
+
+        fd = open(gpio_path, O_WRONLY);
+        if (fd < 0) {
+            printf("ERROR: [CAD] cannot open %s for GPIO reset\n", gpio_path);
+        } else {
+            write(fd, "0", 1);
+            wait_ms(1); /* Reset pulse 1ms (min 100us per datasheet) */
+            write(fd, "1", 1);
+            close(fd);
+            wait_ms(3); /* Post-reset settle: 3ms (datasheet typ 2ms) */
+        }
+    }
+
+    /* Step 2: Full reinit — PRAM load (fast bulk) + calibrate + setup */
+    err = sx1261_load_pram();
+    if (err != LGW_REG_SUCCESS) {
+        printf("WARNING: [CAD] post-reset PRAM load failed\n");
+    }
+
+//     err = sx1261_calibrate(freq_hz);
+//     if (err != LGW_REG_SUCCESS) {
+//         printf("WARNING: [CAD] post-reset calibration failed\n");
+//     }
+
+    err = sx1261_setup();
+    if (err != LGW_REG_SUCCESS) {
+        printf("WARNING: [CAD] post-reset setup failed\n");
+    }
+
+
+
+    gettimeofday(&t1, NULL);
+    ms_cleanup = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+
+    ms_total = ms_abort + ms_setup + ms_cad + ms_cleanup;
+
+    /* ============ Detailed timing log ============ */
+    printf("INFO: [CAD] freq=%uHz SF%u BW%u detected=%d rssi=%ddBm status=%d | "
+           "abort=%.1fms setup=%.1fms cad=%.1fms(%dpolls) reinit=%.1fms TOTAL=%.1fms\n",
+           freq_hz, sf, bw, result->detected, result->rssi_dbm, result->status,
+           ms_abort, ms_setup, ms_cad, timeout_cnt,
+           ms_cleanup, ms_total);
+
+    _meas_time_stop(4, tm, __FUNCTION__);
+    return LGW_REG_SUCCESS;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1374,19 +1440,19 @@ int sx1261_lora_rx_start(void) {
         buff[2] = (uint8_t)((tcxo_timeout >> 8) & 0xFF);
         buff[3] = (uint8_t)((tcxo_timeout >> 0) & 0xFF);
         sx1261_reg_w(SX1261_OP_SET_DIO3_AS_TCXO_CTRL, buff, 4);
-        wait_ms(5);
+        wait_ms(2); /* TCXO settle (was 5ms, datasheet <1ms) */
     }
 
     /* Full block calibration in STBY_RC */
     buff[0] = 0x7F;
     sx1261_reg_w(SX1261_CALIBRATE, buff, 1);
-    wait_ms(10);
+    wait_ms(4); /* Full calibrate (was 10ms, datasheet max 3.5ms) */
 
     /* Image calibration for 869 MHz */
     buff[0] = 0xD7;
     buff[1] = 0xDB;
     sx1261_reg_w(SX1261_CALIBRATE_IMAGE, buff, 2);
-    wait_ms(5);
+    wait_ms(2); /* Image calibrate (was 5ms) */
 
     /* Switch to STBY_XOSC */
     buff[0] = (uint8_t)SX1261_STDBY_XOSC;
@@ -1847,6 +1913,31 @@ int sx1261_get_rssi_inst(int16_t *rssi_dbm) {
     *rssi_dbm = -(int16_t)buff[1] / 2;
 
     return LGW_REG_SUCCESS;
+}
+
+
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+
+/**
+ * @brief Set the TX inhibit flag to prevent LoRa RX restart during TX.
+ *
+ * When set to true, sx1261_lora_rx_restart_light() and
+ * sx1261_spectral_scan_abort() will NOT restart LoRa RX.
+ * This keeps the SX1261 in STDBY so the FEM stays neutral
+ * and allows the SX1302 PA to activate for TX.
+ *
+ * @param inhibit  true to inhibit, false to allow
+ */
+void sx1261_set_tx_inhibit_rx(bool inhibit) {
+    sx1261_tx_inhibit_rx = inhibit;
+}
+
+/**
+ * @brief Get the current TX inhibit flag state.
+ * @return true if LoRa RX restart is currently inhibited
+ */
+bool sx1261_get_tx_inhibit_rx(void) {
+    return sx1261_tx_inhibit_rx;
 }
 
 /* --- EOF ------------------------------------------------------------------ */

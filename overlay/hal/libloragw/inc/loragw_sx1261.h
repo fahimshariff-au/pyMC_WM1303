@@ -96,6 +96,19 @@ int sx1261_get_rssi_inst(int16_t *rssi_dbm);
 
 int sx1261_lora_rx_restart_light(void);
 
+/**
+ * @brief Inhibit/allow automatic LoRa RX restart during TX window.
+ *
+ * When inhibit is true, sx1261_lora_rx_restart_light() and
+ * sx1261_spectral_scan_abort() will NOT restart LoRa RX,
+ * keeping the SX1261 in STDBY so the FEM stays neutral for TX.
+ * Channel E RX resumes immediately when inhibit is cleared.
+ *
+ * @param inhibit  true to block LoRa RX restart, false to allow
+ */
+void sx1261_set_tx_inhibit_rx(bool inhibit);
+bool sx1261_get_tx_inhibit_rx(void);
+
 #endif
 
 /* --- EOF ------------------------------------------------------------------ */

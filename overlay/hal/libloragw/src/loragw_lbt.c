@@ -306,9 +306,9 @@ int lgw_lbt_rssi_check(uint32_t freq_hz, uint8_t bandwidth, int8_t rssi_target,
     }
 
     /* Step 2: Wait for RSSI to settle.
-     * The SX1261 needs a few ms in GFSK RX mode for a stable RSSI reading.
-     * 5ms matches the standard LBT scan time. */
-    wait_ms(5);
+     * The SX1261 needs a short time in GFSK RX mode for a stable RSSI reading.
+     * 2ms is sufficient based on testing (reduced from 5ms). */
+    wait_ms(2);
 
     /* Step 3: Read instantaneous RSSI */
     err = sx1261_get_rssi_inst(&rssi_inst);
