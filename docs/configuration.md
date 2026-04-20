@@ -29,7 +29,7 @@ The WM1303 system uses multiple configuration files with a **Single Source of Tr
 | `bridge_rules` | SSOT bridge rules: source → target mapping, packet type filters |
 | `rf_chains` | RF chain center frequencies |
 | `if_chains` | IF chain enable/offset configuration |
-| `advanced` | GPIO pins, SPI settings, pkt_fwd path, advanced parameters |
+| `advanced` | GPIO pins, SPI settings, pkt_fwd path, TX queue management, advanced parameters |
 
 ### How it flows
 
@@ -103,9 +103,9 @@ Each channel is configured with:
 | `coding_rate` | Coding rate (5–8 = 4/5–4/8) | `8` |
 | `preamble` | Preamble length | `32` |
 | `tx_power` | TX power in dBm | `20` |
-| `lbt_enabled` | LBT enable/disable | `true` |
+| `lbt_enabled` | LBT enable/disable (optional, per channel) | `false` |
 | `lbt_threshold` | LBT RSSI threshold in dBm | `-75` |
-| `cad_enabled` | CAD enable (requires LBT) | `true` |
+| `cad_enabled` | Legacy field (CAD is now mandatory since v2.1.0) | `true` |
 | `active` | Channel active/inactive | `true` |
 | `name` | Display alias (not used as ID) | `"SF12-868"` |
 
@@ -187,7 +187,7 @@ During installation:
 
 ## Configuration During Upgrade
 
-The upgrade script:
+The upgrade script (triggered via `bootstrap.sh` or `upgrade.sh`):
 
 1. Preserves existing `wm1303_ui.json` settings
 2. **Deep-merges** new keys into existing config (e.g., new Channel E sub-keys)
@@ -195,9 +195,29 @@ The upgrade script:
 4. Regenerates `bridge_conf.json` on service restart
 5. Syncs `config.yaml` channel data if needed
 
+### v2.1.0 Upgrade-Specific Changes
+
+- **TX delays forced to 0**: `tx_delay_factor`, `direct_tx_delay_factor`, and per-rule `tx_delay_ms` are set to zero (CAD handles collision avoidance)
+- **New DB tables created**: `packet_activity`, `cad_events` in `repeater.db`
+- **Orphaned data cleanup**: removes orphaned `lbt_events` and `cad_events` from `spectrum_history.db` (data now resides in `repeater.db`)
+- **Hard browser refresh required**: Ctrl+Shift+R or Ctrl+F5 after every upgrade to load updated UI assets
+
+## TX Queue Management (Advanced Config)
+
+Since v2.1.0, TX delay settings are managed in the **Adv. Config → TX Queue Management** section:
+
+| Parameter | Default (v2.1.0) | Description |
+|-----------|-------------------|-------------|
+| `tx_delay_factor` | `0.0` | Random pre-TX jitter multiplier (0 = no delay) |
+| `direct_tx_delay_factor` | `0.0` | Direct TX delay multiplier |
+
+> **Note:** The Config tab has been removed in v2.1.0. TX Delay Factor was the only setting it contained and has moved to Adv. Config.
+
 ## Related Documents
 
 - [`architecture.md`](./architecture.md) — SSOT model overview
 - [`ui.md`](./ui.md) — WM1303 Manager UI
 - [`api.md`](./api.md) — REST API (reads/writes config)
 - [`installation.md`](./installation.md) — Installation process
+- [`lbt_cad.md`](./lbt_cad.md) — LBT and CAD behavior
+- [`tx_queue.md`](./tx_queue.md) — TX queue system

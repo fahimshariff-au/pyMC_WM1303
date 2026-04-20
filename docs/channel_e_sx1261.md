@@ -56,14 +56,18 @@ Channels A-D are virtualized from one concentrator backend. Channel E is not der
 
 Channel E is the channel used for **62.5 kHz support** and other bandwidths that are not a natural fit for the SX1302 IF-chain implementation.
 
-### 3. Dual-purpose SX1261 usage
+### 3. Multi-purpose SX1261 usage
 
-The SX1261 now serves two roles:
+The SX1261 serves multiple roles simultaneously:
 
-- **Monitoring role**: spectral scan, LBT support, CAD support
+- **Mandatory CAD role** (since v2.1.0): hardware LoRa preamble detection before every TX on any channel
+- **Monitoring role**: spectral scan, noise floor measurement
+- **Optional LBT role**: per-channel RSSI-based listen-before-talk (when enabled)
 - **Traffic role**: full LoRa RX/TX for Channel E
 
 This makes scheduling, coordination, and documentation more important than for the A-D channels.
+
+> **v2.1.0 optimization:** After each CAD scan, the SX1261 is restored via GPIO hardware reset + bulk PRAM write (single SPI transfer, ~42 ms reload). This resolved SX1261/SX1302 interference discovered during development.
 
 ## Capabilities of Channel E
 
@@ -75,7 +79,7 @@ Channel E is integrated into the same high-level management model as Channels A-
 - UI configuration
 - Metrics and status display
 - Signal-quality visibility where available
-- LBT/CAD related behavior through the shared scheduling logic
+- LBT/CAD behavior through the C-layer packet forwarder (mandatory CAD + optional LBT)
 
 ### Configurable parameters
 
@@ -88,9 +92,10 @@ Channel E is documented and exposed with the same type of channel settings as th
 - Preamble length
 - TX power
 - Active state
-- LBT enable / threshold
-- CAD enable
-- RX Boost related settings where supported
+- LBT enable / threshold (optional, per channel)
+- RX Boost (Channel E specific)
+
+> **Note:** CAD is mandatory since v2.1.0 and cannot be disabled. There is no CAD toggle in the UI.
 
 The configuration is sourced from **`/etc/pymc_repeater/wm1303_ui.json`**, keeping it aligned with the SSOT model used throughout the project.
 
@@ -134,12 +139,19 @@ Historically, the SX1261 was used as the chip that supplied:
 - LBT RSSI data
 - CAD support
 
-After Channel E was introduced, the SX1261 became both:
+Since v2.1.0, the SX1261 has an even more central role:
 
-- A **measurement device**
-- A **traffic-carrying radio**
+- **Mandatory CAD** — every TX on any channel triggers a hardware CAD scan on the SX1261
+- **Optional LBT** — per-channel RSSI check after CAD (when enabled)
+- **Spectral scan** — noise floor monitoring during TX-free windows
+- **Channel E traffic** — full LoRa RX/TX for the 5th channel
 
-That means the project had to evolve from a simple helper-chip model into a more coordinated design. The documentation should therefore treat Channel E and the SX1261 as one combined topic rather than scattering the explanation across unrelated pages.
+The CAD and LBT logic runs in the **C-layer packet forwarder** (`lora_pkt_fwd.c`), not in Python. The spectral scan runs in a dedicated HAL thread. Channel E RX/TX is coordinated through the backend.
+
+This multi-purpose design requires careful scheduling to avoid SX1261 contention. The project resolves this through:
+- GPIO hardware reset + bulk PRAM reload cycle after each CAD scan (~42 ms)
+- Abort + 5 ms delay + Standby sequence to prevent SX1261/SX1302 race conditions
+- Spectral scan only during TX-free windows
 
 ## Important operational considerations
 

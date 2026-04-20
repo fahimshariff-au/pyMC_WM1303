@@ -17,7 +17,15 @@
 
 ## Fresh Installation
 
-### Quick Start
+### Quick Start (Recommended)
+
+Use the bootstrap one-liner — it automatically detects fresh install vs upgrade:
+
+```bash
+curl -sL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
+```
+
+### Manual Installation
 
 ```bash
 git clone https://github.com/HansvanMeer/pyMC_WM1303.git
@@ -71,7 +79,8 @@ Clones the required upstream forks:
 #### Step 7: Apply Overlay Files
 Copies overlay files from this repository into the cloned repos:
 
-- HAL source files → `sx1302_hal/libloragw/` and `sx1302_hal/packet_forwarder/`
+- HAL source files → `sx1302_hal/libloragw/` (including `sx1261_spi.c`)
+- HAL packet forwarder files → `sx1302_hal/packet_forwarder/`
 - pymc_core hardware files → `pyMC_core/src/pymc_core/hardware/`
 - pymc_repeater files → `pyMC_Repeater/repeater/`
 
@@ -163,22 +172,19 @@ Expected: only actively configured channels should show `enable: true`.
 
 ## Upgrade
 
-### One-Liner Bootstrap Upgrade
+### One-Liner Bootstrap (Recommended)
+
+The bootstrap script handles both fresh install and upgrade automatically:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
+curl -sL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
 ```
 
-### Manual Upgrade
+`bootstrap.sh` uses `git reset --hard` to handle dirty repositories, ensuring a clean state before applying updates.
 
-```bash
-cd /tmp
-git clone https://github.com/HansvanMeer/pyMC_WM1303.git pymc_wm1303_upgrade
-cd pymc_wm1303_upgrade
-sudo bash upgrade.sh
-```
+> **Note:** `upgrade_bootstrap.sh` has been removed and superseded by `bootstrap.sh`.
 
-### From Existing Clone
+### Manual Upgrade (From Existing Clone)
 
 ```bash
 cd ~/pyMC_WM1303
@@ -194,16 +200,26 @@ If HAL overlay files changed (C code modifications):
 sudo bash upgrade.sh --force-rebuild
 ```
 
+> **Important:** After every upgrade, perform a **hard browser refresh** (Ctrl+Shift+R or Ctrl+F5) to load updated UI assets.
+
 A reboot is recommended after upgrades that change SPI configuration.
 
 ### What the Upgrade Script Does
 
-1. Pulls latest code from all repositories
-2. Applies updated overlay files
-3. **Deep-merges** new config keys into existing `wm1303_ui.json` (preserving user settings)
+1. Pulls latest code from all repositories (using `git reset --hard` for clean state)
+2. Detects HAL overlay checksum changes **before** copying overlays
+3. Applies updated overlay files (including `sx1261_spi.c`)
 4. Rebuilds HAL if overlay checksums changed (or if `--force-rebuild`)
-5. Restarts the service
-6. Updates `/etc/pymc_repeater/version`
+5. **Deep-merges** new config keys into existing `wm1303_ui.json` (preserving user settings)
+6. Restarts the service
+7. Updates `/etc/pymc_repeater/version`
+
+### v2.1.0 Upgrade-Specific Changes
+
+- **Forces all TX delays to 0**: `tx_delay_factor`, `direct_tx_delay_factor`, and per-rule `tx_delay_ms` (CAD now handles collision avoidance)
+- **Creates new DB tables**: `packet_activity`, `cad_events` in `repeater.db`
+- **Cleans orphaned data**: removes orphaned `lbt_events` and `cad_events` from `spectrum_history.db` (data now resides in `repeater.db`)
+- **HAL recompilation**: triggered automatically due to CAD/LBT C code changes
 
 ### Configuration Preservation
 

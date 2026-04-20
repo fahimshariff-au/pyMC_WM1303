@@ -38,12 +38,14 @@ The WM1303 HAT sits on the Raspberry Pi GPIO header and contains:
 - Provides additional RX coverage
 
 ### SX1261 Companion Chip
-- Independent radio with its own SPI connection
+- Independent radio with its own SPI connection (`/dev/spidev0.1`, ~2 MHz)
 - **Full RX/TX capability** (enabled since v2.0.0)
-- Spectral scan engine
-- LBT (Listen Before Talk) measurement
-- CAD (Channel Activity Detection)
+- **Mandatory CAD** (Channel Activity Detection) before every TX since v2.1.0
+- Spectral scan engine for noise floor measurement
+- Optional per-channel LBT (Listen Before Talk) RSSI measurement
 - Supports sub-125 kHz bandwidths (62.5 kHz)
+- Bulk PRAM write (single SPI transfer for 1546-byte firmware, ~42 ms reload)
+- GPIO hardware reset + PRAM reload cycle after each CAD scan
 - See [`channel_e_sx1261.md`](./channel_e_sx1261.md) for details
 
 ### AD5338R DAC
@@ -59,15 +61,15 @@ The WM1303 HAT uses two SPI chip-select lines:
 | SPI Device | Connected To | Speed | Purpose |
 |------------|-------------|-------|--------|
 | `/dev/spidev0.0` | SX1302 + SX1250s | **16 MHz** | Main concentrator path (RX/TX for Channels A–D) |
-| `/dev/spidev0.1` | SX1261 | Via HAL | Channel E RX/TX, spectral scan, LBT, CAD |
+| `/dev/spidev0.1` | SX1261 | **~2 MHz** | Channel E RX/TX, mandatory CAD, spectral scan, LBT, PRAM upload |
 
 ### SPI Split — Why It Matters
 
 The separate SPI paths provide **isolation** between the concentrator and companion radio:
 
-- SX1261 operations (scan, LBT, CAD, Channel E) run **independently** from the main RX/TX path
+- SX1261 operations (CAD, scan, LBT, Channel E) run **independently** from the main RX/TX path
 - The concentrator RX path is not disrupted by SX1261 activity
-- TX latency from LBT checks remains low
+- Mandatory CAD adds only 37–56 ms per TX due to separate SPI path
 - This supports the design principle of maximum RX availability
 
 ### SPI Optimizations (v2.0.1)

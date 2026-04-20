@@ -23,7 +23,7 @@ Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel
 
 - **Multi-channel bridging** — Route packets between channels with configurable rules
 - **Channel E / SX1261** — Full RX/TX on the companion radio with 62.5 kHz bandwidth support
-- **Per-channel TX queues** — FIFO with fair round-robin scheduling, LBT, CAD gating
+- **Per-channel TX queues** — FIFO with fair round-robin scheduling and mandatory CAD
 - **3-layer deduplication** — Self-echo, multi-demod, and cross-channel hash dedup
 - **Spectral scan & noise floor** — Continuous monitoring via SX1261 without blocking TX
 - **Web management UI** — Real-time status, channel config, bridge rules, spectrum charts
@@ -167,7 +167,7 @@ With slower LoRa settings, the same message takes **much** longer:
 ├──────────────────────────────────────────────────┤
 │  Per-Channel TX Queues                            │
 │  ├── Fair round-robin scheduling                  │
-│  ├── LBT + CAD gating                             │
+│  ├── Mandatory CAD + optional LBT (C layer)       │
 │  └── TTL + overflow management                    │
 ├──────────────────────────────────────────────────┤
 │  WM1303 Manager UI + REST API + WebSocket         │
@@ -184,9 +184,11 @@ pyMC_WM1303/
 │   └── pymc_repeater/    # Bridge engine, API, UI, Channel E bridge
 ├── config/               # Configuration templates
 ├── docs/                 # Comprehensive documentation
+├── release_notes/        # Release notes per version
 ├── screenshots/          # UI screenshots
 ├── install.sh            # Fresh installation script
 ├── upgrade.sh            # Upgrade script
+├── bootstrap.sh          # Bootstrap (install + upgrade entry point)
 └── VERSION               # Current version
 ```
 
@@ -222,7 +224,8 @@ pyMC_WM1303/
 1. **RX availability is the #1 priority** — RX must be available as much of the time as possible
 2. **TX duration must be as short as possible** — minimize time spent transmitting
 3. **TX must be sent ASAP** — no unnecessary delays after a message enters the TX queue
-4. **Monitoring must not block** — spectral scan and noise floor measurement never pause TX
+4. **Deterministic collision avoidance** — mandatory hardware CAD (37–56 ms) replaces random TX delays
+5. **Monitoring must not block** — spectral scan and noise floor measurement never pause TX
 
 ## Disclaimer
 

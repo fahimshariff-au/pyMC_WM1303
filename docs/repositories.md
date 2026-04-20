@@ -69,14 +69,16 @@ The HAL overlay modifies the Semtech SX1302 HAL v2.10:
 | Overlay File | Changes |
 |-------------|--------|
 | `loragw_hal.c` / `.h` | Updated initialization, channel management, Channel E support |
-| `loragw_sx1261.c` / `.h` | Extended SX1261 for full RX/TX (was scan/LBT only) |
+| `loragw_sx1261.c` / `.h` | Extended SX1261 for full RX/TX, hardware CAD, GPIO reset, bulk PRAM write |
 | `loragw_sx1302.c` / `.h` | Updated concentrator interface |
 | `loragw_spi.c` / `.h` | SPI optimized: 16 MHz clock, 16 KB burst chunks |
+| `loragw_lbt.c` / `.h` | Custom per-channel LBT with real RSSI measurement (v2.1.0) |
 | `loragw_aux.c` | Added BW_62K5HZ bandwidth support |
+| `sx1261_spi.c` | SX1261 SPI communication layer (v2.1.0) |
 | `sx1261_defs.h` | Updated register definitions |
-| `lora_pkt_fwd.c` | Channel E packet I/O, spectral scan thread |
+| `lora_pkt_fwd.c` | Channel E packet I/O, spectral scan thread, mandatory CAD, optional LBT, JIT 1ms poll |
 | `capture_thread.c` / `.h` | CAPTURE_RAM streaming (disabled for SPI contention avoidance) |
-| `Makefile` (libloragw) | Build adjustments |
+| `Makefile` (libloragw) | Build adjustments (includes sx1261_spi.o) |
 | `Makefile` (pkt_fwd) | Compile/link capture_thread.o |
 
 ## pymc_core Overlay — Differences from Upstream dev
@@ -152,20 +154,24 @@ pyMC_WM1303/
 │   ├── channel_e_sx1261.md
 │   ├── diagram-style-guide.md
 │   └── images/              # Architecture diagrams
+├── release_notes/           # Release notes per version
+│   ├── RELEASE_NOTES.md
+│   ├── RELEASE_NOTES_v2.0.1.md
+│   ├── RELEASE_NOTES_v2.0.5.md
+│   ├── RELEASE_NOTES_v2.0.6.md
+│   └── RELEASE_NOTES_v2.1.0.md
 ├── screenshots/             # UI screenshots
-├── scripts/                 # Utility scripts
 ├── install.sh               # Fresh installation script
 ├── upgrade.sh               # Upgrade script
-├── bootstrap.sh             # Bootstrap helper
+├── bootstrap.sh             # Bootstrap (install + upgrade entry point)
 ├── README.md                # Project overview
 ├── TODO.md                  # Task tracking
 ├── VERSION                  # Current version
-├── RELEASE_NOTES.md         # v2.0.0 release notes
-├── RELEASE_NOTES_v2.0.1.md  # v2.0.1 release notes
-├── RELEASE_NOTES_v2.0.5.md  # v2.0.5 release notes
 ├── LICENSE                  # License file
 └── .gitignore
 ```
+
+> **v2.1.0 changes:** `_tools/` directory removed, `scripts/` directory removed, `upgrade_bootstrap.sh` removed (superseded by `bootstrap.sh`). Release notes moved to `release_notes/` directory.
 
 ## Version Management
 

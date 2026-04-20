@@ -21,7 +21,7 @@ Since v2.0.0 the system operates as a **5-channel platform**:
 | Channel E | SX1261 companion radio | Dedicated SX1261 path | Sub-125 kHz BW support (e.g. 62.5 kHz) |
 
 - **Channels A–D** use the SX1302 concentrator's multi-channel demodulators via the IF chain system.
-- **Channel E** uses the SX1261 companion chip, which was originally only used for spectral scanning and LBT/CAD. Since v2.0.0 it operates as a full RX/TX radio channel. See [`channel_e_sx1261.md`](./channel_e_sx1261.md) for details.
+- **Channel E** uses the SX1261 companion chip, which also performs mandatory CAD (Channel Activity Detection) scans before every TX on all channels, spectral scanning, and optional LBT measurements. Since v2.0.0 it operates as a full RX/TX radio channel. See [`channel_e_sx1261.md`](./channel_e_sx1261.md) for details.
 
 > **Design guideline:** fewer active channels = more stable operation. 4 channels maximum is recommended for optimal performance.
 
@@ -65,10 +65,13 @@ Since v2.0.0 the system operates as a **5-channel platform**:
 │  │  - SX1250 radio control             │  │  - UDP server (:1730)    │  │
 │  │  - TX/RX packet handling            │  │  - PUSH_DATA (RX→UDP)    │  │
 │  │  - AGC management (debounced)       │  │  - PULL_RESP (UDP→TX)    │  │
-│  │  - FEM/LNA register control         │  │  - TX_ACK feedback       │  │
-│  │  - SX1261 spectral scan + RX/TX     │  │  - Spectral scan thread  │  │
-│  │  - Calibration routines             │  │  - Channel E packet I/O  │  │
-│  │  - SPI optimized (16 MHz, 16K burst)│  │  - JSON config loading   │  │
+│  │  - FEM/LNA register control         │  │  - Mandatory CAD before  │  │
+│  │  - SX1261 spectral scan + RX/TX     │  │    every TX (SX1261)     │  │
+│  │  - SX1261 CAD + optional LBT        │  │  - Optional LBT check    │  │
+│  │  - Calibration routines             │  │  - IMMEDIATE TX mode     │  │
+│  │  - SPI optimized (16 MHz, 16K burst)│  │  - Spectral scan thread  │  │
+│  │  - Bulk PRAM write (42ms reload)    │  │  - Channel E packet I/O  │  │
+│  │                                     │  │  - JIT poll (1ms)        │  │
 │  └─────────────────────────────────────┘  └───────────┬──────────────┘  │
 │                                                       │                 │
 └───────────────────────────────────────────────────────┼─────────────────┘
@@ -114,13 +117,16 @@ Since v2.0.0 the system operates as a **5-channel platform**:
 │              │             │              │                             │
 │       ┌──────▼──────┐ ┌───▼────────┐ ┌───▼────────┐                     │
 │       │ TX Queue    │ │ TX Queue   │ │ TX Queue   │  (per channel)      │
-│       │ LBT check   │ │ CAD check  │ │ TTL check  │                     │
-│       │ Overflow mgt│ │ FIFO order │ │ Hold check │                     │
+│       │ TTL check   │ │ FIFO order │ │ Overflow   │                     │
+│       │ Hold check  │ │ Round-robin│ │ management │                     │
 │       └──────┬──────┘ └───┬────────┘ └───┬────────┘                     │
 │              └────────────┴──────────────┘                              │
 │                           │ PULL_RESP (UDP)                             │
 │                           ▼                                             │
-│                    Packet Forwarder → Radio TX                          │
+│                    Packet Forwarder                                     │
+│                    → Mandatory CAD scan (SX1261)                        │
+│                    → Optional LBT check (per channel)                   │
+│                    → IMMEDIATE TX → Radio                               │
 └─────────────────────────────────────────────────────────────────────────┘
                                                         │
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -244,10 +250,13 @@ Bridge Engine decision → Repeater handler (hop +1, path update)
     → TX batch window (2s) → Per-channel TX Queue (async)
     → Fair round-robin scheduling (rotating start index)
     → TTL check (5s max) → Queue overflow check (15 max)
-    → LBT check (per-channel, if enabled)
-    → CAD check (per-channel, requires LBT enabled)
     → PULL_RESP (UDP :1730) → Socket auto-recovery on failure
-    → Packet Forwarder → HAL lgw_send() → SX1250 Radio → RF Transmission
+    → Packet Forwarder JIT queue (1ms poll)
+    → Mandatory CAD scan on SX1261 (37–56 ms)
+        → Clear: proceed to TX
+        → Detected: exponential backoff retry (up to 5×), then force-send
+    → Optional LBT RSSI check (if enabled per channel, ~47 ms)
+    → IMMEDIATE TX → HAL lgw_send() → SX1250 Radio → RF Transmission
     → TX hash stored for self-echo detection
     → TX_ACK feedback → Statistics update
 ```
@@ -348,11 +357,11 @@ This applies to:
 1. **RX availability is the #1 priority** — RX must be available as much of the time as possible
 2. **TX duration must be as short as possible** — minimize time spent transmitting
 3. **TX must be sent ASAP** after a message enters the TX queue — no unnecessary delays
-4. Monitoring tasks (spectral scan, noise floor) must **not block RX or pause TX queues**
-5. The old noise-floor TX hold has been removed; only the **2-second batch window** remains
+4. **Deterministic collision avoidance** — mandatory hardware CAD (37–56 ms) replaces random TX delays
+5. Monitoring tasks (spectral scan, noise floor) must **not block RX or pause TX queues**
+6. All random TX delays set to zero since v2.1.0; CAD handles collision avoidance in the C layer
 
 ## Related Documents
-
 - [`channel_e_sx1261.md`](./channel_e_sx1261.md) — Channel E / SX1261 companion radio
 - [`radio.md`](./radio.md) — Radio architecture and RF behavior
 - [`software.md`](./software.md) — Software components

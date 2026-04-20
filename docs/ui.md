@@ -14,6 +14,10 @@ The UI communicates with the backend via the [WM1303 REST API](./api.md) and rec
 
 ## Tabs
 
+The UI has **5 tabs**: Status, Channels, Bridge, Spectrum, and Adv. Config.
+
+> **v2.1.0 change:** The **Config** tab has been removed. TX Delay Factor has moved to Adv. Config → TX Queue Management.
+
 ### Status Tab
 
 Real-time overview of system health and channel performance:
@@ -38,10 +42,11 @@ Per-channel configuration interface:
 - Coding Rate (4/5–4/8)
 - Preamble length
 - TX Power (dBm)
-- LBT enable + threshold
-- CAD enable (greyed out when LBT is off)
+- LBT enable + threshold (optional, per channel)
 - Active toggle
 - Channel name (display alias only)
+
+> **v2.1.0 change:** The RF0/RF1 information block has been removed from the Channels tab. CAD is now mandatory and always active — there is no CAD toggle in the UI.
 
 #### SX1261 Channel (E)
 Same parameters as above, plus:
@@ -71,8 +76,8 @@ Spectral analysis and channel monitoring charts:
 | **RSSI History** | Per-channel RSSI values over time |
 | **SNR History** | Per-channel SNR values over time |
 | **Noise Floor** | Per-channel noise floor from spectral scan |
-| **CAD Chart** | Per-channel CAD detection events (HW/SW source) |
-| **LBT History** | Per-channel LBT events with threshold visualization |
+| **CAD Activity** | Per-channel CAD results: **Clear** (green) and **Detected** (red) |
+| **LBT History** | Per-channel LBT events with frequency and RSSI values |
 | **TX Activity** | Per-channel TX counts and duty cycle |
 | **Dedup Chart** | Deduplication event visualization |
 
@@ -80,7 +85,15 @@ Channel E is displayed in **orange** across all charts (since v2.0.1).
 
 Extended color palette ensures all 5 channels are visually distinct.
 
-### Advanced Config Tab
+#### v2.1.0 Spectrum Tab Changes
+
+- **Removed 6 stat cards**: SPI Path, SX1261 Role, SX1261 Status, Active Channels, Spectral Scan Status, Noise Floor
+- **Removed header/subtitle**: "📊 Channel E Spectrum & Signal Quality" header removed
+- **CAD Activity chart simplified**: shows only Clear and Detected (removed SW/HW/Skipped distinction)
+- **Info text added**: explanatory note below CAD chart explains that "Detected" means TX was force-sent after all CAD retries
+- **LBT History chart fixed**: frequency and RSSI data now correctly captured (was previously stored as freq=0, rssi=None)
+
+### Adv. Config Tab
 
 Advanced system configuration:
 
@@ -89,6 +102,7 @@ Advanced system configuration:
 | GPIO Pins | Reset, power, SX1261 NSS, AD5338R reset pin assignments |
 | RF Chains | RF0/RF1 center frequencies |
 | IF Chains | Per-IF-chain enable, frequency offset, radio assignment |
+| TX Queue Management | TX delay factor, direct TX delay factor (defaults: 0.0 since v2.1.0) |
 | SPI Settings | Speed, burst size (informational) |
 | System Actions | Restart service, restart pkt_fwd, hardware reset |
 
@@ -97,8 +111,11 @@ Advanced system configuration:
 ### Channel Names Are Aliases
 Channel names shown in the UI are **display aliases only**. Internal logic and API responses use stable channel identifiers (`channel_a` through `channel_e`). Users can rename channels freely without affecting system operation.
 
-### CAD Toggle Dependency
-The CAD toggle for any channel is **greyed out and disabled** when LBT is turned off for that channel. This enforces the rule that CAD only operates when LBT is active. Enabling LBT automatically unlocks the CAD toggle.
+### CAD Is Mandatory (v2.1.0)
+CAD is always active on every TX — there is no user toggle for CAD. The CAD Activity chart in the Spectrum tab shows the results of every mandatory CAD scan.
+
+### LBT Controls
+LBT can be independently enabled/disabled per channel in the Channels tab. When enabled, an RSSI threshold slider appears. LBT is optional and currently recommended to keep disabled (work-in-progress).
 
 ### Configuration Persistence
 - UI changes are saved to `wm1303_ui.json` (SSOT) via the API
@@ -117,6 +134,9 @@ Since v2.0.5, the Channel E bandwidth dropdown is limited to **62.5 kHz** only. 
 
 ### RX Boost
 The RX Boost toggle (Channel E) enables enhanced RX sensitivity on the SX1261. It is positioned before the Active toggle for better workflow (since v2.0.0).
+
+### Hard Refresh After Upgrade
+After every upgrade, perform a **hard browser refresh** (Ctrl+Shift+R or Ctrl+F5) to ensure the updated UI assets are loaded.
 
 ## Technology Stack
 
@@ -145,3 +165,4 @@ Screenshots of the interface are available in the `/screenshots/` directory:
 - [`api.md`](./api.md) — REST API reference
 - [`configuration.md`](./configuration.md) — Configuration files
 - [`lbt_cad.md`](./lbt_cad.md) — LBT/CAD behavior and UI interaction
+- [`tx_queue.md`](./tx_queue.md) — TX queue system

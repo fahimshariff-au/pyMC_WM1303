@@ -11,7 +11,7 @@ The WM1303 Pi HAT contains the following radio components:
 | **SX1302** | Baseband processor | `/dev/spidev0.0` | 8 IF demodulators, AGC, timestamp engine |
 | **SX1250_0** (RF0) | Front-end radio 0 | via SX1302 | TX + RX, center freq configurable |
 | **SX1250_1** (RF1) | Front-end radio 1 | via SX1302 | RX only, center freq configurable |
-| **SX1261** | Companion radio | `/dev/spidev0.1` | Full RX/TX, spectral scan, LBT, CAD |
+| **SX1261** | Companion radio | `/dev/spidev0.1` | Mandatory CAD before every TX, spectral scan, LBT, full RX/TX (Channel E) |
 
 ## 5-Channel Model
 
@@ -43,7 +43,8 @@ Channel E uses the SX1261 companion chip directly:
 
 - Fully independent RF path from the concentrator
 - Supports **sub-125 kHz bandwidths** (e.g., 62.5 kHz) — unique capability
-- Also used for spectral scanning, LBT measurements, and CAD when not actively receiving/transmitting
+- Also performs **mandatory CAD scans** before every TX (all channels), spectral scanning, and optional LBT measurements
+- CAD timing is longer on Channel E (~47–56 ms vs ~37–43 ms for Channels A–D) due to narrower bandwidth requiring more symbols for preamble detection
 - See [`channel_e_sx1261.md`](./channel_e_sx1261.md) for full details
 
 ## RF Chain Configuration
@@ -94,6 +95,20 @@ The WM1303 system is **not compatible with LoRaWAN** in its current configuratio
 - Different packet format
 - No LoRaWAN MAC layer
 - The concentrator hardware is LoRaWAN-capable but repurposed for MeshCore
+
+## SPI Bus Architecture
+
+The radio components use separate SPI buses:
+
+| Bus | Device | Clock Speed | Used For |
+|-----|--------|-------------|----------|
+| `/dev/spidev0.0` | SX1302 + SX1250s | Standard | RX data, TX commands, concentrator control |
+| `/dev/spidev0.1` | SX1261 | ~2 MHz | CAD scans, spectral scan, LBT, Channel E RX/TX, PRAM upload |
+
+The ~2 MHz SPI clock for the SX1261 provides sufficient bandwidth for the current implementation:
+- Bulk PRAM write (1546 bytes) completes in ~42 ms
+- CAD setup and result reads are single-register operations
+- The separate bus means SX1261 operations (CAD, spectral scan) do not block SX1302 RX data transfer
 
 ## Noise Floor Monitoring
 
@@ -154,3 +169,4 @@ The bridge engine maintains a 15-second hash cache to catch the same packet rece
 - [`lbt_cad.md`](./lbt_cad.md) — LBT and CAD behavior
 - [`tx_queue.md`](./tx_queue.md) — TX queue system
 - [`hardware.md`](./hardware.md) — Hardware details
+- [`configuration.md`](./configuration.md) — Configuration reference

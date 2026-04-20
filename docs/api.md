@@ -26,7 +26,7 @@ Returns the current system status including all channel statistics.
 ```json
 {
   "status": "running",
-  "version": "2.0.5",
+  "version": "2.1.0",
   "uptime": 86400,
   "pkt_fwd_status": "running",
   "channels": {
@@ -73,7 +73,7 @@ Simple health check endpoint.
 
 **Response:**
 ```json
-{ "ok": true, "version": "2.0.5" }
+{ "ok": true, "version": "2.1.0" }
 ```
 
 ## Channel Configuration Endpoints
@@ -98,7 +98,7 @@ Update a channel's configuration.
   "coding_rate": 8,
   "preamble": 32,
   "tx_power": 20,
-  "lbt_enabled": true,
+  "lbt_enabled": false,
   "lbt_threshold": -75,
   "cad_enabled": true,
   "active": true,
@@ -186,8 +186,10 @@ Returns CAD event history.
 
 **Response includes:**
 - Per-channel CAD events with timestamps
-- Hardware vs software detection source
-- Event count per channel
+- **Clear** and **Detected** counts per channel
+- Detected means activity was found on all 5 CAD retries and the packet was force-sent
+
+> **v2.1.0 change:** The previous HW/SW source distinction has been removed. CAD now reports only Clear and Detected outcomes. The orphaned `/api/wm1303/cad_history` endpoint (which read from `spectrum_history.db`) has been removed.
 
 ### GET `/api/wm1303/spectrum/lbt`
 

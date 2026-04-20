@@ -6,6 +6,8 @@
 
 The WM1303 system uses **per-channel TX queues** managed by a `GlobalTXScheduler`. Each active channel (A–E) has its own queue instance that handles buffering, gating, and fair transmission scheduling.
 
+Since v2.1.0, the TX pipeline includes mandatory hardware CAD (Channel Activity Detection) in the packet forwarder's C layer, with all random TX delays eliminated.
+
 ## Architecture
 
 ```
@@ -18,8 +20,11 @@ Bridge Engine → TX batch window (2s)
         └── Channel E Queue
     → GlobalTXScheduler
         → Fair round-robin scheduling
-        → Per-queue gating (LBT, CAD, TTL, overflow)
-        → PULL_RESP (UDP :1730) → Packet Forwarder → Radio TX
+        → Per-queue gating (TTL, overflow)
+        → PULL_RESP (UDP :1730) → Packet Forwarder (C)
+            → Mandatory CAD scan (SX1261)
+            → Optional LBT check (if enabled per channel)
+            → IMMEDIATE TX → Radio
 ```
 
 ## Queue Parameters
@@ -29,7 +34,28 @@ Bridge Engine → TX batch window (2s)
 | Max queue depth | 15 packets | Per channel |
 | TTL per packet | 5 seconds | Packet expires if not sent within this time |
 | TX batch window | 2 seconds | Group bridge sends for concurrent queuing |
-| Queue depth hold | 100ms | Brief dedup window when 1 packet pending |
+| Queue depth hold | 100 ms | Brief dedup window when 1 packet pending |
+| TX delay factor | 0.0 (default) | Random pre-TX jitter; set to 0 since v2.1.0 |
+
+## TX Pipeline (v2.1.0)
+
+The full TX path from enqueue to air:
+
+1. **Bridge Engine** enqueues packet to the appropriate channel queue
+2. **TX batch window** (2s) groups concurrent bridge sends
+3. **GlobalTXScheduler** picks the next packet via round-robin
+4. **Python gating checks**: TTL expiry, queue overflow
+5. **PULL_RESP** sends packet to the packet forwarder via UDP (:1730)
+6. **Packet forwarder (C)**: mandatory CAD scan on SX1261 → optional LBT → IMMEDIATE TX
+7. **Radio TX** on SX1302 (Channels A–D) or SX1261 (Channel E)
+
+### Python → C Overhead
+
+The handoff from Python to C has been optimized from **~62 ms** to **~8 ms** queue wait time, achieved by:
+
+- JIT thread poll interval reduced from 10 ms to **1 ms**
+- Redundant hardware status checks eliminated
+- Mutex locks consolidated
 
 ## Scheduling
 
@@ -45,16 +71,49 @@ The `GlobalTXScheduler` uses a **rotating start index** to ensure fair access ac
 
 This prevents one busy channel from starving others.
 
-### Gating Checks (Per-Packet)
+### Gating Checks
 
-Before each TX, the queue performs these checks in order:
+Gating is split between the Python TX queue and the C packet forwarder:
+
+#### Python-Level (TX Queue)
 
 | # | Check | Action on Fail |
 |---|-------|----------------|
 | 1 | **TTL** | Packet expired → discard |
 | 2 | **Queue overflow** | Queue full → discard oldest |
-| 3 | **LBT** (if enabled) | Channel busy → retry later |
-| 4 | **CAD** (if LBT+CAD enabled) | LoRa activity detected → retry later |
+
+#### C-Level (Packet Forwarder)
+
+| # | Check | Action on Fail |
+|---|-------|----------------|
+| 3 | **CAD** (mandatory) | LoRa preamble detected → retry with exponential backoff (up to 5×) → force-send |
+| 4 | **LBT** (optional, per channel) | RSSI above threshold → delay TX |
+
+See [`lbt_cad.md`](./lbt_cad.md) for full details on CAD and LBT behavior.
+
+### RF-Chain Guard
+
+The shared RF-chain guard prevents TX on different channels from overlapping:
+
+| Version | Guard | Timing |
+|---------|-------|--------|
+| Before v2.1.0 | Static | 50 ms |
+| v2.1.0+ | Dynamic | airtime + 250 ms |
+
+The dynamic guard calculates the actual packet airtime and adds a 250 ms margin, preventing both premature and unnecessarily long guard periods.
+
+## TX Delay Elimination
+
+Since v2.1.0, mandatory CAD handles collision avoidance, replacing all random TX delays:
+
+| Parameter | Before | After (v2.1.0) |
+|-----------|--------|----------------|
+| `tx_delay_factor` | 1.0 | **0.0** |
+| `direct_tx_delay_factor` | 0.5 | **0.0** |
+| Per-rule `tx_delay_ms` | variable | **0 ms** |
+| Python airtime guard | duplicated | **removed** |
+
+Users can still increase `tx_delay_factor` in **Adv. Config → TX Queue Management** for specific use cases.
 
 ## TX Batch Window
 
@@ -65,25 +124,25 @@ When the Bridge Engine forwards a packet to multiple target channels, it uses a 
 3. After 2 seconds, all queued packets are eligible for scheduling
 4. This groups related forwards for efficient multi-channel TX
 
-## TX Hold History
+## TX Hold Behavior
 
-The TX hold model has evolved:
+| Hold Type | Status | Duration | Purpose |
+|-----------|--------|----------|---------|
+| **CAD scan** | ✅ Mandatory | 37–56 ms | Hardware preamble detection (C layer) |
+| **CAD retry backoff** | ✅ Active (on detection) | 100–1600 ms (exponential) | Wait for channel to clear |
+| **LBT check** | ⚙️ Optional (per channel) | ~47 ms when enabled | RSSI-based channel assessment |
+| TX batch window | ✅ Active | 2 seconds | Group concurrent bridge sends |
+| Queue depth hold | ✅ Active | 100 ms (1 pkt) to 2 s (batch) | Brief dedup window |
+| Noise floor hold | ❌ Removed | — | Was: pause TX for noise measurement |
 
-| Version | Hold Type | Duration | Status |
-|---------|-----------|----------|--------|
-| Early | Noise floor hold | ~4 seconds | ❌ **Removed** |
-| Early | TX batch window | 2 seconds | ✅ Active |
-| Current | LBT/CAD gating | Variable | ✅ Active (per-channel) |
-| Current | Queue depth hold | 100ms | ✅ Active |
-
-The noise floor hold was removed because it violated the "TX ASAP" design principle and was unnecessary — the SX1261 spectral scan runs on a separate SPI bus.
+The noise floor hold was removed because it violated the "TX ASAP" design principle — the SX1261 spectral scan runs on a separate SPI bus and the NoiseFloorMonitor now waits for TX-free windows with retry logic.
 
 ## Noise Floor Integration
 
 Each TX queue receives per-channel noise floor values from the NoiseFloorMonitor:
 
 - Values stored in a rolling buffer (20 samples)
-- Used for LBT threshold comparison
+- Used for LBT threshold comparison (when LBT is enabled)
 - Updated every 30 seconds (monitor interval)
 - **Does NOT pause the queue** — values are fed asynchronously
 
@@ -97,12 +156,24 @@ Per-channel TX statistics tracked:
 | `tx_dropped_ttl` | Packets expired before send |
 | `tx_dropped_overflow` | Packets dropped due to full queue |
 | `tx_lbt_blocked` | TX attempts blocked by LBT |
-| `tx_cad_blocked` | TX attempts blocked by CAD |
+| `tx_cad_detected` | CAD detections (retried, then force-sent) |
 | `tx_duty_cycle` | Cumulative TX duty cycle (sum across channels sharing an RF chain) |
 
 ### Duty Cycle Calculation
 
-Since Channels A–D share the SX1250 RF chain, the TX duty cycle is the **sum** of all individual channel duty cycles (fixed in v2.0.0 — was previously averaged).
+Since Channels A–D share the SX1250 RF chain, the TX duty cycle is the **sum** of all individual channel duty cycles.
+
+## Packet Activity Recording
+
+TX events (including CAD results, LBT checks, and packet delivery) are recorded by the `_packet_activity_recorder` in `repeater.db`:
+
+| Table | Data |
+|-------|------|
+| `packet_activity` | Per-packet TX events with timing and channel info |
+| `cad_events` | Per-channel CAD clear/detected counts |
+| `dedup_events` | Deduplication statistics |
+
+All data is automatically cleaned up after **8 days** (retention policy).
 
 ## Socket Recovery
 
@@ -118,15 +189,16 @@ Channel E TX follows the same queue model but uses the SX1261 radio path:
 
 - Supports sub-125 kHz bandwidths (62.5 kHz)
 - TX power configurable per channel
-- LBT/CAD via SX1261 direct measurement
+- CAD scan timing is longer (~47–56 ms vs ~37–43 ms) due to narrower bandwidth
+- Same mandatory CAD + optional LBT flow as Channels A–D
 
 ## Design Principles
 
-1. **TX ASAP** — Minimize delay between enqueue and actual transmission
-2. **RX priority** — Never block RX for TX operations
-3. **Fairness** — No channel should starve others
+1. **TX ASAP** — Zero random delays; CAD overhead is deterministic and minimal (37–56 ms)
+2. **RX priority** — CAD + TX duration minimized to restore RX as quickly as possible
+3. **Fairness** — Round-robin scheduling prevents channel starvation
 4. **Safety** — TTL and overflow prevent unbounded queue growth
-5. **Compliance** — LBT/CAD support EU regulatory requirements
+5. **Deterministic collision avoidance** — Hardware CAD replaces random delays
 
 ## Related Documents
 
@@ -134,3 +206,4 @@ Channel E TX follows the same queue model but uses the SX1261 radio path:
 - [`radio.md`](./radio.md) — Radio architecture
 - [`architecture.md`](./architecture.md) — System architecture
 - [`software.md`](./software.md) — Software components
+- [`configuration.md`](./configuration.md) — Configuration reference

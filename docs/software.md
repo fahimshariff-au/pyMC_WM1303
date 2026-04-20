@@ -32,10 +32,12 @@ Modified HAL library (v2.10 base). Key overlay changes:
 | File | Changes |
 |------|---------|
 | `loragw_hal.c` / `.h` | Updated initialization, channel management, Channel E support |
-| `loragw_sx1261.c` / `.h` | Extended SX1261 driver for full RX/TX (not just scan/LBT) |
+| `loragw_sx1261.c` / `.h` | Extended SX1261 driver: full RX/TX, hardware CAD, GPIO reset, bulk PRAM write |
 | `loragw_sx1302.c` / `.h` | Updated concentrator interface |
 | `loragw_spi.c` / `.h` | **SPI optimizations** — 16 MHz clock, 16 KB burst chunks |
+| `loragw_lbt.c` / `.h` | Custom per-channel LBT with real RSSI measurement |
 | `loragw_aux.c` | Added `BW_62K5HZ` bandwidth support for Channel E |
+| `sx1261_spi.c` | SX1261 SPI communication layer (added in v2.1.0 overlay) |
 | `sx1261_defs.h` | Updated register definitions |
 | `capture_thread.c` / `.h` | CAPTURE_RAM streaming thread (disabled to avoid SPI contention) |
 
@@ -43,6 +45,15 @@ Modified HAL library (v2.10 base). Key overlay changes:
 
 Modified packet forwarder. Key changes:
 
+- **Mandatory CAD before every TX** (since v2.1.0) — hardware LoRa preamble detection on SX1261
+  - Exponential backoff retry (100→1600 ms, up to 5 retries) on detection, then force-send
+  - SX1261/SX1302 interference resolved via abort+delay+standby sequence
+  - GPIO hardware reset with bulk PRAM reload (~42 ms) after each CAD scan
+  - IMMEDIATE TX mode (replaces TIMESTAMPED) to prevent stale timestamp issues
+  - TX abort on stuck FSM (`TX_SCHEDULED` 0x91 state detection)
+- **Optional per-channel LBT** — RSSI-based check after CAD (when enabled)
+- **JIT thread poll interval: 1 ms** (reduced from 10 ms in v2.1.0)
+- **Dynamic RF-chain guard** — airtime + 250 ms (replaces static 50 ms)
 - Channel E packet handling (SX1261 RX/TX integration)
 - Spectral scan thread with configurable pacing (`pace_s=1`, `nb_scan=100`)
 - UDP server on port 1730 (PUSH_DATA for RX, PULL_RESP for TX, TX_ACK for feedback)
@@ -87,11 +98,12 @@ Per-channel TX queue system (~668 lines):
 - FIFO ordering with fair round-robin scheduling across channels
 - TTL check (5s max per packet)
 - Queue overflow management (15 packets max)
-- LBT check (per-channel, when enabled)
-- CAD check (per-channel, requires LBT to be enabled)
-- TX batch window (2s) — the only remaining intentional TX hold
+- TX batch window (2s) for grouping concurrent bridge sends
 - Rotating start index for fair multi-channel scheduling
 - Noise floor values fed from NoiseFloorMonitor for LBT decisions
+- All random TX delays set to zero since v2.1.0 (CAD handles collision avoidance in C layer)
+
+> **Note:** CAD and LBT checks have moved from the Python TX queue to the C packet forwarder in v2.1.0. The Python layer handles TTL, overflow, and scheduling; the C layer handles CAD and LBT.
 
 See [`tx_queue.md`](./tx_queue.md) for detailed documentation.
 
@@ -169,7 +181,9 @@ See [`api.md`](./api.md) for endpoint documentation.
 
 ### Spectrum Collector (`spectrum_collector.py`)
 
-Collects and serves spectral scan data (~275 lines) for the Spectrum tab charts.
+Collects and serves spectral scan data for the Spectrum tab charts.
+
+> **v2.1.0 change:** Orphaned CAD/LBT log parsers have been removed from `spectrum_collector.py`. CAD and LBT chart data is now sourced exclusively from Python-level statistics recorded by `_packet_activity_recorder` in `repeater.db`. The orphaned `/api/wm1303/cad_history` endpoint has also been removed.
 
 ### CAD Calibration Engine (`cad_calibration_engine.py`)
 
@@ -179,11 +193,13 @@ CAD parameter calibration support for optimal activity detection.
 
 Single-page web application with:
 
-- Status tab — channel statistics, signal quality, system info
-- Channels tab — per-channel configuration
-- Bridge tab — bridge rules management
-- Spectrum tab — spectral scan, CAD, LBT, noise floor charts
-- Advanced Config tab — GPIO, RF chains, IF chains, advanced parameters
+- **Status** tab — channel statistics, signal quality, system info
+- **Channels** tab — per-channel configuration (including LBT enable/threshold per channel)
+- **Bridge** tab — bridge rules management
+- **Spectrum** tab — spectral scan, CAD Activity (Clear/Detected), LBT History, noise floor charts
+- **Adv. Config** tab — GPIO, RF chains, IF chains, TX queue management, advanced parameters
+
+> **v2.1.0 change:** The **Config** tab has been removed. TX Delay Factor has moved to Adv. Config → TX Queue Management.
 
 See [`ui.md`](./ui.md).
 
@@ -221,15 +237,26 @@ systemd → pymc-repeater.service
 
 ## Database
 
-SQLite database for persistent storage:
+SQLite databases for persistent storage:
+
+### repeater.db (8-day retention)
 
 | Table | Purpose |
 |-------|---------|
-| `noise_floor_history` | Per-channel noise floor snapshots |
-| `cad_events` | CAD detection events |
+| `packet_activity` | Per-packet TX events with timing and channel info |
+| `cad_events` | Per-channel CAD clear/detected counts |
+| `noise_floor` / `noise_floor_history` | Per-channel noise floor snapshots |
 | `dedup_events` | Bridge dedup/echo event history |
 | `channel_stats` | Periodic channel counter snapshots |
 | Standard pymc_repeater tables | Nodes, messages, etc. |
+
+### spectrum_history.db (7-day retention)
+
+| Table | Purpose |
+|-------|---------|
+| `spectrum_scans` | Spectral scan data from SX1261 |
+
+> **v2.1.0 change:** Clean data architecture — each chart has exactly one data source. CAD and LBT chart data comes from `repeater.db` only. Spectral scan data remains in `spectrum_history.db`.
 
 ## Related Documents
 
