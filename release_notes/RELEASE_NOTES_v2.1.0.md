@@ -2,7 +2,7 @@
 
 **Release Date:** 2026-04-20  
 **Previous Version:** v2.0.6  
-**Upgrade:** Run `upgrade.sh` — HAL recompilation is required for this release
+**Upgrade:** Use the bootstrap one-liner — HAL recompilation is handled automatically
 
 ---
 
@@ -191,13 +191,14 @@ All chart data is automatically cleaned up:
 
 ## Upgrade Instructions
 
-```bash
-cd ~/pyMC_WM1303 && git pull && sudo bash upgrade.sh
-```
-
-Or use the bootstrap one-liner:
+Use the bootstrap one-liner (automatically detects install vs upgrade):
 ```bash
 curl -sL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
+```
+
+Or manually from an existing installation:
+```bash
+cd ~/pyMC_WM1303 && git pull && sudo bash upgrade.sh
 ```
 
 After upgrade, perform a **hard refresh** (Ctrl+F5) in the browser to load the updated UI.
