@@ -76,9 +76,9 @@ Spectral analysis and channel monitoring charts:
 | **RSSI History** | Per-channel RSSI values over time |
 | **SNR History** | Per-channel SNR values over time |
 | **Noise Floor** | Per-channel noise floor from spectral scan |
+| **Channel Activity** | Combined TX counts and RX Origin counts per channel (merged chart since v2.1.1) |
 | **CAD Activity** | Per-channel CAD results: **Clear** (green) and **Detected** (red) |
 | **LBT History** | Per-channel LBT events with frequency and RSSI values |
-| **TX Activity** | Per-channel TX counts and duty cycle |
 | **Dedup Chart** | Deduplication event visualization |
 
 Channel E is displayed in **orange** across all charts (since v2.0.1).
@@ -92,6 +92,11 @@ Extended color palette ensures all 5 channels are visually distinct.
 - **CAD Activity chart simplified**: shows only Clear and Detected (removed SW/HW/Skipped distinction)
 - **Info text added**: explanatory note below CAD chart explains that "Detected" means TX was force-sent after all CAD retries
 - **LBT History chart fixed**: frequency and RSSI data now correctly captured (was previously stored as freq=0, rssi=None)
+
+#### v2.1.1 Spectrum Tab Changes
+
+- **Channel Activity chart merged**: TX Activity per Channel renamed to **Channel Activity**; now shows both TX counts (light colors, solid border) and RX Origin counts (dark semi-transparent, dashed border) on the same timeline
+- **Signal History default changed**: Time range selector defaults to **1h** instead of 24h for a more responsive initial view
 
 ### Adv. Config Tab
 
@@ -107,6 +112,10 @@ Advanced system configuration:
 | System Actions | Restart service, restart pkt_fwd, hardware reset |
 
 ## UI Behavior Notes
+
+### v2.1.1 UI Bug Fixes
+
+- **SF? display fix**: Added `normCh()` JavaScript function that normalizes legacy field names (`sf`→`spreading_factor`, `bw`→`bandwidth`, `cr`→`coding_rate`) on every data load. Prevents "SF?" display in channel configuration cards when the underlying JSON uses legacy field names.
 
 ### Channel Names Are Aliases
 Channel names shown in the UI are **display aliases only**. Internal logic and API responses use stable channel identifiers (`channel_a` through `channel_e`). Users can rename channels freely without affecting system operation.

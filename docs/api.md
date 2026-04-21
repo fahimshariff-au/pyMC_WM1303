@@ -26,7 +26,7 @@ Returns the current system status including all channel statistics.
 ```json
 {
   "status": "running",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "uptime": 86400,
   "pkt_fwd_status": "running",
   "channels": {
@@ -73,7 +73,7 @@ Simple health check endpoint.
 
 **Response:**
 ```json
-{ "ok": true, "version": "2.1.0" }
+{ "ok": true, "version": "2.1.1" }
 ```
 
 ## Channel Configuration Endpoints
@@ -194,6 +194,38 @@ Returns CAD event history.
 ### GET `/api/wm1303/spectrum/lbt`
 
 Returns LBT event history.
+
+## Origin Channel Metrics (v2.1.1)
+
+### GET `/api/wm1303/origin_stats`
+
+Returns per-channel origin statistics — how many packets each channel sources for the repeater.
+
+**Query parameters:**
+- `hours` — Time window in hours (default: 24)
+
+**Response:**
+```json
+{
+  "period_hours": 24,
+  "channels": {
+    "channel_a": [
+      { "timestamp": "2026-04-20T10:00:00", "count": 42 },
+      { "timestamp": "2026-04-20T10:10:00", "count": 38 }
+    ],
+    "channel_e": [
+      { "timestamp": "2026-04-20T10:00:00", "count": 15 },
+      { "timestamp": "2026-04-20T10:10:00", "count": 12 }
+    ]
+  }
+}
+```
+
+**Details:**
+- Data is stored in 10-minute buckets in the `origin_channel_stats` SQLite table
+- Counters are flushed from in-memory to SQLite every 60 seconds
+- Automatic retention cleanup removes data older than 8 days
+- Used by the **Channel Activity** chart in the Spectrum tab (RX Origin bars)
 
 ## Deduplication Endpoints
 

@@ -1,7 +1,7 @@
 # TODO — pyMC WM1303 Bridge/Repeater
 
 > List of open and completed tasks with description of content and motivation.
-> Last updated: 2026-04-20
+> Last updated: 2026-04-20 (v2.1.1)
 
 ---
 
@@ -254,3 +254,11 @@ The comprehensive documentation (item #24) should cover the following topics, or
 | 155 | **File structure cleanup** | `_tools/` directory removed from repo. `scripts/` directory removed (was empty). `upgrade_bootstrap.sh` removed. Release notes moved to `release_notes/` directory. |
 | 157 | **Origin-channel-first TX priority** | When a packet is received on channel X and forwarded through the repeater to multiple channels via bridge rules, channel X now gets TX priority (sent first). This ensures the origin channel's listeners get the fastest repeat. Implementation: `bridge_engine.py` tracks `origin_channel` through `inject_packet()` and `_forward_by_rules()`, `main.py` `_bridge_repeater_handler()` passes `origin_channel` from the bridge-to-repeater call through to the re-injection. Radio sends are reordered so the origin channel is first, remaining channels keep their existing rule order. The GlobalTXScheduler round-robin fairness is unaffected. |
 | 156 | **v2.1.0 documentation update** | All documentation files updated for v2.1.0: `lbt_cad.md` (major rewrite for mandatory CAD), `tx_queue.md`, `radio.md`, `configuration.md`, `installation.md`, `architecture.md`, `software.md`, `hardware.md`, `api.md`, `ui.md`, `repositories.md`, `channel_e_sx1261.md`, `README.md`, `TODO.md`. |
+| 158 | **CAD retry delay optimization** | Changed C-level CAD retry delays in `lora_pkt_fwd.c` from exponential backoff (100→200→400→800→1600 ms, worst-case 3100 ms) to fixed values (50→100→200→300→400 ms, worst-case 1050 ms). 66% reduction in worst-case TX delay while maintaining 5 retry attempts. |
+| 159 | **Python pre-TX check removed** | Set `lbt_check=None` in `wm1303_backend.py`. The Python-side software LBT/CAD pre-check (Laag 1) was a legacy workaround from before the C-level CAD+LBT was working. Now only the C-level hardware CAD+LBT check remains. Simplified TX pipeline from 2 layers to 1, reducing worst-case TX delay from ~8.1s to ~1.05s. |
+| 160 | **Origin channel metrics** | In-memory per-channel origin counters in `bridge_engine.py`, periodic 60s flush to SQLite `origin_channel_stats` table (8-day retention), new API endpoint `GET /api/wm1303/origin_stats?hours=N`, and merged 'Channel Activity' chart in the Spectrum tab showing both TX and RX Origin data on the same timeline. |
+| 161 | **SF? display bug fix** | Added `normCh()` JavaScript function in `wm1303.html` that normalizes legacy field names (`sf`→`spreading_factor`, `bw`→`bandwidth`, `cr`→`coding_rate`) on every data load. Prevents "SF?" display in channel cards when config uses legacy field names. |
+| 162 | **RRDtool venv fix** | Added symlink step for system `rrdtool.so` into the Python venv in both `install.sh` and `upgrade.sh`. Fixes `rrdtool` module unavailability in Python 3.13 venvs due to C-extension incompatibility. |
+| 163 | **Signal History default changed** | Changed Signal History (📈) time range selector default from 24h to 1h for a more responsive initial view. |
+| 164 | **Legacy field normalization** | Added normalization step to both `install.sh` and `upgrade.sh` that cleans up legacy field names (`sf`→`spreading_factor`, `bw`→`bandwidth`, `cr`→`coding_rate`) in `wm1303_ui.json`. Also fixed the template `config/wm1303_ui.json`. Prevents "SF?" display and ensures consistent field naming. |
+| 165 | **v2.1.1 documentation update** | All documentation files updated for v2.1.1: `README.md`, `TODO.md`, `tx_queue.md`, `lbt_cad.md`, `architecture.md`, `ui.md`, `installation.md`, `configuration.md`, `api.md`. |

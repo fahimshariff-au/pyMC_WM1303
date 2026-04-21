@@ -111,9 +111,9 @@ Since v2.0.0 the system operates as a **5-channel platform**:
 │  │  3. Bridge rules evaluation (source → target mapping)           │    │
 │  │  4. Repeater handler (hop count +1, path bytes update)          │    │
 │  │  5. Packet-type filtering (per rule)                            │    │
-│  │  6. TX batch window (2s) for concurrent queuing                 │    │
-│  │  7. Fire sends to all target channel TX queues                  │    │
-│  └───────────┬─────────────┬──────────────┬────────────────────────┘    │
+│  │  6. Origin-channel-first TX priority (v2.1.1)                   │    │
+│  │  7. TX batch window (2s) for concurrent queuing                 │    │
+│  │  8. Fire sends to all target channel TX queues                  │    │
 │              │             │              │                             │
 │       ┌──────▼──────┐ ┌───▼────────┐ ┌───▼────────┐                     │
 │       │ TX Queue    │ │ TX Queue   │ │ TX Queue   │  (per channel)      │
@@ -247,6 +247,7 @@ RF Signal → Antenna → SX1261 Radio → HAL sx1261_receive()
 
 ```
 Bridge Engine decision → Repeater handler (hop +1, path update)
+    → Origin-channel-first reordering (v2.1.1)
     → TX batch window (2s) → Per-channel TX Queue (async)
     → Fair round-robin scheduling (rotating start index)
     → TTL check (5s max) → Queue overflow check (15 max)
@@ -254,12 +255,14 @@ Bridge Engine decision → Repeater handler (hop +1, path update)
     → Packet Forwarder JIT queue (1ms poll)
     → Mandatory CAD scan on SX1261 (37–56 ms)
         → Clear: proceed to TX
-        → Detected: exponential backoff retry (up to 5×), then force-send
+        → Detected: fixed delay retry (50→100→200→300→400 ms, up to 5×), then force-send
     → Optional LBT RSSI check (if enabled per channel, ~47 ms)
     → IMMEDIATE TX → HAL lgw_send() → SX1250 Radio → RF Transmission
     → TX hash stored for self-echo detection
     → TX_ACK feedback → Statistics update
 ```
+
+> **v2.1.1 changes:** Origin-channel-first TX priority ensures repeated packets are sent to the originating channel first. CAD retry delays optimized from exponential backoff (worst-case 3100 ms) to fixed values (worst-case 1050 ms). Python pre-TX software check removed — C-level CAD+LBT is the sole channel assessment mechanism.
 
 ### Spectral Scan Path
 
@@ -360,6 +363,8 @@ This applies to:
 4. **Deterministic collision avoidance** — mandatory hardware CAD (37–56 ms) replaces random TX delays
 5. Monitoring tasks (spectral scan, noise floor) must **not block RX or pause TX queues**
 6. All random TX delays set to zero since v2.1.0; CAD handles collision avoidance in the C layer
+7. **Origin-channel-first TX priority** (v2.1.1) — repeated packets prioritize the originating channel
+8. **Single-layer TX pipeline** (v2.1.1) — Python pre-TX check removed; C-level CAD+LBT is the sole mechanism
 
 ## Related Documents
 - [`channel_e_sx1261.md`](./channel_e_sx1261.md) — Channel E / SX1261 companion radio

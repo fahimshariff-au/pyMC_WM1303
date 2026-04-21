@@ -46,7 +46,7 @@ Modified HAL library (v2.10 base). Key overlay changes:
 Modified packet forwarder. Key changes:
 
 - **Mandatory CAD before every TX** (since v2.1.0) — hardware LoRa preamble detection on SX1261
-  - Exponential backoff retry (100→1600 ms, up to 5 retries) on detection, then force-send
+  - Fixed delay retry (50→100→200→300→400 ms, up to 5 retries, worst-case 1050 ms) on detection, then force-send
   - SX1261/SX1302 interference resolved via abort+delay+standby sequence
   - GPIO hardware reset with bulk PRAM reload (~42 ms) after each CAD scan
   - IMMEDIATE TX mode (replaces TIMESTAMPED) to prevent stale timestamp issues

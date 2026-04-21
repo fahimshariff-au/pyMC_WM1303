@@ -109,6 +109,8 @@ Each channel is configured with:
 | `active` | Channel active/inactive | `true` |
 | `name` | Display alias (not used as ID) | `"SF12-868"` |
 
+> **v2.1.1 note:** Legacy field names (`sf`, `bw`, `cr`) are automatically normalized to standard names (`spreading_factor`, `bandwidth`, `coding_rate`) during installation and upgrade. The UI also normalizes these on every data load via the `normCh()` function. Always use the full field names in new configurations.
+
 ### Channel E (SX1261)
 
 Channel E has additional parameters:
@@ -201,6 +203,12 @@ The upgrade script (triggered via `bootstrap.sh` or `upgrade.sh`):
 - **New DB tables created**: `packet_activity`, `cad_events` in `repeater.db`
 - **Orphaned data cleanup**: removes orphaned `lbt_events` and `cad_events` from `spectrum_history.db` (data now resides in `repeater.db`)
 - **Hard browser refresh required**: Ctrl+Shift+R or Ctrl+F5 after every upgrade to load updated UI assets
+
+### v2.1.1 Upgrade-Specific Changes
+
+- **Legacy field normalization**: `sf`→`spreading_factor`, `bw`→`bandwidth`, `cr`→`coding_rate` in `wm1303_ui.json` (both install and upgrade scripts)
+- **RRDtool symlink**: system `rrdtool.so` symlinked into Python venv for Python 3.13 compatibility
+- **Origin channel stats table**: new `origin_channel_stats` table created in `repeater.db`
 
 ## TX Queue Management (Advanced Config)
 

@@ -22,9 +22,11 @@ Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel
 ## Key Features
 
 - **Multi-channel bridging** — Route packets between channels with configurable rules
+- **Origin-channel-first TX priority** — Repeated packets are sent to the originating channel first
 - **Channel E / SX1261** — Full RX/TX on the companion radio with 62.5 kHz bandwidth support
 - **Per-channel TX queues** — FIFO with fair round-robin scheduling and mandatory CAD
 - **3-layer deduplication** — Self-echo, multi-demod, and cross-channel hash dedup
+- **Single-layer hardware CAD** — Mandatory C-level CAD before every TX with optimized retry delays (worst-case 1.05s)
 - **Spectral scan & noise floor** — Continuous monitoring via SX1261 without blocking TX
 - **Web management UI** — Real-time status, channel config, bridge rules, spectrum charts
 - **REST API + WebSocket** — Full programmatic control with real-time event streaming

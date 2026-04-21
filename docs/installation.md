@@ -97,12 +97,14 @@ This is the core of the overlay strategy — upstream repos are not modified, on
 - Installs pyMC_core (dev) in development mode
 - Installs pyMC_Repeater (dev) in development mode
 - Installs Python dependencies
+- Symlinks system `rrdtool.so` into the venv `site-packages` (since v2.1.1 — works around Python 3.13 C-extension incompatibility)
 
 #### Step 10: Copy Configuration Files
 - `config.yaml.template` → `/etc/pymc_repeater/config.yaml`
 - `wm1303_ui.json` → `/etc/pymc_repeater/wm1303_ui.json`
 - `reset_lgw.sh` and `power_cycle_lgw.sh` → `/home/pi/wm1303_pf/`
 - GPIO reset and power cycle scripts
+- Normalizes legacy field names in `wm1303_ui.json` (`sf`→`spreading_factor`, `bw`→`bandwidth`, `cr`→`coding_rate`) — since v2.1.1
 
 #### Step 11: Install and Enable systemd Service
 - Copies `pymc-repeater.service` to `/etc/systemd/system/`
@@ -220,6 +222,13 @@ A reboot is recommended after upgrades that change SPI configuration.
 - **Creates new DB tables**: `packet_activity`, `cad_events` in `repeater.db`
 - **Cleans orphaned data**: removes orphaned `lbt_events` and `cad_events` from `spectrum_history.db` (data now resides in `repeater.db`)
 - **HAL recompilation**: triggered automatically due to CAD/LBT C code changes
+
+### v2.1.1 Upgrade-Specific Changes
+
+- **RRDtool symlink**: installs `rrdtool` package and symlinks system `rrdtool.so` into the Python venv (fixes Python 3.13 C-extension incompatibility)
+- **Legacy field normalization**: normalizes `sf`→`spreading_factor`, `bw`→`bandwidth`, `cr`→`coding_rate` in `wm1303_ui.json`
+- **HAL recompilation**: triggered automatically due to CAD retry delay changes in `lora_pkt_fwd.c`
+- **Creates `origin_channel_stats` table**: new SQLite table for origin channel metrics
 
 ### Configuration Preservation
 

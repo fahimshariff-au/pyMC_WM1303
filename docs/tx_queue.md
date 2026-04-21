@@ -6,7 +6,7 @@
 
 The WM1303 system uses **per-channel TX queues** managed by a `GlobalTXScheduler`. Each active channel (A–E) has its own queue instance that handles buffering, gating, and fair transmission scheduling.
 
-Since v2.1.0, the TX pipeline includes mandatory hardware CAD (Channel Activity Detection) in the packet forwarder's C layer, with all random TX delays eliminated.
+Since v2.1.0, the TX pipeline includes mandatory hardware CAD (Channel Activity Detection) in the packet forwarder's C layer, with all random TX delays eliminated. Since v2.1.1, the Python pre-TX software check has been removed entirely — the C-level CAD+LBT is now the sole channel assessment mechanism. CAD retry delays have been optimized from worst-case 3100 ms to 1050 ms.
 
 ## Architecture
 
@@ -37,17 +37,33 @@ Bridge Engine → TX batch window (2s)
 | Queue depth hold | 100 ms | Brief dedup window when 1 packet pending |
 | TX delay factor | 0.0 (default) | Random pre-TX jitter; set to 0 since v2.1.0 |
 
-## TX Pipeline (v2.1.0)
+## TX Pipeline (v2.1.1)
 
 The full TX path from enqueue to air:
 
-1. **Bridge Engine** enqueues packet to the appropriate channel queue
+1. **Bridge Engine** enqueues packet to the appropriate channel queue (origin channel first since v2.1.1)
 2. **TX batch window** (2s) groups concurrent bridge sends
 3. **GlobalTXScheduler** picks the next packet via round-robin
 4. **Python gating checks**: TTL expiry, queue overflow
 5. **PULL_RESP** sends packet to the packet forwarder via UDP (:1730)
 6. **Packet forwarder (C)**: mandatory CAD scan on SX1261 → optional LBT → IMMEDIATE TX
 7. **Radio TX** on SX1302 (Channels A–D) or SX1261 (Channel E)
+
+> **v2.1.1 change:** The Python pre-TX software check (Laag 1) has been removed (`lbt_check=None`). Previously, a Python-level check assessed channel availability using cached spectral/noise data before sending PULL_RESP. With the C-level hardware CAD+LBT fully operational since v2.1.0, this was redundant and added up to 5 seconds of worst-case delay. The TX pipeline is now a single layer (C only).
+
+| Aspect | Before (v2.1.0) | After (v2.1.1) |
+|--------|-----------------|----------------|
+| Pre-TX checks | 2 layers (Python + C) | 1 layer (C only) |
+| Python retry delays | [0, 0.5s, 1.0s, 1.5s] + 2.0s force | None |
+| Worst-case total delay | ~8.1s (Python 5.0s + C 3.1s) | **~1.05s** (C only) |
+
+## Origin-Channel-First TX Priority (v2.1.1)
+
+When the Bridge Engine forwards a received packet to multiple target channels via bridge rules, the **originating channel gets TX priority** — it is enqueued and transmitted first.
+
+Example: packet received on Channel E → forwarded to A, B, C, E via bridge rules → Channel E is sent **first**, then A, B, C in their normal order.
+
+This reduces repeat latency for the node that originally sent the packet. The `origin_channel` parameter is tracked through `bridge_engine.py` (`inject_packet()` → `_forward_by_rules()`) and `main.py` (`_bridge_repeater_handler()`). The GlobalTXScheduler's round-robin fairness is unaffected — origin priority only controls the enqueue order within a single bridge forwarding event.
 
 ### Python → C Overhead
 
@@ -86,9 +102,10 @@ Gating is split between the Python TX queue and the C packet forwarder:
 
 | # | Check | Action on Fail |
 |---|-------|----------------|
-| 3 | **CAD** (mandatory) | LoRa preamble detected → retry with exponential backoff (up to 5×) → force-send |
+| 3 | **CAD** (mandatory) | LoRa preamble detected → retry with fixed delays (50→100→200→300→400 ms, up to 5×) → force-send |
 | 4 | **LBT** (optional, per channel) | RSSI above threshold → delay TX |
 
+> **v2.1.1 change:** CAD retry delays changed from exponential backoff (100→200→400→800→1600 ms, worst-case 3100 ms) to fixed values (50→100→200→300→400 ms, worst-case 1050 ms) — a 66% reduction.
 See [`lbt_cad.md`](./lbt_cad.md) for full details on CAD and LBT behavior.
 
 ### RF-Chain Guard
@@ -129,8 +146,7 @@ When the Bridge Engine forwards a packet to multiple target channels, it uses a 
 | Hold Type | Status | Duration | Purpose |
 |-----------|--------|----------|---------|
 | **CAD scan** | ✅ Mandatory | 37–56 ms | Hardware preamble detection (C layer) |
-| **CAD retry backoff** | ✅ Active (on detection) | 100–1600 ms (exponential) | Wait for channel to clear |
-| **LBT check** | ⚙️ Optional (per channel) | ~47 ms when enabled | RSSI-based channel assessment |
+| **CAD retry backoff** | ✅ Active (on detection) | 50–400 ms (fixed) | Wait for channel to clear (worst-case 1050 ms total) |
 | TX batch window | ✅ Active | 2 seconds | Group concurrent bridge sends |
 | Queue depth hold | ✅ Active | 100 ms (1 pkt) to 2 s (batch) | Brief dedup window |
 | Noise floor hold | ❌ Removed | — | Was: pause TX for noise measurement |

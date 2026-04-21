@@ -9,7 +9,7 @@ The WM1303 system implements two channel-sensing mechanisms to reduce collisions
 - **CAD (Channel Activity Detection)** — **Mandatory** hardware-level LoRa preamble detection on the SX1261, executed before every TX
 - **LBT (Listen Before Talk)** — **Optional** per-channel RSSI-based check that runs after CAD when enabled
 
-Since v2.1.0, CAD is mandatory and always active. LBT is an additional layer that can be independently enabled or disabled per channel.
+Since v2.1.0, CAD is mandatory and always active. LBT is an additional layer that can be independently enabled or disabled per channel. Since v2.1.1, the Python pre-TX software check has been removed — the C-level CAD+LBT is the sole channel assessment mechanism.
 
 ## CAD — Channel Activity Detection
 
@@ -25,7 +25,7 @@ CAD replaces the previous software-based collision avoidance (random TX delays) 
 2. **CAD Scan** — the SX1261 performs a LoRa preamble detection scan on the exact TX frequency, spreading factor, and bandwidth
 3. **Result** —
    - **Clear**: TX proceeds immediately (IMMEDIATE mode)
-   - **Detected**: retry with exponential back-off (100 → 200 → 400 → 800 → 1600 ms), up to 5 retries
+   - **Detected**: retry with fixed delays (50 → 100 → 200 → 300 → 400 ms), up to 5 retries
    - **After 5 retries**: force-send the packet (TX must not be blocked indefinitely)
 4. **Resume RX** — RX is restored after TX completes
 
@@ -55,6 +55,22 @@ The full CAD cycle has been optimized from **~500+ ms** down to **~37–56 ms**:
 | **Total** | **~37–43 ms** | **~47–56 ms** |
 
 Channel E takes longer due to its narrower bandwidth (BW 62.5 kHz) requiring more symbols for preamble detection.
+
+### CAD Retry Delays (v2.1.1)
+
+When a CAD scan detects activity, the system retries with fixed delays (changed from exponential backoff in v2.1.1):
+
+| Retry | v2.1.0 (exponential) | v2.1.1 (fixed) |
+|-------|---------------------|----------------|
+| 1 | 100 ms | 50 ms |
+| 2 | 200 ms | 100 ms |
+| 3 | 400 ms | 200 ms |
+| 4 | 800 ms | 300 ms |
+| 5 | 1600 ms | 400 ms |
+| **Worst-case total** | **3100 ms** | **1050 ms** |
+
+This is a **66% reduction** in worst-case TX delay while maintaining 5 retry attempts for collision avoidance. After 5 retries, the packet is force-sent regardless.
+
 
 ### CAD Timing Optimizations Applied
 
@@ -130,15 +146,14 @@ With mandatory CAD handling collision avoidance, **all random TX delays have bee
 | Per-rule `tx_delay_ms` | variable | **0 ms** |
 | Python airtime guard | duplicated check | **removed** |
 
-Users can still increase `tx_delay_factor` in **Adv. Config → TX Queue Management** if they need randomized pre-TX jitter for specific use cases, but this is no longer recommended as the default approach.
-
 ## TX Hold Behavior
 
 | Hold Type | Status | Duration | Purpose |
 |-----------|--------|----------|---------|
 | **CAD scan** | ✅ Mandatory | 37–56 ms | Hardware preamble detection before every TX |
-| **CAD retry backoff** | ✅ Active (on detection) | 100–1600 ms (exponential) | Wait for channel to clear |
+| **CAD retry backoff** | ✅ Active (on detection) | 50–400 ms (fixed) | Wait for channel to clear (worst-case 1050 ms total) |
 | **LBT check** | ⚙️ Optional (per channel) | ~47 ms when enabled | RSSI-based channel assessment |
+| **Python pre-TX check** | ❌ Removed (v2.1.1) | — | Was: software LBT/CAD check before PULL_RESP (redundant with C-level CAD) |
 | TX batch window | ✅ Active | 2 seconds | Group concurrent bridge sends |
 | Queue depth hold | ✅ Active | 100 ms (1 pkt) to 2 s (batch) | Brief dedup window |
 | Noise floor hold | ❌ Removed | — | Was: pause TX for noise measurement |
