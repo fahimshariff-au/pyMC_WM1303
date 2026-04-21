@@ -61,11 +61,23 @@ class RepeaterHandler(BaseHandler):
         self.send_advert_func = send_advert_func
         self.airtime_mgr = AirtimeManager(config)
         self.seen_packets = OrderedDict()
-        self.cache_ttl = config.get("repeater", {}).get("cache_ttl", 30)
-        # Dedup TTL in seconds: how long a packet hash stays in the seen cache.
-        # Default 30s — short enough to allow legitimate re-sends, long enough
-        # to suppress immediate duplicates from multiple receive paths.
-        self.max_cache_size = 1000
+        # Dedup cache TTL (seconds). SSOT key: `repeater.cache_ttl`.
+        # Default 60s — matches Adv. Config UI default.
+        self.cache_ttl = config.get("repeater", {}).get("cache_ttl", 60)
+        # Dedup cache max size. SSOT key: `repeater.max_cache_size`.
+        # Legacy fallback: `adv.max_cache_size` in wm1303_ui.json (pre-2.1.7).
+        # Default 1000 — matches Adv. Config UI default.
+        _max_cache_cfg = config.get("repeater", {}).get("max_cache_size")
+        if _max_cache_cfg is None:
+            try:
+                import json as _json, pathlib as _pl
+                _ui_path = _pl.Path("/etc/pymc_repeater/wm1303_ui.json")
+                if _ui_path.exists():
+                    _ui = _json.loads(_ui_path.read_text()) or {}
+                    _max_cache_cfg = _ui.get("adv_config", {}).get("max_cache_size")
+            except Exception:
+                pass
+        self.max_cache_size = int(_max_cache_cfg) if _max_cache_cfg is not None else 1000
         self.max_duplicates_per_packet = 20
         self.tx_delay_factor = config.get("delays", {}).get("tx_delay_factor", 1.0)
         self.direct_tx_delay_factor = config.get("delays", {}).get("direct_tx_delay_factor", 0.5)
@@ -1189,21 +1201,21 @@ class RepeaterHandler(BaseHandler):
                     self.cleanup_cache()
                     self.last_cache_cleanup = current_time
 
-                # Prune old SQLite data (check every 6 hours)
-                if current_time - self.last_db_cleanup >= 21600:
-                    if self.storage:
-                        try:
-                            retention_days = (
-                                self.config
-                                .get("storage", {})
-                                .get("retention", {})
-                                .get("sqlite_cleanup_days", 31)
-                            )
-                            self.storage.cleanup_old_data(days=retention_days)
-                            logger.info("Cleaned up SQLite data older than %d days", retention_days)
-                        except Exception as e:
-                            logger.warning(f"SQLite cleanup failed: {e}")
-                    self.last_db_cleanup = current_time
+                # Cleanup moved to metrics_retention.py
+                # if current_time - self.last_db_cleanup >= 21600:
+                #     if self.storage:
+                #         try:
+                #             retention_days = (
+                #                 self.config
+                #                 .get("storage", {})
+                #                 .get("retention", {})
+                #                 .get("sqlite_cleanup_days", 31)
+                #             )
+                #             self.storage.cleanup_old_data(days=retention_days)
+                #             logger.info("Cleaned up SQLite data older than %d days", retention_days)
+                #         except Exception as e:
+                #             logger.warning(f"SQLite cleanup failed: {e}")
+                #     self.last_db_cleanup = current_time
 
                 # Sleep for 5 seconds before next check
                 await asyncio.sleep(5.0)
@@ -1281,6 +1293,12 @@ class RepeaterHandler(BaseHandler):
             self.score_threshold = repeater_config.get("score_threshold", 0.3)
             self.send_advert_interval_hours = repeater_config.get("send_advert_interval_hours", 10)
             self.cache_ttl = repeater_config.get("cache_ttl", 60)
+            _mc = repeater_config.get("max_cache_size")
+            if _mc is not None:
+                try:
+                    self.max_cache_size = int(_mc)
+                except Exception:
+                    pass
             self.loop_detect_mode = self._normalize_loop_detect_mode(
                 self.config.get("mesh", {}).get("loop_detect", LOOP_DETECT_OFF)
             )

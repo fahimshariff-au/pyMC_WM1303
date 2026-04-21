@@ -13,6 +13,8 @@ from collections import deque
 import threading
 import queue
 
+from repeater.web.packet_trace import trace_event as _trace
+
 logger = logging.getLogger('BridgeEngine')
 
 _active_bridge: "BridgeEngine | None" = None  # module-level reference for API access
@@ -68,6 +70,86 @@ def _extract_mc_payload(data: bytes) -> bytes:
     if payload_start >= len(data):
         return data  # malformed, return all for safe hashing
     return data[payload_start:]
+
+
+def _stable_hash(data: bytes, length: int = 12) -> str:
+    """Compute a stable hash from header byte + payload (skipping path data).
+
+    The MeshCore path data (hop hashes, hop count) changes at each hop,
+    so hashing the full packet produces different results for the same
+    message at different points in the mesh.  By hashing only byte-0
+    (header: route type + payload type + version) plus the payload after
+    the path data, we get a hash that stays constant across hops.
+    """
+    payload = _extract_mc_payload(data)
+    return hashlib.sha256(data[0:1] + payload).hexdigest()[:length]
+
+
+def emit_lbt_cad_trace_steps(pkt_hash8: str, channel_id: str,
+                              tx_result: dict,
+                              pkt_type_name: str = None) -> None:
+    """Emit `lbt_check` and `cad_check` trace steps based on a backend TX result.
+
+    Shared helper used by both BridgeEngine (_forward_by_rules) and
+    ChannelEBridge (_tx_handler) so every TX that goes through the HAL
+    CAD+LBT path gets consistent chronological trace visibility.
+
+    The `tx_result` dict is the return value of `backend.send()` / queue.enqueue().
+    If the post-TX ack did not arrive (older HAL or TX-blocked early path),
+    the corresponding keys will be absent and no steps are emitted.
+
+    Steps use a unified multi-line detail layout matching tx_send style:
+        "LBT PASS\\n  RSSI: -87 dBm\\n  Threshold: -80 dBm\\n  Retries: 0"
+        "CAD CLEAR\\n  RSSI: -128 dBm\\n  Reason: clear\\n  Retries: 0"
+    Missing values are omitted (no 'None dBm' lines).
+    """
+    if not isinstance(tx_result, dict):
+        return
+    try:
+        # ---- LBT ----
+        if tx_result.get('lbt_enabled'):
+            _lbt_pass = bool(tx_result.get('lbt_pass', True))
+            _lbt_rssi = tx_result.get('lbt_rssi_dbm')
+            _lbt_thr = tx_result.get('lbt_threshold_dbm')
+            _lbt_retries = int(tx_result.get('lbt_retries', 0) or 0)
+            _lbt_header = 'LBT PASS' if _lbt_pass else 'LBT BLOCKED'
+            _parts = [_lbt_header]
+            if _lbt_rssi is not None:
+                _parts.append('  RSSI: %s dBm' % _lbt_rssi)
+            if _lbt_thr is not None:
+                _parts.append('  Threshold: %s dBm' % _lbt_thr)
+            _parts.append('  Retries: %d' % _lbt_retries)
+            if _lbt_pass:
+                _lbt_status = 'ok' if _lbt_retries == 0 else 'partial'
+            else:
+                _lbt_status = 'filtered'
+            _trace(pkt_hash8, 'lbt_check', channel=channel_id,
+                   pkt_type=pkt_type_name, detail='\n'.join(_parts),
+                   status=_lbt_status)
+        # ---- CAD ----
+        if tx_result.get('cad_enabled'):
+            _cad_detected = bool(tx_result.get('cad_detected', False))
+            _cad_retries = int(tx_result.get('cad_retries', 0) or 0)
+            _cad_reason = (tx_result.get('cad_reason') or '').strip()
+            _cad_rssi = tx_result.get('cad_rssi_dbm')
+            _cad_header = 'CAD DETECTED' if _cad_detected else 'CAD CLEAR'
+            _parts = [_cad_header]
+            if _cad_rssi is not None:
+                _parts.append('  RSSI: %s dBm' % _cad_rssi)
+            if _cad_reason:
+                _parts.append('  Reason: %s' % _cad_reason)
+            _parts.append('  Retries: %d' % _cad_retries)
+            if _cad_detected:
+                _cad_status = 'filtered'
+            else:
+                _cad_status = 'ok' if _cad_retries == 0 else 'partial'
+            _trace(pkt_hash8, 'cad_check', channel=channel_id,
+                   pkt_type=pkt_type_name, detail='\n'.join(_parts),
+                   status=_cad_status)
+    except Exception as _trace_e:
+        logger.debug('emit_lbt_cad_trace_steps: failed: %s', _trace_e)
+
+
 
 
 class BridgeEngine:
@@ -145,6 +227,10 @@ class BridgeEngine:
     # Non-radio endpoints (handled by external callbacks, not in _radio_map)
     NON_RADIO_ENDPOINTS = {'mqtt', 'repeater', 'channel_e'}
 
+    # Internal sources that bypass dedup (non-RF origins that re-inject processed packets)
+    # channel_e is excluded because it IS an RF source (SX1261 radio)
+    DEDUP_BYPASS_SOURCES = {'mqtt', 'repeater'}
+
     # Static fallback aliases (overridden by dynamic aliases built in __init__)
     _STATIC_ALIASES = {
         'n1': 'channel_a', 'channel_a': 'channel_a', 'ch-1': 'channel_a',
@@ -154,7 +240,7 @@ class BridgeEngine:
     }
 
     def __init__(self, radios: list, rules: list | None = None,
-                 dedup_ttl: float = 15.0, tx_delay_ms: float = 0.0):
+                 dedup_ttl: float = 300.0, tx_delay_ms: float = 0.0):
         self.radios = radios
         # Build radio map: channel_id -> radio instance
         self._radio_map = {
@@ -191,6 +277,15 @@ class BridgeEngine:
         self._origin_channel_counts: dict[str, int] = {}
         self._origin_channel_lock = threading.Lock()
 
+        # TX echo detection: buffer of stable hashes from recently transmitted
+        # packets.  When a packet arrives whose stable hash matches a recent TX,
+        # it is almost certainly our own transmission bouncing back via the mesh.
+        self._tx_echo_hashes: dict[str, float] = {}   # stable_hash -> monotonic ts
+        self._tx_echo_ttl = 10.0                       # seconds to keep TX hashes
+        self._tx_echo_detected = 0                     # counter for stats
+        self._tx_echo_cleanup_ts = 0.0                 # last cleanup timestamp
+
+
 
         # Dedup event logging for visualization
         self._dedup_events: deque = deque(maxlen=500)  # ring buffer
@@ -202,6 +297,11 @@ class BridgeEngine:
         self._sqlite_writer_running = False
         self._last_cleanup_ts = time.time()
         self._cleanup_interval = 3600  # cleanup every hour
+
+        # Build display name map for human-readable trace output
+        self._display_names: dict[str, str] = {}
+        self._build_display_names(radios)
+
 
         # Module-level reference for API access
         global _active_bridge
@@ -345,6 +445,163 @@ class BridgeEngine:
 
         logger.info('BridgeEngine: dynamic aliases built: %s', dict(self.CHANNEL_ALIASES))
 
+    def _build_display_names(self, radios: list) -> None:
+        """Build display name map: channel_id -> human-readable name for traces.
+
+        Naming rules:
+          - channel_e   -> friendly_name from UI config (e.g. 'EU-Narrow')
+          - channel_a-d  -> internal name from UI config (e.g. 'local-test')
+          - repeater     -> 'Repeater'
+          - mqtt         -> 'MQTT'
+        """
+        import json
+        from pathlib import Path
+
+        # Static mappings for non-radio endpoints
+        self._display_names = {
+            'repeater': 'Repeater',
+            'mqtt': 'MQTT',
+        }
+
+        # Read channel_e friendly_name from UI config
+        ui_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+        try:
+            if ui_path.exists():
+                ui = json.loads(ui_path.read_text())
+                # Channel E display name from its friendly_name
+                che_cfg = ui.get('channel_e', {})
+                che_friendly = che_cfg.get('friendly_name', '') or che_cfg.get('name', '')
+                if che_friendly:
+                    self._display_names['channel_e'] = che_friendly
+                # Channels a-d: use internal name from channels list
+                radio_cids = [getattr(r, 'channel_id', None) for r in radios]
+                radio_cids = [c for c in radio_cids if c]
+                ui_channels = ui.get('channels', [])
+                for idx, uc in enumerate(ui_channels):
+                    if idx >= len(radio_cids):
+                        break
+                    cid = radio_cids[idx]
+                    # Use the UI name (user-configurable internal name)
+                    ui_name = uc.get('name', '')
+                    if ui_name and ui_name != cid:
+                        self._display_names[cid] = ui_name
+                    else:
+                        # Fallback: use friendly_name if different from generic
+                        fn = uc.get('friendly_name', '')
+                        if fn and fn not in ('Channel A', 'Channel B', 'Channel C', 'Channel D'):
+                            self._display_names[cid] = fn
+        except Exception as e:
+            logger.warning('BridgeEngine: failed to build display names: %s', e)
+
+        logger.info('BridgeEngine: display names: %s', self._display_names)
+
+    def _dn(self, channel_id: str) -> str:
+        """Get display name for a channel ID (short alias for trace messages)."""
+        return self._display_names.get(channel_id, channel_id)
+
+    def _format_rule_name(self, rule: dict) -> str:
+        """Format a rule as 'SourceName → TargetName' using display names."""
+        src_raw = rule.get('source', rule.get('from', '?'))
+        tgt_raw = rule.get('target', rule.get('to', '?'))
+        src_cid = self._resolve_channel(src_raw)
+        tgt_cid = self._resolve_channel(tgt_raw)
+        return '%s → %s' % (self._dn(src_cid), self._dn(tgt_cid))
+    def _format_received_detail(self, channel_id: str, size: int,
+                                 pkt_type_name: str,
+                                 rssi: float | int | None = None,
+                                 snr: float | None = None,
+                                 noise_floor: float | None = None,
+                                 freq_mhz: float | None = None,
+                                 datarate: str | None = None) -> str:
+        """Format a rich multi-line detail string for a `received` trace step.
+
+        Always starts with `RX on <channel> | <size> bytes | <type>` on the
+        first line. Additional lines with RF metadata are appended only when
+        values are provided (no placeholders for missing data).
+        """
+        lines = ['RX on %s' % self._dn(channel_id)]
+        lines.append('  Size: %d bytes' % size)
+        if pkt_type_name:
+            lines.append('  Type: %s' % pkt_type_name)
+        if freq_mhz is not None:
+            try:
+                lines.append('  Frequency: %.3f MHz' % float(freq_mhz))
+            except Exception:
+                pass
+        if datarate:
+            lines.append('  Data rate: %s' % datarate)
+        if rssi is not None:
+            try:
+                lines.append('  RSSI: %d dBm' % int(rssi))
+            except Exception:
+                pass
+        if snr is not None:
+            try:
+                lines.append('  SNR: %.1f dB' % float(snr))
+            except Exception:
+                pass
+        if noise_floor is not None:
+            try:
+                lines.append('  Noise floor: %d dBm' % int(noise_floor))
+            except Exception:
+                pass
+        return '\n'.join(lines)
+
+    def emit_received_trace(self, pkt_hash8: str, channel_id: str,
+                            pkt_type_name: str, size: int,
+                            rssi: float | int | None = None,
+                            snr: float | None = None,
+                            noise_floor: float | None = None,
+                            freq_mhz: float | None = None,
+                            datarate: str | None = None) -> None:
+        """Public helper: emit a `received` trace step with rich RF metadata.
+
+        Safe to call from any thread or RX path (e.g. `channel_e_bridge`).
+        All RF fields are optional — only provided values are rendered.
+        """
+        try:
+            detail = self._format_received_detail(
+                channel_id, size, pkt_type_name,
+                rssi=rssi, snr=snr, noise_floor=noise_floor,
+                freq_mhz=freq_mhz, datarate=datarate)
+            _trace(pkt_hash8, 'received',
+                   channel=channel_id, pkt_type=pkt_type_name, detail=detail)
+        except Exception as _e:  # pragma: no cover - defensive only
+            logger.debug('emit_received_trace: failed (%s)', _e)
+
+
+    @staticmethod
+    def _format_tx_result(tx_result: dict, channel_name: str, rule_display: str) -> str:
+        """Format a TX result dict into a human-readable multi-line string."""
+        if not isinstance(tx_result, dict):
+            return 'TX on %s (rule: %s): %s' % (channel_name, rule_display, tx_result)
+        ok = tx_result.get('ok', False)
+        if not ok:
+            err = tx_result.get('error', 'unknown')
+            return 'TX FAILED on %s (rule: %s) — %s' % (channel_name, rule_display, err)
+        parts = ['TX on %s (rule: %s)' % (channel_name, rule_display)]
+        freq = tx_result.get('freq')
+        if freq is not None:
+            parts.append('  Frequency: %s MHz' % freq)
+        datr = tx_result.get('datr', '')
+        if datr:
+            parts.append('  Data rate: %s' % datr)
+        airtime = tx_result.get('airtime_ms')
+        if airtime is not None:
+            parts.append('  Airtime: %sms' % airtime)
+        queue_wait = tx_result.get('queue_wait_ms')
+        if queue_wait is not None:
+            parts.append('  Queue wait: %.1fms' % queue_wait)
+        send_ms = tx_result.get('send_ms')
+        if send_ms is not None:
+            parts.append('  Send: %sms' % send_ms)
+        ack_ok = tx_result.get('tx_ack_ok')
+        ack_err = tx_result.get('tx_ack_error', '')
+        if ack_ok is not None:
+            ack_str = 'OK' if ack_ok else ('FAIL (%s)' % ack_err)
+            parts.append('  TX ACK: %s' % ack_str)
+        return '\n'.join(parts)
+
     # ------------------------------------------------------------------ #
     # External endpoint handler registration
     # ------------------------------------------------------------------ #
@@ -384,23 +641,74 @@ class BridgeEngine:
             logger.warning('BridgeEngine: inject_packet called but bridge not running')
             return
 
-        if self._is_duplicate(data):
+        # TX echo check: drop packets that match our own recent transmissions
+        # (must be checked BEFORE dedup, because dedup would also catch it
+        #  but without the specific TX_ECHO classification)
+        if self._is_tx_echo(data, source_name):
+            _echo_hash8 = _stable_hash(data, 8)
+            _trace(_echo_hash8, 'bridge_inject', channel=source_name, pkt_type=self._get_packet_type_name(data), detail='Injected %d bytes from %s' % (len(data), self._dn(source_name)))
+            _trace(_echo_hash8, 'echo_dedup', channel=source_name, detail='Duplicate or echo detected (from %s)' % self._dn(source_name), status='ok')
             self.dropped_duplicate += 1
-            _dup_hash = hashlib.sha256(data).hexdigest()[:12]
-            self._record_dedup_event('duplicate', source_name, _dup_hash, len(data))
-            logger.debug('BridgeEngine: injected duplicate dropped from %s (hash=%s)', source_name, _dup_hash)
+            # Fix (Bug 2 / packets.transmitted persistence): inject_packet must
+            # mirror _rx_loop and update repeater counters so the packet is
+            # recorded in the SQLite `packets` table. Without this, bridge-
+            # injected packets (e.g. from channel_e_bridge) were silently
+            # missing from the DB while stats counters kept ticking.
+            self._update_repeater_counters(
+                data, source_name, pkt_type_name=self._get_packet_type_name(data),
+                pkt_hash=_stable_hash(data), was_echo=True,
+                drop_reason="tx_echo")
             return
 
+        # Dedup check: only apply to RF/channel sources, skip for internal sources
+        # Internal sources (repeater, mqtt) re-inject processed packets that would
+        # share the same stable hash as the original RX, causing false duplicate drops.
+        if source_name in self.DEDUP_BYPASS_SOURCES:
+            logger.debug('BridgeEngine: dedup skipped for internal source %r', source_name)
+            _dup_hash8 = _stable_hash(data, 8)
+            _trace(_dup_hash8, 'dedup_skip', status='ok', detail='Internal source %s, dedup bypassed' % self._dn(source_name))
+        elif self._is_duplicate(data):
+            _dup_hash8 = _stable_hash(data, 8)
+            _dup_hash = _stable_hash(data)
+            _trace(_dup_hash8, 'bridge_inject', channel=source_name, pkt_type=self._get_packet_type_name(data), detail='Injected %d bytes from %s' % (len(data), self._dn(source_name)))
+            _trace(_dup_hash8, 'dedup_drop', channel=source_name, detail='Dropped as duplicate (injected from %s)' % self._dn(source_name), status='warning')
+            self.dropped_duplicate += 1
+            self._record_dedup_event('duplicate', source_name, _dup_hash, len(data))
+            logger.debug('BridgeEngine: injected duplicate dropped from %s (hash=%s)', source_name, _dup_hash)
+            # Fix (Bug 2): record duplicate drop for injected packets as well.
+            self._update_repeater_counters(
+                data, source_name, pkt_type_name=self._get_packet_type_name(data),
+                pkt_hash=_dup_hash, was_duplicate=True,
+                drop_reason="duplicate")
+            return
 
-
-        pkt_hash = hashlib.sha256(data).hexdigest()[:12]
+        pkt_hash = _stable_hash(data)
+        pkt_hash8 = _stable_hash(data, 8)
         pkt_type_name = self._get_packet_type_name(data)
+        _trace(pkt_hash8, 'bridge_inject', channel=source_name, pkt_type=pkt_type_name, detail='Injected %d bytes from %s (origin=%s)' % (len(data), self._dn(source_name), self._dn(origin_channel) if origin_channel else 'none'))
         logger.info('[HEXDUMP] dir=INJECT src=%s sz=%d hdr=%s hex=%s', source_name, len(data), _mc_hdr(data), _hexdump(data))
         logger.info('BridgeEngine: injected %d bytes from %s (type=%s, hash=%s, origin_channel=%s)',
                    len(data), source_name, pkt_type_name, pkt_hash, origin_channel)
 
+        # Snapshot forwarded counter so we can detect whether at least one
+        # rule actually dispatched TX for this packet (matches _rx_loop logic).
+        _fwd_before = self.forwarded_packets
         await self._forward_by_rules(source_name, data, pkt_hash, pkt_type_name,
                                      origin_channel=origin_channel)
+        _fwd_after = self.forwarded_packets
+        _was_forwarded = (_fwd_after > _fwd_before)
+
+        # Fix (Bug 2 / packets.transmitted persistence): record the injected
+        # packet into the SQLite `packets` table via the repeater engine.
+        # For the 'repeater' re-inject source we intentionally skip recording:
+        # the originating RX was already recorded (or will be) via the normal
+        # RX path / other inject, and recording the repeater re-inject would
+        # produce duplicate rows with stable hashes.
+        if source_name != 'repeater':
+            self._update_repeater_counters(
+                data, source_name, pkt_type_name=pkt_type_name,
+                pkt_hash=pkt_hash, was_forwarded=_was_forwarded,
+                drop_reason=None if _was_forwarded else "no_rule_match")
 
     async def _forward_by_rules(self, source_cid: str, data: bytes,
                                  pkt_hash: str, pkt_type_name: str,
@@ -421,6 +729,7 @@ class BridgeEngine:
         """
         forwarded = False
         rules_checked = 0
+        pkt_hash8 = pkt_hash[:8]
 
         # Track origin channel activity for metrics
         if origin_channel and source_cid == 'repeater':
@@ -443,6 +752,8 @@ class BridgeEngine:
                 continue
 
             if not self._matches_filter(rule, data):
+                _rule_filter = ', '.join(rule.get('packet_types', [])) or rule.get('filter', 'all')
+                _trace(pkt_hash8, 'filter_drop', channel=source_cid, pkt_type=pkt_type_name, detail='Filtered by rule %s (filter=%s, type=%s)' % (self._format_rule_name(rule), _rule_filter, pkt_type_name), status='warning')
                 self.dropped_filtered += 1
                 self._record_dedup_event('filtered', source_cid, pkt_hash, len(data), pkt_type_name)
                 logger.info('BridgeEngine: filtered by rule %s (type=%s)',
@@ -467,6 +778,13 @@ class BridgeEngine:
                         # Pass origin_channel to repeater handler so the
                         # source RX channel is preserved through the repeater
                         # processing pipeline and can be used for TX priority.
+                        # WM1303 v2.1.6+: emit bridge_forward BEFORE invoking
+                        # the handler, so the trace step timestamp reflects
+                        # when forwarding STARTS (near the top of the trace),
+                        # not when it finishes (which could be after all
+                        # downstream re-injection + TXs and would push the
+                        # step to the bottom of the timeline).
+                        _trace(pkt_hash8, 'bridge_forward', channel=source_cid, pkt_type=pkt_type_name, detail='Forwarded to %s (rule: %s)' % (self._dn(rule_target), self._format_rule_name(rule)))
                         if rule_target == 'repeater':
                             result = handler(data, origin_channel=source_cid)
                         else:
@@ -496,7 +814,9 @@ class BridgeEngine:
 
             tcid = getattr(target, 'channel_id', 'unknown')
             rule_id = rule.get('name', rule.get('id', '?'))
-            radio_sends.append((tcid, rule_id, tx_delay, target))
+            rule_display = self._format_rule_name(rule)
+            radio_sends.append((tcid, rule_id, tx_delay, target, rule_display))
+            _trace(pkt_hash8, 'tx_enqueue', channel=source_cid, pkt_type=pkt_type_name, detail='Queued TX %s \u2192 %s (rule: %s)' % (self._dn(source_cid), self._dn(tcid), rule_display))
             logger.info('BridgeEngine: queuing TX %d bytes: %s -> %s '
                        '(rule=%s, type=%s, hash=%s)',
                        len(data), source_cid, tcid, rule_id,
@@ -532,24 +852,32 @@ class BridgeEngine:
                        len(radio_sends), source_cid, pkt_type_name, pkt_hash,
                        [r[0] for r in radio_sends])
 
-            for tcid, rule_id, tx_delay, target in radio_sends:
+            for tcid, rule_id, tx_delay, target, rule_display in radio_sends:
                 try:
                     if tx_delay > 0:
                         await asyncio.sleep(tx_delay)
                     logger.info('[HEXDUMP] dir=TX ch=%s sz=%d hdr=%s hex=%s',
                                 tcid, len(data), _mc_hdr(data), _hexdump(data))
                     tx_result = await target.send(data)
+                    # WM1303 v2.1.6: emit LBT/CAD trace steps chronologically
+                    # (they happen BEFORE tx_send on the air). Shared helper
+                    # is also used by channel_e_bridge so every HAL-TX path
+                    # gets consistent visibility.
+                    emit_lbt_cad_trace_steps(pkt_hash8, tcid, tx_result,
+                                              pkt_type_name=pkt_type_name)
                 except Exception as e:
+                    _trace(pkt_hash8, 'tx_send', channel=tcid, pkt_type=pkt_type_name, detail='TX FAILED on %s: %s' % (self._dn(tcid), e), status='error')
                     logger.error('BridgeEngine: TX error to %s (rule=%s): %s',
                                 tcid, rule_id, e)
                     continue
 
                 self.forwarded_packets += 1
                 forwarded = True
+                self._store_tx_echo_hash(data)  # store for echo detection
                 self._record_dedup_event('forwarded', source_cid, pkt_hash, len(data), pkt_type_name)
+                _trace(pkt_hash8, 'tx_send', channel=tcid, pkt_type=pkt_type_name, detail=self._format_tx_result(tx_result, self._dn(tcid), rule_display))
                 logger.info('BridgeEngine: TX result on %s (rule=%s): %s',
                             tcid, rule_id, tx_result)
-                logger.info('BridgeEngine: delivered to %s endpoint', tcid)
 
         if not forwarded:
             logger.debug('BridgeEngine: no rule matched for %s on %s (type=%s, '
@@ -602,8 +930,14 @@ class BridgeEngine:
         return resolved
 
     def _is_duplicate(self, data: bytes) -> bool:
+        """Check if a packet is a duplicate using stable payload hash.
+
+        Uses _stable_hash() which hashes header byte + payload (excluding
+        path data that changes per hop), so the same message at different
+        hop counts produces the same dedup key.
+        """
         now = time.monotonic()
-        key = hashlib.sha256(data).hexdigest()
+        key = _stable_hash(data, length=24)  # longer hash for dedup accuracy
         # Periodic cleanup: only rebuild dict every 5 seconds
         if now - getattr(self, '_seen_cleanup_ts', 0) > 5.0:
             self._seen = {k: v for k, v in self._seen.items() if now - v < self.dedup_ttl}
@@ -612,6 +946,41 @@ class BridgeEngine:
             return True
         self._seen[key] = now
         return False
+
+    def _is_tx_echo(self, data: bytes, source: str) -> bool:
+        """Check if an incoming packet is a TX echo (our own transmission bounced back).
+
+        Compares the stable hash of the incoming packet against recently
+        transmitted packets.  Returns True if it's an echo that should be dropped.
+        """
+        now = time.monotonic()
+        key = _stable_hash(data)
+        # Periodic cleanup of expired TX echo entries
+        if now - self._tx_echo_cleanup_ts > 5.0:
+            self._tx_echo_hashes = {
+                k: v for k, v in self._tx_echo_hashes.items()
+                if now - v < self._tx_echo_ttl
+            }
+            self._tx_echo_cleanup_ts = now
+        if key in self._tx_echo_hashes:
+            age = now - self._tx_echo_hashes[key]
+            if age < self._tx_echo_ttl:
+                self._tx_echo_detected += 1
+                logger.warning('[TX_ECHO] Dropped echo on %s (hash=%s, age=%.1fs, total=%d)',
+                               source, key, age, self._tx_echo_detected)
+                self._record_dedup_event('tx_echo', source, key, len(data),
+                                         self._get_packet_type_name(data))
+                return True
+            else:
+                del self._tx_echo_hashes[key]
+        return False
+
+    def _store_tx_echo_hash(self, data: bytes) -> None:
+        """Store the stable hash of a transmitted packet for echo detection."""
+        key = _stable_hash(data)
+        self._tx_echo_hashes[key] = time.monotonic()
+        logger.debug('BridgeEngine: TX echo hash stored: %s (active=%d)',
+                     key, len(self._tx_echo_hashes))
 
 
     def set_sqlite_handler(self, handler) -> None:
@@ -651,17 +1020,17 @@ class BridgeEngine:
                         logger.error("BridgeEngine: SQLite dedup write error: %s", e)
                     batch = []
 
-                # Periodic cleanup (every hour)
-                now = time.time()
-                if now - self._last_cleanup_ts > self._cleanup_interval:
-                    self._last_cleanup_ts = now
-                    if self._sqlite_handler is not None:
-                        try:
-                            deleted = self._sqlite_handler.cleanup_dedup_events(max_age_days=7)
-                            if deleted:
-                                logger.info("BridgeEngine: dedup cleanup removed %d old events", deleted)
-                        except Exception as e:
-                            logger.error("BridgeEngine: dedup cleanup error: %s", e)
+                # Cleanup moved to metrics_retention.py
+                # now = time.time()
+                # if now - self._last_cleanup_ts > self._cleanup_interval:
+                #     self._last_cleanup_ts = now
+                #     if self._sqlite_handler is not None:
+                #         try:
+                #             deleted = self._sqlite_handler.cleanup_dedup_events(max_age_days=7)
+                #             if deleted:
+                #                 logger.info("BridgeEngine: dedup cleanup removed %d old events", deleted)
+                #         except Exception as e:
+                #             logger.error("BridgeEngine: dedup cleanup error: %s", e)
 
             except Exception as e:
                 logger.error("BridgeEngine: dedup writer loop error: %s", e)
@@ -800,10 +1169,39 @@ class BridgeEngine:
                 logger.error('BridgeEngine: RX error on %s: %s', cid, e)
                 await asyncio.sleep(1.0)
                 continue
+            # Collect RF metadata from the source radio for the `received` step.
+            # All getters are optional — missing fields are simply omitted.
+            _rx_rssi = None
+            _rx_snr = None
+            _rx_nf = None
+            try:
+                if hasattr(source, 'get_last_rssi'):
+                    _rx_rssi = source.get_last_rssi()
+                if hasattr(source, 'get_last_snr'):
+                    _rx_snr = source.get_last_snr()
+                if hasattr(source, 'get_noise_floor'):
+                    _rx_nf = source.get_noise_floor()
+            except Exception:
+                pass
+
+            # TX echo check: drop our own transmissions bouncing back
+            if self._is_tx_echo(data, cid):
+                _echo_hash = _stable_hash(data, 8)
+                self.emit_received_trace(_echo_hash, cid, self._get_packet_type_name(data), len(data), rssi=_rx_rssi, snr=_rx_snr, noise_floor=_rx_nf)
+                _trace(_echo_hash, 'echo_dedup', channel=cid, detail='Duplicate or echo detected (from %s)' % self._dn(cid), status='ok')
+                self.dropped_duplicate += 1
+                self._update_repeater_counters(
+                    data, cid, pkt_type_name=self._get_packet_type_name(data),
+                    pkt_hash=_stable_hash(data), was_echo=True,
+                    drop_reason="tx_echo")
+                continue
 
             if self._is_duplicate(data):
+                _dup_hash8 = _stable_hash(data, 8)
+                _dup_hash = _stable_hash(data)
+                self.emit_received_trace(_dup_hash8, cid, self._get_packet_type_name(data), len(data), rssi=_rx_rssi, snr=_rx_snr, noise_floor=_rx_nf)
+                _trace(_dup_hash8, 'dedup_drop', channel=cid, detail='Dropped as duplicate on %s' % self._dn(cid), status='warning')
                 self.dropped_duplicate += 1
-                _dup_hash = hashlib.sha256(data).hexdigest()[:12]
                 self._record_dedup_event('duplicate', cid, _dup_hash, len(data), self._get_packet_type_name(data))
                 logger.debug('BridgeEngine: duplicate dropped on %s (hash=%s)',
                             cid, _dup_hash)
@@ -814,10 +1212,10 @@ class BridgeEngine:
                     drop_reason="duplicate")
                 continue
 
-
-
-            pkt_hash = hashlib.sha256(data).hexdigest()[:12]
+            pkt_hash = _stable_hash(data)
+            pkt_hash8 = _stable_hash(data, 8)
             pkt_type_name = self._get_packet_type_name(data)
+            self.emit_received_trace(pkt_hash8, cid, pkt_type_name, len(data), rssi=_rx_rssi, snr=_rx_snr, noise_floor=_rx_nf)
             logger.info('BridgeEngine: RX %d bytes on %s (type=%s, hash=%s)',
                        len(data), cid, pkt_type_name, pkt_hash)
             logger.info('[HEXDUMP] dir=RX ch=%s sz=%d hdr=%s hex=%s', cid, len(data), _mc_hdr(data), _hexdump(data))
@@ -892,6 +1290,8 @@ class BridgeEngine:
             'forwarded_packets': self.forwarded_packets,
             'dropped_duplicate': self.dropped_duplicate,
             'dropped_filtered': self.dropped_filtered,
+            'tx_echo_detected': self._tx_echo_detected,
+            'tx_echo_hashes_active': len(self._tx_echo_hashes),
             'dedup_events_buffered': len(self._dedup_events),
             'dedup_seen_active': len(self._seen),
             'channels': [getattr(r, 'channel_id', str(i)) for i, r in enumerate(self.radios)],

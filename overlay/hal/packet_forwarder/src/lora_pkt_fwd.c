@@ -109,7 +109,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 
 #define STATUS_SIZE     200
 #define TX_BUFF_SIZE    ((540 * NB_PKT_MAX) + 30 + STATUS_SIZE)
-#define ACK_BUFF_SIZE   64
+#define ACK_BUFF_SIZE   512  /* WM1303: increased from 64 to fit post-TX CAD/LBT JSON */
 
 #define UNIX_GPS_EPOCH_OFFSET 315964800 /* Number of seconds ellapsed between 01.Jan.1970 00:00:00
                                                                           and 06.Jan.1980 00:00:00 */
@@ -420,6 +420,44 @@ static struct {
 } custom_lbt_channels[CUSTOM_LBT_MAX_CHANNELS];
 static int custom_lbt_nb_channels = 0;
 
+/* --- WM1303: Post-TX CAD/LBT result plumbing ---
+   Extended TX_ACK carrying CAD/LBT outcomes from the JIT thread back to Python.
+   The existing enqueue-time TX_ACK is kept unchanged for backwards compatibility;
+   an additional ACK with "phase":"post_tx" is emitted after lgw_send() completes
+   (or after a clbt_blocked skip). Token correlation uses a small table populated
+   at enqueue time and drained at TX time. */
+typedef struct {
+    bool         cad_enabled;
+    bool         cad_detected;      /* CAD detected activity in final attempt */
+    uint8_t      cad_retries;       /* retries performed (0 = clear on first try) */
+    int16_t      cad_last_rssi;     /* RSSI from last CAD reading (dBm) */
+    const char * cad_reason;        /* "clear", "cleared_after_retries", "forced_after_retries",
+                                       "scan_error", "unsupported_bw" */
+    bool         lbt_enabled;
+    int16_t      lbt_rssi_dbm;      /* last measured RSSI (dBm) */
+    int8_t       lbt_threshold_dbm;
+    bool         lbt_pass;          /* true = below threshold, TX allowed */
+    uint8_t      lbt_retries;
+    const char * tx_result;         /* "sent", "blocked", "send_failed" */
+} tx_ack_extra_t;
+
+#define TX_ACK_TOKEN_SLOTS 32
+typedef struct {
+    bool     used;
+    uint32_t count_us;     /* txpkt.count_us (0 for IMMEDIATE) */
+    uint32_t freq_hz;
+    uint16_t size;
+    uint8_t  datarate;
+    uint8_t  bandwidth;
+    uint8_t  token_h;
+    uint8_t  token_l;
+    struct timespec enq_ts;
+} pending_tx_ack_t;
+
+static pending_tx_ack_t tx_ack_tokens[LGW_RF_CHAIN_NB][TX_ACK_TOKEN_SLOTS];
+static pthread_mutex_t mx_tx_ack_tokens = PTHREAD_MUTEX_INITIALIZER;
+
+
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DECLARATION ---------------------------------------- */
 
@@ -490,6 +528,88 @@ static int custom_lbt_hal_bw_to_cad(uint8_t hal_bw) {
         case BW_62K5HZ: return 3;
         default:        return -1;
     }
+}
+
+
+/* --- WM1303: Pending TX-ack token table helpers ---
+   Called from the downlink thread at enqueue time, and from the JIT thread at
+   TX time. Lookup matches by (count_us, freq_hz, size) which uniquely
+   identifies a packet within the short window between enqueue and TX. For
+   IMMEDIATE packets (count_us=0) we additionally require freq+size+datarate
+   to match, and fall back to oldest-first if multiple hits. */
+static void tx_ack_token_store(uint8_t rf_chain, uint8_t token_h, uint8_t token_l,
+                               const struct lgw_pkt_tx_s *pkt) {
+    if (rf_chain >= LGW_RF_CHAIN_NB || pkt == NULL) return;
+    pthread_mutex_lock(&mx_tx_ack_tokens);
+    /* Garbage-collect stale slots (>10s old) before inserting */
+    struct timespec now_ts;
+    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+    int free_slot = -1;
+    for (int s = 0; s < TX_ACK_TOKEN_SLOTS; s++) {
+        if (tx_ack_tokens[rf_chain][s].used) {
+            double age = difftimespec(now_ts, tx_ack_tokens[rf_chain][s].enq_ts);
+            if (age > 10.0) {
+                tx_ack_tokens[rf_chain][s].used = false;
+            }
+        }
+        if (!tx_ack_tokens[rf_chain][s].used && free_slot < 0) {
+            free_slot = s;
+        }
+    }
+    if (free_slot < 0) {
+        /* No free slot — overwrite oldest to avoid permanent leak */
+        double oldest = -1.0;
+        int oldest_idx = 0;
+        for (int s = 0; s < TX_ACK_TOKEN_SLOTS; s++) {
+            double age = difftimespec(now_ts, tx_ack_tokens[rf_chain][s].enq_ts);
+            if (age > oldest) { oldest = age; oldest_idx = s; }
+        }
+        free_slot = oldest_idx;
+    }
+    tx_ack_tokens[rf_chain][free_slot].used = true;
+    tx_ack_tokens[rf_chain][free_slot].count_us = pkt->count_us;
+    tx_ack_tokens[rf_chain][free_slot].freq_hz = pkt->freq_hz;
+    tx_ack_tokens[rf_chain][free_slot].size = pkt->size;
+    tx_ack_tokens[rf_chain][free_slot].datarate = pkt->datarate;
+    tx_ack_tokens[rf_chain][free_slot].bandwidth = pkt->bandwidth;
+    tx_ack_tokens[rf_chain][free_slot].token_h = token_h;
+    tx_ack_tokens[rf_chain][free_slot].token_l = token_l;
+    tx_ack_tokens[rf_chain][free_slot].enq_ts = now_ts;
+    pthread_mutex_unlock(&mx_tx_ack_tokens);
+}
+
+/* Claim (remove) the token matching the given packet. Returns true if found. */
+static bool tx_ack_token_claim(uint8_t rf_chain, const struct lgw_pkt_tx_s *pkt,
+                               uint8_t *out_token_h, uint8_t *out_token_l) {
+    if (rf_chain >= LGW_RF_CHAIN_NB || pkt == NULL ||
+        out_token_h == NULL || out_token_l == NULL) return false;
+    bool found = false;
+    pthread_mutex_lock(&mx_tx_ack_tokens);
+    int best = -1;
+    struct timespec best_ts = {0, 0};
+    for (int s = 0; s < TX_ACK_TOKEN_SLOTS; s++) {
+        if (!tx_ack_tokens[rf_chain][s].used) continue;
+        if (tx_ack_tokens[rf_chain][s].freq_hz != pkt->freq_hz) continue;
+        if (tx_ack_tokens[rf_chain][s].size != pkt->size) continue;
+        if (tx_ack_tokens[rf_chain][s].datarate != pkt->datarate) continue;
+        if (tx_ack_tokens[rf_chain][s].bandwidth != pkt->bandwidth) continue;
+        if (pkt->count_us != 0 &&
+            tx_ack_tokens[rf_chain][s].count_us != pkt->count_us &&
+            tx_ack_tokens[rf_chain][s].count_us != 0) continue;
+        /* Pick the oldest matching entry (FIFO) */
+        if (best < 0 || difftimespec(tx_ack_tokens[rf_chain][s].enq_ts, best_ts) < 0) {
+            best = s;
+            best_ts = tx_ack_tokens[rf_chain][s].enq_ts;
+        }
+    }
+    if (best >= 0) {
+        *out_token_h = tx_ack_tokens[rf_chain][best].token_h;
+        *out_token_l = tx_ack_tokens[rf_chain][best].token_l;
+        tx_ack_tokens[rf_chain][best].used = false;
+        found = true;
+    }
+    pthread_mutex_unlock(&mx_tx_ack_tokens);
+    return found;
 }
 
 
@@ -1647,7 +1767,7 @@ static double difftimespec(struct timespec end, struct timespec beginning) {
     return x;
 }
 
-static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error, int32_t error_value) {
+static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error, int32_t error_value, const tx_ack_extra_t *extra) {
     uint8_t buff_ack[ACK_BUFF_SIZE]; /* buffer to give feedback to server */
     int buff_index;
     int j;
@@ -1664,8 +1784,43 @@ static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error,
     *(uint32_t *)(buff_ack + 8) = net_mac_l;
     buff_index = 12; /* 12-byte header */
 
-    /* Put no JSON string if there is nothing to report */
-    if (error != JIT_ERROR_OK) {
+    /* WM1303: if extra (post-TX CAD/LBT) is provided, emit extended JSON
+       regardless of error code — Python uses this to resolve its pending
+       future. Fall through to legacy path if extra is NULL. */
+    if (extra != NULL) {
+        const char *err_name = "NONE";
+        switch (error) {
+            case JIT_ERROR_OK:       err_name = "NONE"; break;
+            case JIT_ERROR_TX_FREQ:  err_name = "TX_FREQ"; break;
+            case JIT_ERROR_TX_POWER: err_name = "TX_POWER"; break;
+            case JIT_ERROR_GPS_UNLOCKED: err_name = "GPS_UNLOCKED"; break;
+            default:                 err_name = "UNKNOWN"; break;
+        }
+        j = snprintf((char *)(buff_ack + buff_index), ACK_BUFF_SIZE - buff_index,
+                     "{\"txpk_ack\":{\"error\":\"%s\",\"phase\":\"post_tx\","
+                     "\"tx_result\":\"%s\","
+                     "\"cad\":{\"enabled\":%s,\"detected\":%s,\"retries\":%u,"
+                     "\"rssi_dbm\":%d,\"reason\":\"%s\"},"
+                     "\"lbt\":{\"enabled\":%s,\"pass\":%s,\"rssi_dbm\":%d,"
+                     "\"threshold_dbm\":%d,\"retries\":%u}}}",
+                     err_name,
+                     extra->tx_result ? extra->tx_result : "unknown",
+                     extra->cad_enabled ? "true" : "false",
+                     extra->cad_detected ? "true" : "false",
+                     (unsigned)extra->cad_retries,
+                     (int)extra->cad_last_rssi,
+                     extra->cad_reason ? extra->cad_reason : "",
+                     extra->lbt_enabled ? "true" : "false",
+                     extra->lbt_pass ? "true" : "false",
+                     (int)extra->lbt_rssi_dbm,
+                     (int)extra->lbt_threshold_dbm,
+                     (unsigned)extra->lbt_retries);
+        if (j > 0 && j < (int)(ACK_BUFF_SIZE - buff_index)) {
+            buff_index += j;
+        } else {
+            MSG("WARNING: [down] send_tx_ack extra JSON truncated/failed\n");
+        }
+    } else if (error != JIT_ERROR_OK) {
         /* start of JSON structure */
         memcpy((void *)(buff_ack + buff_index), (void *)"{\"txpk_ack\":{", 13);
         buff_index += 13;
@@ -3307,7 +3462,7 @@ void thread_down(void) {
                             json_value_free(root_val);
 
                             /* send acknoledge datagram to server */
-                            send_tx_ack(buff_down[1], buff_down[2], JIT_ERROR_GPS_UNLOCKED, 0);
+                            send_tx_ack(buff_down[1], buff_down[2], JIT_ERROR_GPS_UNLOCKED, 0, NULL);
                             continue;
                         }
                     } else {
@@ -3315,7 +3470,7 @@ void thread_down(void) {
                         json_value_free(root_val);
 
                         /* send acknoledge datagram to server */
-                        send_tx_ack(buff_down[1], buff_down[2], JIT_ERROR_GPS_UNLOCKED, 0);
+                        send_tx_ack(buff_down[1], buff_down[2], JIT_ERROR_GPS_UNLOCKED, 0, NULL);
                         continue;
                     }
 
@@ -3580,6 +3735,9 @@ void thread_down(void) {
                 if (jit_result != JIT_ERROR_OK) {
                     printf("ERROR: Packet REJECTED (jit error=%d)\n", jit_result);
                 } else {
+                    /* WM1303: remember the TX_ACK token for this packet so the
+                       JIT thread can emit a post-TX ACK with CAD/LBT results. */
+                    tx_ack_token_store(txpkt.rf_chain, buff_down[1], buff_down[2], &txpkt);
                     /* In case of a warning having been raised before, we notify it */
                     jit_result = warning_result;
                 }
@@ -3589,7 +3747,7 @@ void thread_down(void) {
             }
 
             /* Send acknoledge datagram to server */
-            send_tx_ack(buff_down[1], buff_down[2], jit_result, warning_value);
+            send_tx_ack(buff_down[1], buff_down[2], jit_result, warning_value, NULL);
         }
     }
     MSG("\nINFO: End of downstream thread\n");
@@ -3717,8 +3875,14 @@ void thread_jit(void) {
                            Both CAD and RSSI handle SX1261 state internally.
                            Note: HW TX_EMITTING is already checked above (consolidated mutex
                            block) so no redundant status check needed here. */
+                        /* WM1303: CAD/LBT result capture for post-TX TX_ACK.
+                           Populated throughout the CAD retry loop + Step 4 RSSI check,
+                           then consumed by send_tx_ack() once the TX outcome is known. */
+                        tx_ack_extra_t extra = {0};
+                        extra.cad_reason = "not_run";
+                        extra.tx_result = "unknown";
+                        bool clbt_blocked = false;
                         {
-                            bool clbt_blocked = false;
 
                             /* Note: TX inhibit is set/cleared inside the CAD retry loop
                                (Step 2) to maximize Channel E RX availability. */
@@ -3731,16 +3895,22 @@ void thread_jit(void) {
                                 ch_lbt_enabled = custom_lbt_channels[clbt_ch_idx].lbt_enabled;
                                 ch_rssi_threshold = custom_lbt_channels[clbt_ch_idx].rssi_threshold_dbm;
                             }
+                            extra.lbt_enabled = ch_lbt_enabled;
+                            extra.lbt_threshold_dbm = ch_rssi_threshold;
+                            /* Optimistic defaults — overridden at decision points below */
+                            extra.lbt_pass = true;
 
                             /* --- Step 3: MANDATORY CAD check with retry --- */
                             if (!clbt_blocked) {
                                 int cad_bw = custom_lbt_hal_bw_to_cad(pkt.bandwidth);
                                 if (cad_bw >= 0) {
+                                    extra.cad_enabled = true;
                                     const int CAD_MAX_RETRIES = 5;
                                     const int cad_delays_ms[] = {50, 100, 200, 300, 400};
                                     int cad_retry = 0;
                                     int cad_wait_ms = 0;
                                     bool cad_clear = false;
+                                    uint8_t lbt_retries_in_cad = 0;
 
                                     while (cad_retry <= CAD_MAX_RETRIES) {
                                         /* Inhibit LoRa RX restart before CAD scan.
@@ -3756,6 +3926,9 @@ void thread_jit(void) {
                                             MSG("WARNING: [jit] CAD scan failed on rf_chain %d "
                                                 "(err=%d) — proceeding with TX\n", i, cad_err);
                                             cad_clear = true;
+                                            extra.cad_reason = "scan_error";
+                                            extra.cad_retries = (uint8_t)cad_retry;
+                                            extra.cad_detected = false;
                                             /* Keep inhibit ON — going to lgw_send */
                                             break;
                                         }
@@ -3767,6 +3940,9 @@ void thread_jit(void) {
                                                 i, pkt.freq_hz, cad_result.rssi_dbm,
                                                 ch_rssi_threshold,
                                                 cad_retry + 1, CAD_MAX_RETRIES);
+                                            extra.lbt_rssi_dbm = cad_result.rssi_dbm;
+                                            extra.lbt_pass = false;
+                                            lbt_retries_in_cad++;
                                             /* Treat as busy — same retry logic as CAD detection */
                                             sx1261_set_tx_inhibit_rx(false);
                                             sx1261_lora_rx_restart_light();
@@ -3782,6 +3958,10 @@ void thread_jit(void) {
                                                     CAD_MAX_RETRIES, i);
                                                 sx1261_set_tx_inhibit_rx(true);
                                                 cad_clear = true;
+                                                extra.cad_retries = (uint8_t)cad_retry;
+                                                extra.cad_last_rssi = cad_result.rssi_dbm;
+                                                extra.cad_reason = "lbt_forced_after_retries";
+                                                extra.cad_detected = cad_result.detected;
                                                 break;
                                             }
                                         }
@@ -3803,6 +3983,14 @@ void thread_jit(void) {
                                                     i, cad_retry, pkt.freq_hz, cad_result.rssi_dbm);
                                             }
                                             cad_clear = true;
+                                            extra.cad_detected = false;
+                                            extra.cad_retries = (uint8_t)cad_retry;
+                                            extra.cad_last_rssi = cad_result.rssi_dbm;
+                                            extra.cad_reason = (cad_retry == 0) ? "clear" : "cleared_after_retries";
+                                            if (ch_lbt_enabled) {
+                                                extra.lbt_rssi_dbm = cad_result.rssi_dbm;
+                                                extra.lbt_pass = true;
+                                            }
                                             /* Keep inhibit ON — going to lgw_send */
                                             break;
                                         }
@@ -3835,9 +4023,14 @@ void thread_jit(void) {
                                             /* Re-inhibit for forced TX */
                                             sx1261_set_tx_inhibit_rx(true);
                                             cad_clear = true; /* force through */
+                                            extra.cad_detected = true;
+                                            extra.cad_retries = (uint8_t)cad_retry;
+                                            extra.cad_last_rssi = cad_result.rssi_dbm;
+                                            extra.cad_reason = "forced_after_retries";
                                             break;
                                         }
                                     }
+                                    extra.lbt_retries = lbt_retries_in_cad;
                                     /* Post-CAD: SX1261 is already in STDBY after CAD exit.
                                        No additional cleanup needed. */
                                     if (!cad_clear) {
@@ -3846,8 +4039,10 @@ void thread_jit(void) {
                                 } else {
                                     MSG_DEBUG(DEBUG_PKT_FWD, "Pre-TX: unsupported BW 0x%02x for CAD, "
                                         "skipping CAD check\n", pkt.bandwidth);
+                                    extra.cad_reason = "unsupported_bw";
                                 }
                             }
+
 
                             /* --- Step 4: RSSI check (if enabled and CAD was clear) --- */
                             if (!clbt_blocked && ch_lbt_enabled) {
@@ -3862,10 +4057,14 @@ void thread_jit(void) {
                                         "(freq=%u Hz, RSSI=%d dBm, threshold=%d dBm) — TX BLOCKED\n",
                                         i, pkt.freq_hz, lbt_rssi, ch_rssi_threshold);
                                     clbt_blocked = true;
+                                    extra.lbt_rssi_dbm = lbt_rssi;
+                                    extra.lbt_pass = false;
                                 } else if (lbt_err == 0) {
                                     MSG("INFO: [jit] Custom LBT RSSI clear on rf_chain %d "
                                         "(freq=%u Hz, RSSI=%d dBm)\n",
                                         i, pkt.freq_hz, lbt_rssi);
+                                    extra.lbt_rssi_dbm = lbt_rssi;
+                                    extra.lbt_pass = true;
                                 } else {
                                     MSG("WARNING: [jit] Custom LBT RSSI check failed on rf_chain %d "
                                         "(err=%d) — proceeding with TX\n", i, lbt_err);
@@ -3895,6 +4094,14 @@ void thread_jit(void) {
                                 pthread_mutex_unlock(&mx_meas_dw);
                                 MSG("INFO: [jit] Custom LBT TX BLOCKED on rf_chain %d "
                                     "(freq=%u Hz) — skipping lgw_send\n", i, pkt.freq_hz);
+                                /* WM1303: emit post-TX TX_ACK with CAD/LBT results */
+                                extra.tx_result = "blocked";
+                                {
+                                    uint8_t _tk_h = 0, _tk_l = 0;
+                                    if (tx_ack_token_claim((uint8_t)i, &pkt, &_tk_h, &_tk_l)) {
+                                        send_tx_ack(_tk_h, _tk_l, JIT_ERROR_OK, 0, &extra);
+                                    }
+                                }
                                 continue;
                             }
                         }
@@ -3932,12 +4139,28 @@ void thread_jit(void) {
                             meas_nb_tx_fail += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
                             MSG("WARNING: [jit] lgw_send failed on rf_chain %d\n", i);
+                            /* WM1303: emit post-TX TX_ACK with CAD/LBT results */
+                            extra.tx_result = "send_failed";
+                            {
+                                uint8_t _tk_h = 0, _tk_l = 0;
+                                if (tx_ack_token_claim((uint8_t)i, &pkt, &_tk_h, &_tk_l)) {
+                                    send_tx_ack(_tk_h, _tk_l, JIT_ERROR_OK, 0, &extra);
+                                }
+                            }
                             continue;
                         } else {
                             pthread_mutex_lock(&mx_meas_dw);
                             meas_nb_tx_ok += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
                             MSG_DEBUG(DEBUG_PKT_FWD, "lgw_send done on rf_chain %d: count_us=%u\n", i, pkt.count_us);
+                            /* WM1303: emit post-TX TX_ACK with CAD/LBT results */
+                            extra.tx_result = "sent";
+                            {
+                                uint8_t _tk_h = 0, _tk_l = 0;
+                                if (tx_ack_token_claim((uint8_t)i, &pkt, &_tk_h, &_tk_l)) {
+                                    send_tx_ack(_tk_h, _tk_l, JIT_ERROR_OK, 0, &extra);
+                                }
+                            }
 
                             /* Compute estimated airtime for this packet */
                             uint32_t est_airtime_ms = 500; /* default fallback */

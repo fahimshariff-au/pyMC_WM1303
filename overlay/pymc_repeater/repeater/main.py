@@ -1015,7 +1015,11 @@ class RepeaterDaemon:
 
         # Rules already loaded above from SSOT or config.yaml fallback
 
-        dedup_ttl = cfg_bridge.get("dedup_ttl", 15.0)
+        # Read Adv. Config Dedup TTL. SSOT key is `bridge.dedup_ttl_seconds`
+        # (written by the Adv. Config UI). Legacy `bridge.dedup_ttl` is kept
+        # as a backward-compatible fallback for older configs.
+        dedup_ttl = cfg_bridge.get("dedup_ttl_seconds",
+                                    cfg_bridge.get("dedup_ttl", 300.0))
 
         from repeater.bridge_engine import BridgeEngine
         self.bridge_engine = BridgeEngine(
@@ -1403,6 +1407,13 @@ class RepeaterDaemon:
                     pub_key_formatted = f"{pub_key_hex[:8]}...{pub_key_hex[-8:]}"
                 else:
                     pub_key_formatted = pub_key_hex
+
+            # Centralized metrics retention (8-day default, hourly cleanup, weekly VACUUM)
+            try:
+                from repeater.metrics_retention import start as _start_retention
+                _start_retention()
+            except Exception as _e:
+                logger.warning(f"metrics_retention start failed: {_e}")
 
             current_loop = asyncio.get_event_loop()
 

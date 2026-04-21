@@ -109,6 +109,7 @@ select.ci option{background:#1e293b}
       <button class="tab-btn" onclick="showTab('dedup',this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Dedup</button>
       <button class="tab-btn" onclick="showTab('channels',this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>Channels</button>
       <button class="tab-btn" onclick="showTab('bridge',this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 9h16M4 15h16M7 3v18M17 3v18"/></svg>Bridge Rules</button>
+      <button class="tab-btn" onclick="showTab('tracing',this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>Tracing</button>
       <button class="tab-btn" onclick="showTab('logs',this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>Logs</button>
       <button class="tab-btn" onclick="showTab('adv-config',this)"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z"/><circle cx="12" cy="12" r="3"/></svg>Adv. Config</button>
     </div>
@@ -484,19 +485,19 @@ select.ci option{background:#1e293b}
 
       <div class="ac-field">
         <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">Dedup TTL (sec)</label>
-        <input id="ac-dedup-ttl" type="number" min="10" max="3600" value="300" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <input id="ac-dedup-ttl" type="number" min="10" max="3600" placeholder="loading..." style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
         <small style="color:var(--txm);display:block;margin-top:4px">How long packet hashes are retained to filter duplicates</small>
       </div>
 
       <div class="ac-field">
         <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">Cache TTL (sec)</label>
-        <input id="ac-cache-ttl" type="number" min="10" max="3600" value="60" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
-        <small style="color:var(--txm);display:block;margin-top:4px">TTL of the seen_packets cache (minimum 300s is enforced in code)</small>
+        <input id="ac-cache-ttl" type="number" min="10" max="3600" placeholder="loading..." style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:var(--txm);display:block;margin-top:4px">TTL of the seen_packets cache (how long dedup entries are retained)</small>
       </div>
 
       <div class="ac-field">
         <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">Max Cache Size</label>
-        <input id="ac-max-cache" type="number" min="100" max="10000" value="1000" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <input id="ac-max-cache" type="number" min="100" max="10000" placeholder="loading..." style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
         <small style="color:var(--txm);display:block;margin-top:4px">Maximum number of unique packets in the dedup cache</small>
       </div>
 
@@ -2342,11 +2343,12 @@ function renderRssiChart(channels, noiseFloor) {
   channels.forEach(function(ch, i) {
     if (!ch.timeseries || ch.timeseries.length === 0) return;
     var color = getChColor(i);
-    var pts = ch.timeseries.filter(function(pt) { return pt.avg_rssi !== null && pt.avg_rssi !== undefined; }).map(function(pt) {
-      return { x: new Date(pt.timestamp * 1000), y: pt.avg_rssi };
+    var pts = ch.timeseries.map(function(pt) {
+      var v = (pt.avg_rssi !== null && pt.avg_rssi !== undefined) ? pt.avg_rssi : null;
+      return { x: new Date(pt.timestamp * 1000), y: v };
     });
     if (pts.length === 0) return;
-    totalPts += pts.length;
+    totalPts += pts.filter(function(p){ return p.y !== null; }).length;
     datasets.push({
       label: (ch.name || ch.friendly_name) + ' RSSI',
       data: pts,
@@ -2354,10 +2356,11 @@ function renderRssiChart(channels, noiseFloor) {
       backgroundColor: 'transparent',
       borderWidth: 2,
       pointRadius: 0,
+      spanGaps: true,
       tension: 0.3
     });
   });
-  if (datasets.length === 0) {
+  if (totalPts === 0) {
     datasets.push({ label: 'No data', data: [{ x: new Date(), y: -120 }], borderColor: '#666', pointRadius: 3 });
   }
   var el = document.getElementById('sigRssiCount');
@@ -2385,11 +2388,12 @@ function renderSnrChart(channels) {
   channels.forEach(function(ch, i) {
     if (!ch.timeseries || ch.timeseries.length === 0) return;
     var color = getChColor(i);
-    var pts = ch.timeseries.filter(function(pt) { return pt.avg_snr !== null; }).map(function(pt) {
-      return { x: new Date(pt.timestamp * 1000), y: pt.avg_snr };
+    var pts = ch.timeseries.map(function(pt) {
+      var v = (pt.avg_snr !== null && pt.avg_snr !== undefined) ? pt.avg_snr : null;
+      return { x: new Date(pt.timestamp * 1000), y: v };
     });
     if (pts.length === 0) return;
-    totalPts += pts.length;
+    totalPts += pts.filter(function(p){ return p.y !== null; }).length;
     datasets.push({
       label: (ch.name || ch.friendly_name) + ' SNR',
       data: pts,
@@ -2397,6 +2401,7 @@ function renderSnrChart(channels) {
       backgroundColor: 'transparent',
       borderWidth: 2,
       pointRadius: 0,
+      spanGaps: true,
       tension: 0.3
     });
   });
@@ -2414,7 +2419,7 @@ function renderSnrChart(channels) {
       backgroundColor: 'transparent'
     });
   }
-  if (datasets.length === 0) {
+  if (totalPts === 0) {
     datasets.push({ label: 'No data', data: [{ x: new Date(), y: 0 }], borderColor: '#666', pointRadius: 3 });
   }
   var el = document.getElementById('sigSnrCount');
@@ -2564,7 +2569,8 @@ function renderPerChannelNfChart(channels) {
       borderColor: color,
       backgroundColor: 'transparent',
       borderWidth: 2,
-      pointRadius: 0,
+      pointRadius: pts.length > 100 ? 0 : 2,
+      spanGaps: true,
       tension: 0.3
     });
   });
@@ -2948,26 +2954,94 @@ function renderLbtHistChart(channels) {
   var datasets = [];
   var totalEvents = 0;
   var legendHtml = '';
+  var globalMinT = null, globalMaxT = null;
 
   channels.forEach(function(ch, i) {
     var evts = ch.tx_events || ch.timeseries || []; if (evts.length === 0) return;
     if (!ch.active) return;
     var color = ch.color || ['#3b82f6','#8b5cf6','#10b981','#f59e0b','#f97316'][i % 5];
-    var clearPts = [];
-    var busyPts = [];
+
+    // Track time bounds for full-axis threshold line
+    var firstT = new Date(evts[0].timestamp * 1000);
+    var lastT  = new Date(evts[evts.length - 1].timestamp * 1000);
+    if (globalMinT === null || firstT < globalMinT) globalMinT = firstT;
+    if (globalMaxT === null || lastT  > globalMaxT) globalMaxT = lastT;
+
+    // Continuous lines — draw for every bucket (nulls become gaps; spanGaps bridges them)
+    var nfLine      = evts.map(function(e){ return { x: new Date(e.timestamp*1000), y: (e.noise_floor_dbm != null ? e.noise_floor_dbm : null) }; });
+    var lbtRssiLine = evts.map(function(e){ return { x: new Date(e.timestamp*1000), y: (e.lbt_last_rssi   != null ? e.lbt_last_rssi   : null) }; });
+    var rxRssiLine  = evts.map(function(e){ return { x: new Date(e.timestamp*1000), y: (e.avg_rssi        != null ? e.avg_rssi        : null) }; });
+    var snrLine     = evts.map(function(e){ return { x: new Date(e.timestamp*1000), y: (e.avg_snr         != null ? e.avg_snr         : null) }; });
+
+    // Noise floor — solid line on dBm axis
+    datasets.push({
+      label: (ch.name || ch.friendly_name) + ' Noise Floor',
+      data: nfLine,
+      borderColor: color,
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      showLine: true,
+      spanGaps: true,
+      tension: 0.2,
+      yAxisID: 'y'
+    });
+    // LBT last RSSI — dotted line on dBm axis
+    datasets.push({
+      label: (ch.name || ch.friendly_name) + ' LBT RSSI',
+      data: lbtRssiLine,
+      borderColor: color,
+      backgroundColor: 'transparent',
+      borderWidth: 1.5,
+      borderDash: [2, 3],
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      showLine: true,
+      spanGaps: true,
+      tension: 0.2,
+      yAxisID: 'y'
+    });
+    // RX avg RSSI — thinner solid line on dBm axis (sparse, spanGaps bridges)
+    datasets.push({
+      label: (ch.name || ch.friendly_name) + ' RX RSSI',
+      data: rxRssiLine,
+      borderColor: color,
+      backgroundColor: 'transparent',
+      borderWidth: 1.2,
+      borderDash: [6, 3],
+      pointRadius: 2,
+      pointHoverRadius: 4,
+      showLine: true,
+      spanGaps: true,
+      tension: 0.2,
+      yAxisID: 'y'
+    });
+    // RX avg SNR — on secondary y-axis (dB)
+    datasets.push({
+      label: (ch.name || ch.friendly_name) + ' RX SNR',
+      data: snrLine,
+      borderColor: color,
+      backgroundColor: color + '22',
+      borderWidth: 1.2,
+      pointRadius: 2,
+      pointHoverRadius: 4,
+      showLine: true,
+      spanGaps: true,
+      tension: 0.2,
+      yAxisID: 'y2'
+    });
+
+    // TX event markers — dots only where real TX occurred
+    var clearPts = [], busyPts = [];
     evts.forEach(function(evt) {
-      if (evt.noise_floor_dbm === null) return;
-      // Only show dots for buckets with actual TX activity
-      if ((evt.tx_count_delta || 0) === 0 && (evt.lbt_passed_delta || 0) === 0 && (evt.lbt_blocked_delta || 0) === 0) return;
+      var hadTxActivity = (evt.tx_count_delta || 0) > 0 || (evt.lbt_passed_delta || 0) > 0 || (evt.lbt_blocked_delta || 0) > 0;
+      if (!hadTxActivity) return;
+      if (evt.noise_floor_dbm == null) return;
       var pt = { x: new Date(evt.timestamp * 1000), y: evt.noise_floor_dbm };
-      if (evt.lbt_clear) {
-        clearPts.push(pt);
-      } else {
-        busyPts.push(pt);
-      }
+      if (evt.lbt_clear) clearPts.push(pt); else busyPts.push(pt);
     });
     totalEvents += clearPts.length + busyPts.length;
-    // Clear TX events (green dots with channel-colored border)
     if (clearPts.length > 0) {
       datasets.push({
         label: (ch.name || ch.friendly_name) + ' TX Clear',
@@ -2977,10 +3051,10 @@ function renderLbtHistChart(channels) {
         borderWidth: 2,
         pointRadius: 5,
         pointHoverRadius: 7,
-        showLine: false
+        showLine: false,
+        yAxisID: 'y'
       });
     }
-    // Busy TX events (red dots with channel-colored border)
     if (busyPts.length > 0) {
       datasets.push({
         label: (ch.name || ch.friendly_name) + ' TX Busy',
@@ -2991,31 +3065,36 @@ function renderLbtHistChart(channels) {
         pointRadius: 6,
         pointHoverRadius: 8,
         pointStyle: 'crossRot',
-        showLine: false
+        showLine: false,
+        yAxisID: 'y'
       });
     }
-    // LBT threshold line (dashed horizontal)
-    if (ch.lbt_threshold_dbm && (clearPts.length > 0 || busyPts.length > 0)) {
-      var allPts = clearPts.concat(busyPts);
-      var minTime = allPts[0].x;
-      var maxTime = allPts[allPts.length - 1].x;
+
+    legendHtml += '<span style="color:' + color + '">&#9679; ' + (ch.name || ch.friendly_name) + '</span> ';
+  });
+
+  // LBT threshold lines — span full visible time axis
+  if (globalMinT !== null && globalMaxT !== null) {
+    channels.forEach(function(ch, i) {
+      if (!ch.active) return;
+      if (!ch.lbt_threshold_dbm) return;
+      var color = ch.color || ['#3b82f6','#8b5cf6','#10b981','#f59e0b','#f97316'][i % 5];
       datasets.push({
         label: (ch.name || ch.friendly_name) + ' LBT Threshold (' + ch.lbt_threshold_dbm + ' dBm)',
-        data: [{ x: minTime, y: ch.lbt_threshold_dbm }, { x: maxTime, y: ch.lbt_threshold_dbm }],
+        data: [{ x: globalMinT, y: ch.lbt_threshold_dbm }, { x: globalMaxT, y: ch.lbt_threshold_dbm }],
         borderColor: color,
         borderWidth: 1.5,
         borderDash: [8, 4],
         pointRadius: 0,
         backgroundColor: 'transparent',
         showLine: true,
-        fill: false
+        fill: false,
+        yAxisID: 'y'
       });
-    }
-    legendHtml += '<span style="color:' + color + '">&#9679; ' + (ch.name || ch.friendly_name) + '</span> ';
-  });
+    });
+  }
 
-  // Add legend summary
-  legendHtml += '<span>| <span style="color:#22c55e">&#9679;</span> Clear TX &nbsp; <span style="color:#ef4444">&#10005;</span> Busy TX &nbsp; <span style="border-bottom:2px dashed #999">---</span> LBT Threshold</span>';
+  legendHtml += '<span>| <span style="color:#22c55e">&#9679;</span> Clear TX &nbsp; <span style="color:#ef4444">&#10005;</span> Busy TX &nbsp; <span style="border-bottom:2px dashed #999">---</span> LBT Threshold &nbsp; <span style="border-bottom:2px dotted #999">···</span> LBT RSSI &nbsp; <span style="border-bottom:1px dashed #999">- -</span> RX RSSI</span>';
   var legendEl = document.getElementById('lbtHistLegend');
   if (legendEl) legendEl.innerHTML = legendHtml;
 
@@ -3023,7 +3102,7 @@ function renderLbtHistChart(channels) {
   if (el) el.textContent = totalEvents + ' TX events';
 
   if (datasets.length === 0) {
-    datasets.push({ label: 'No TX data', data: [{ x: new Date(), y: -120 }], borderColor: '#666', pointRadius: 3, showLine: false });
+    datasets.push({ label: 'No data', data: [{ x: new Date(), y: -120 }], borderColor: '#666', pointRadius: 3, showLine: false });
   }
 
   lbtHistChart = new Chart(canvas, {
@@ -3031,6 +3110,7 @@ function renderLbtHistChart(channels) {
     data: { datasets: datasets },
     options: {
       responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'nearest', intersect: false },
       scales: {
         x: {
           type: 'time',
@@ -3039,8 +3119,15 @@ function renderLbtHistChart(channels) {
           ticks: { color: '#999' }
         },
         y: {
-          title: { display: true, text: 'Noise Floor (dBm)', color: '#999' },
+          position: 'left',
+          title: { display: true, text: 'RSSI / Noise Floor (dBm)', color: '#999' },
           grid: { color: 'rgba(128,128,128,0.1)' },
+          ticks: { color: '#999' }
+        },
+        y2: {
+          position: 'right',
+          title: { display: true, text: 'SNR (dB)', color: '#999' },
+          grid: { drawOnChartArea: false },
           ticks: { color: '#999' }
         }
       },
@@ -3050,7 +3137,9 @@ function renderLbtHistChart(channels) {
           callbacks: {
             label: function(ctx) {
               var lbl = ctx.dataset.label || '';
-              return lbl + ': ' + ctx.parsed.y + ' dBm';
+              var unit = (ctx.dataset.yAxisID === 'y2') ? ' dB' : ' dBm';
+              var v = ctx.parsed.y;
+              return lbl + ': ' + (v != null ? v : 'n/a') + unit;
             }
           }
         }
@@ -3550,7 +3639,7 @@ function hexToRgba(hex, alpha) {
   var AC_FIELDS = {
     'ac-dedup-ttl':   { key: 'dedup_ttl_seconds',           source: 'config' },
     'ac-cache-ttl':   { key: 'cache_ttl',                   source: 'config' },
-    'ac-max-cache':   { key: 'max_cache_size',               source: 'ui' },
+    'ac-max-cache':   { key: 'max_cache_size',               source: 'config' },
     'ac-queue-size':  { key: 'queue_size',                   source: 'config' },
     'ac-tx-delay':    { key: 'inter_packet_delay',           source: 'config' },
     'ac-pkt-ttl':     { key: 'packet_ttl',                   source: 'ui' },
@@ -3631,13 +3720,9 @@ function hexToRgba(hex, alpha) {
       gpio_pins: 'GPIO Pin Configuration'
     }[group] || group;
 
-    var confirmMsg = 'Are you sure you want to save the "' + groupLabel + '" settings?
-
-The service will be restarted.';
+    var confirmMsg = 'Are you sure you want to save the "' + groupLabel + '" settings?\n\nThe service will be restarted.';
     if (group === 'hal_advanced') {
-      confirmMsg = '⚠️ WARNING: HAL changes can damage hardware!
-
-' + confirmMsg;
+      confirmMsg = '\u26A0\uFE0F WARNING: HAL changes can damage hardware!\n\n' + confirmMsg;
     }
     if (group === 'gpio_pins') {
       confirmMsg = '⚠️ WARNING: Wrong GPIO pins can damage hardware!\n\n' + confirmMsg;
@@ -3698,6 +3783,295 @@ The service will be restarted.';
     }
   };
 
+})();
+</script>
+<!-- TRACING TAB -->
+<div id="tab-tracing" class="tp">
+  <div class="gl p-5 mb-4">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div class="stl mb-0">Packet Tracing</div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <select id="traceFilterStatus" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" onchange="traceLoad()">
+          <option value="">All Status</option>
+          <option value="ok">OK</option>
+          <option value="partial">Partial</option>
+          <option value="error">Error</option>
+          <option value="echo_dedup">Echo/Dedup</option>
+          <option value="dedup">Dedup</option>
+          <option value="filtered">Filtered</option>
+        </select>
+        <select id="traceFilterChannel" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" onchange="traceLoad()">
+          <option value="">All Channels</option>
+          <option value="channel_a">channel_a</option>
+          <option value="channel_b">channel_b</option>
+          <option value="channel_c">channel_c</option>
+          <option value="channel_d">channel_d</option>
+          <option value="channel_e">channel_e</option>
+          <option value="repeater">repeater</option>
+        </select>
+        <select id="traceFilterLimit" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" onchange="traceLoad()">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+        <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer select-none">
+          <input type="checkbox" id="traceAutoRefresh" checked onchange="traceToggleAuto()" class="accent-indigo-500">
+          Auto
+        </label>
+        <select id="traceAutoInterval" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" onchange="traceToggleAuto()">
+          <option value="3">3s</option>
+          <option value="5">5s</option>
+          <option value="10">10s</option>
+          <option value="15" selected>15s</option>
+          <option value="30">30s</option>
+        </select>
+        <button class="btn sec sm" onclick="traceLoad()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9H3"/><path d="M3 3v6h6"/></svg>Refresh</button>
+      </div>
+    </div>
+    <div id="traceNoData" style="display:none;text-align:center;padding:40px 0;color:var(--txm)">
+      <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="margin:0 auto 12px;opacity:0.4"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      <div>No packet traces recorded yet</div>
+      <div style="font-size:12px;margin-top:4px">Traces will appear as packets flow through the bridge</div>
+    </div>
+    <div id="traceList"></div>
+  </div>
+</div>
+<script>
+(function(){
+  var _traceTimer = null;
+  var _traceActive = false;
+  var _traceData = [];
+  var _expandedTraces = new Set();  // preserve expanded state across refreshes
+  window.traceLoad = function() {
+    var status = document.getElementById('traceFilterStatus').value;
+    var channel = document.getElementById('traceFilterChannel').value;
+    var limit = document.getElementById('traceFilterLimit').value;
+    var url = '/api/wm1303/packet_traces?limit=' + limit;
+    if (status) url += '&status=' + encodeURIComponent(status);
+    if (channel) url += '&channel=' + encodeURIComponent(channel);
+    fetch(url).then(function(r){ return r.json(); }).then(function(data){
+      if (data.error) { console.error('Trace API error:', data.error); return; }
+      _traceData = data.traces || [];
+      _renderTraces(_traceData);
+    }).catch(function(e){ console.error('Trace fetch error:', e); });
+  };
+  window.traceToggleAuto = function() {
+    if (_traceTimer) { clearInterval(_traceTimer); _traceTimer = null; }
+    var cb = document.getElementById('traceAutoRefresh');
+    if (cb && cb.checked && _traceActive) {
+      var iv = parseInt(document.getElementById('traceAutoInterval').value) || 5;
+      _traceTimer = setInterval(traceLoad, iv * 1000);
+    }
+  };
+  function _statusBadge(color, text) {
+    return '<span style="position:absolute;top:-5px;right:-7px;font-size:8px;background:' + color + ';color:#0a0a0a;border-radius:6px;padding:0 3px;line-height:1.3;font-weight:800;border:1px solid rgba(0,0,0,0.4)">' + text + '</span>';
+  }
+  function _statusIcon(s) {
+    if (s === 'ok') return '<span style="color:#34d399">\u2705</span>';
+    if (s === 'echo_dedup') return '<span style="position:relative;display:inline-block;color:#34d399">\u2705' + _statusBadge('#60a5fa', 'E') + '</span>';
+    if (s === 'dedup') return '<span style="position:relative;display:inline-block;color:#34d399">\u2705' + _statusBadge('#f97316', 'D') + '</span>';
+    if (s === 'partial') return '<span style="color:#fbbf24">\u26A0\uFE0F</span>';
+    if (s === 'error') return '<span style="color:#ef4444">\u274C</span>';
+    if (s === 'filtered') return '<span style="color:#a78bfa">\u26A0\uFE0F</span>';
+    return '<span style="color:#9ca3af">\u2753</span>';
+  }
+  function _statusColor(s) {
+    if (s === 'ok' || s === 'echo_dedup') return '#34d399';
+    if (s === 'partial') return '#fbbf24';
+    if (s === 'dedup') return '#f97316';
+    if (s === 'filtered') return '#a78bfa';
+    if (s === 'error') return '#ef4444';
+    return '#9ca3af';
+  }
+  function _hashColor(h) {
+    if (!h) return '#6366f1';
+    var n = 0;
+    for (var i = 0; i < h.length; i++) n = ((n << 5) - n + h.charCodeAt(i)) | 0;
+    var hue = Math.abs(n) % 360;
+    return 'hsl(' + hue + ',60%,65%)';
+  }
+  function _fmtTime(iso) {
+    if (!iso) return '';
+    try { var d = new Date(iso); return d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch(e) { return iso; }
+  }
+  function _stepStatusColor(s) {
+    if (s === 'ok') return '#34d399';
+    if (s === 'warning') return '#fbbf24';
+    if (s === 'error') return '#ef4444';
+    return '#9ca3af';
+  }
+  // Resolve a raw channel id (e.g. 'channel_e', 'channel_a') to its friendly
+  // display name (e.g. 'EU-Narrow', 'local-test') using the module-level
+  // chData and cheData populated elsewhere. Falls back to the raw id.
+  function _traceFriendlyName(chId) {
+    if (!chId) return '-';
+    try {
+      if (chId === 'channel_e') {
+        if (typeof cheData !== 'undefined' && cheData) {
+          return cheData.name || cheData.friendly_name || 'Channel E';
+        }
+        return 'Channel E';
+      }
+      // channel_a..channel_d map to chData[0..3]
+      if (/^channel_[a-d]$/.test(chId) && typeof chData !== 'undefined' && Array.isArray(chData)) {
+        var idx = chId.charCodeAt(chId.length - 1) - 97; // 'a'=0
+        var c = chData[idx];
+        if (c) return c.name || c.friendly_name || ('Channel ' + chId.slice(-1).toUpperCase());
+      }
+    } catch (e) {}
+    return chId;
+  }
+  function _stepDirection(name) {
+    if (!name) return 'other';
+    if (name === 'received' || name === 'echo_dedup' || name === 'dedup_drop' || name === 'dedup_skip' || name === 'filter_drop' || name === 'bridge_inject') return 'rx';
+    if (name === 'bridge_forward' || name === 'tx_enqueue' || name === 'tx_send' || name === 'lbt_check' || name === 'cad_check') return 'tx';
+    return 'other';
+  }
+  function _dirColor(d) {
+    if (d === 'rx') return '#22d3ee';
+    if (d === 'tx') return '#fb923c';
+    return '#9ca3af';
+  }
+  function _dirLabel(d) {
+    if (d === 'rx') return 'RX';
+    if (d === 'tx') return 'TX';
+    return '--';
+  }
+  function _dirBg(d) {
+    if (d === 'rx') return 'rgba(34,211,238,0.06)';
+    if (d === 'tx') return 'rgba(251,146,60,0.07)';
+    return 'transparent';
+  }
+  function _extractTxTarget(s) {
+    if (!s || !s.name) return null;
+    if (s.name === 'tx_send') return s.channel || null;
+    var det = s.detail || '';
+    // Strip trailing '(rule: ...)' to avoid matching arrows/names inside the rule text
+    var clean = det.replace(/\s*\(rule:.*$/, '');
+    // tx_enqueue: 'Queued TX <src> \u2192 <tgt>'  \u2192 match last arrow
+    var m = clean.match(/\u2192\s*([A-Za-z0-9_-]+)/);
+    if (m) return m[1];
+    // bridge_forward: 'Forwarded to <tgt>'
+    m = clean.match(/Forwarded\s+to\s+([A-Za-z0-9_-]+)/i);
+    if (m) return m[1];
+    // Fallback generic 'to <tgt>'
+    m = clean.match(/\bto\s+([A-Za-z0-9_-]+)/i);
+    if (m) return m[1];
+    return null;
+  }
+  window.toggleTraceDetail = function(hash) {
+    var el = document.getElementById('trace-detail-' + hash);
+    if (!el) return;
+    if (el.style.display === 'none') {
+      el.style.display = 'block';
+      _expandedTraces.add(hash);
+    } else {
+      el.style.display = 'none';
+      _expandedTraces.delete(hash);
+    }
+  };
+  function _renderTraces(traces) {
+    var box = document.getElementById('traceList');
+    var nodata = document.getElementById('traceNoData');
+    if (!box) return;
+    if (!traces || traces.length === 0) {
+      box.innerHTML = '';
+      if (nodata) nodata.style.display = 'block';
+      return;
+    }
+    if (nodata) nodata.style.display = 'none';
+    var html = '';
+    html += '<div style="display:grid;grid-template-columns:140px 90px 90px 80px 100px 60px;gap:4px 8px;font-size:12px;font-weight:600;color:var(--txm);padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);margin-bottom:4px">';
+    html += '<div>Time</div><div style="text-align:center">Hash</div><div>Channel</div><div>Type</div><div style="text-align:right">Duration</div><div style="text-align:center">Status</div>';
+    html += '</div>';
+    for (var i = 0; i < traces.length; i++) {
+      var t = traces[i];
+      var hc = _hashColor(t.pkt_hash);
+      html += '<div style="cursor:pointer;border-radius:6px;transition:background .15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseout="this.style.background=\'transparent\'" onclick="toggleTraceDetail(\'' + (t.pkt_hash || i) + '\')">';
+      html += '<div style="display:grid;grid-template-columns:140px 90px 90px 80px 100px 60px;gap:4px 8px;font-size:12px;padding:6px 8px;align-items:center">';
+      html += '<div style="color:var(--txm)">' + _fmtTime(t.first_seen) + '</div>';
+      html += '<div style="font-family:monospace;font-size:11px;background:' + hc + '22;color:' + hc + ';padding:1px 6px;border-radius:4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (t.pkt_hash || '').toUpperCase() + '</div>';
+      html += '<div style="color:var(--txs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + _traceFriendlyName(t.channel) + '</div>';
+      html += '<div style="color:var(--txs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (t.type || '-') + '</div>';
+      html += '<div style="text-align:right;white-space:nowrap;min-width:100px;font-family:monospace;color:var(--txs)">' + (t.total_ms !== undefined ? t.total_ms.toFixed(1) + 'ms' : '-') + '</div>';
+      html += '<div style="text-align:center;min-width:60px">' + _statusIcon(t.status) + '</div>';
+      html += '</div>';
+      html += '<div id="trace-detail-' + (t.pkt_hash || i) + '" style="display:none;padding:4px 8px 12px 20px;border-bottom:1px solid rgba(255,255,255,0.06)">';
+      if (t.steps && t.steps.length > 0) {
+        // WM1303 v2.1.6: chronological sort safety net. Steps emitted nearly
+        // simultaneously (e.g. lbt_check / cad_check / tx_send) may arrive
+        // with identical elapsed_ms; preserve insertion order for ties using
+        // the original array index as secondary sort key.
+        t.steps.forEach(function(__s, __idx){ __s.__orig_idx = __idx; });
+        t.steps.sort(function(a, b){
+          var ea = (a.elapsed_ms !== undefined) ? a.elapsed_ms : 0;
+          var eb = (b.elapsed_ms !== undefined) ? b.elapsed_ms : 0;
+          if (ea !== eb) return ea - eb;
+          return a.__orig_idx - b.__orig_idx;
+        });
+        html += '<div style="position:relative;padding-left:20px">';
+        for (var j = 0; j < t.steps.length; j++) {
+          var s = t.steps[j];
+          var sclr = _stepStatusColor(s.status);
+          var dir = _stepDirection(s.name);
+          var dclr = _dirColor(dir);
+          var dlbl = _dirLabel(dir);
+          var rowBg = _dirBg(dir);
+          var isLast = (j === t.steps.length - 1);
+          var txTarget = (dir === 'tx') ? _extractTxTarget(s) : null;
+          // Pill renders the friendly (display) name, not the raw id.
+          var txTargetPill = '';
+          if (txTarget) {
+            var _pillName = _traceFriendlyName(txTarget);
+            var tc = _hashColor(txTarget);
+            txTargetPill = '<span style="font-size:10px;font-weight:700;background:' + tc + '22;color:' + tc + ';border:1px solid ' + tc + '55;padding:1px 7px;border-radius:10px;white-space:nowrap">\u2192 ' + _pillName + '</span>';
+          }
+          // Pill placement: for bridge_forward / tx_enqueue move pill to END
+          // of the row (after detail). For tx_send / lbt_check / cad_check
+          // keep it right after the step name (original layout).
+          var pillAtEnd = (s.name === 'bridge_forward' || s.name === 'tx_enqueue');
+          html += '<div style="position:relative;padding-bottom:' + (isLast ? '0' : '10') + 'px;margin-left:8px">';
+          html += '<div style="position:absolute;left:-16px;top:6px;width:10px;height:10px;border-radius:50%;background:' + sclr + ';border:2px solid rgba(0,0,0,0.3);z-index:1"></div>';
+          if (!isLast) { html += '<div style="position:absolute;left:-12px;top:16px;bottom:0;width:2px;background:rgba(255,255,255,0.1)"></div>'; }
+          html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:' + rowBg + ';border-left:3px solid ' + dclr + ';padding:4px 8px;border-radius:3px">';
+          html += '<span style="font-size:9px;font-weight:800;background:' + dclr + ';color:#0a0a0a;padding:1px 5px;border-radius:3px;letter-spacing:0.5px;min-width:24px;text-align:center;flex-shrink:0">' + dlbl + '</span>';
+          html += '<span style="font-weight:700;color:' + sclr + ';font-size:12px;min-width:110px">' + (s.name || '') + '</span>';
+          if (txTargetPill && !pillAtEnd) {
+            html += txTargetPill;
+          }
+          html += '<span style="font-family:monospace;font-size:11px;color:var(--txm);min-width:70px">+' + (s.elapsed_ms !== undefined ? s.elapsed_ms.toFixed(1) : '0') + 'ms</span>';
+          html += '<span style="font-size:11px;color:var(--txs);white-space:pre-line;flex:1 1 auto">' + (s.detail || '') + '</span>';
+          if (txTargetPill && pillAtEnd) {
+            html += txTargetPill;
+          }
+          html += '</div></div>';
+        }
+        html += '</div>';
+      } else {
+        html += '<div style="color:var(--txm);font-size:11px;font-style:italic">No steps recorded</div>';
+      }
+      html += '</div></div>';
+    }
+    box.innerHTML = html;
+    // Re-expand previously expanded traces
+    _expandedTraces.forEach(function(hash) {
+      var el = document.getElementById('trace-detail-' + hash);
+      if (el) el.style.display = 'block';
+    });
+  }
+  var _origShowTabTrace = window.showTab;
+  window.showTab = function(name, btn) {
+    _origShowTabTrace(name, btn);
+    if (name === 'tracing') {
+      _traceActive = true;
+      traceLoad();
+      traceToggleAuto();
+    } else {
+      _traceActive = false;
+      if (_traceTimer) { clearInterval(_traceTimer); _traceTimer = null; }
+    }
+  };
 })();
 </script>
 </body>

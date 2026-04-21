@@ -144,6 +144,12 @@ class ChannelTXQueue:
             "cad_detected": 0,
             "cad_timeout": 0,
             "cad_last_result": None,
+            # HW CAD (done by HAL C code before every TX, reported via TX_ACK)
+            "cad_hw_clear": 0,
+            "cad_hw_detected": 0,
+            # SW CAD (optional SX1261-based CAD in Python LBT path)
+            "cad_sw_clear": 0,
+            "cad_sw_detected": 0,
             # LBT RSSI noise floor stats (rolling buffer)
             "noise_floor_lbt_avg": None,
             "noise_floor_lbt_min": None,
@@ -371,6 +377,32 @@ class TXQueueManager:
     def stop_all(self) -> None:
         """Stop all TX queue processing (no-op since queues are passive FIFOs)."""
         logger.info("TXQueueManager: all queues stopped")
+
+    def record_hw_cad_result(self, channel_id: str, cad_result: dict) -> None:
+        """Increment HW CAD counters from a post-TX_ACK hardware CAD result.
+
+        The WM1303 HAL C code performs HW CAD before every TX and reports the
+        outcome in the post-TX TX_ACK packet. This method wires those results
+        into the per-channel queue stats so the UI and cad_events persistence
+        can see HW CAD activity even when SW LBT/CAD is disabled.
+
+        Args:
+            channel_id: per-channel queue identifier.
+            cad_result: dict with keys 'enabled' (bool), 'detected' (bool),
+                optional 'reason' (str).
+        """
+        if not cad_result or not cad_result.get("enabled"):
+            return
+        q = self.queues.get(channel_id)
+        if q is None:
+            return
+        if cad_result.get("detected"):
+            q.stats["cad_detected"] = q.stats.get("cad_detected", 0) + 1
+            q.stats["cad_hw_detected"] = q.stats.get("cad_hw_detected", 0) + 1
+        else:
+            q.stats["cad_clear"] = q.stats.get("cad_clear", 0) + 1
+            q.stats["cad_hw_clear"] = q.stats.get("cad_hw_clear", 0) + 1
+        q.stats["cad_last_result"] = cad_result.get("reason", "hw")
 
     def get_status(self) -> dict:
         """Return status of all TX queues."""

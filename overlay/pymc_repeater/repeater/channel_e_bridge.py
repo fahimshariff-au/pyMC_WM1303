@@ -21,6 +21,8 @@ import logging
 import socket
 import hashlib
 from pathlib import Path
+from repeater.bridge_engine import _stable_hash, emit_lbt_cad_trace_steps
+from repeater.web.packet_trace import trace_event as _trace
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +62,24 @@ class ChannelEBridge:
 
         Uses the SX1302/SX1250/SKY66420 TX path with parameters from
         the channel_e TX queue (configured from wm1303_ui.json).
+
+        Emits a `tx_send` packet-trace step on completion so channel_e
+        TX appears in the Tracing UI the same way as other radio channels.
+        Also emits `lbt_check` / `cad_check` steps (via the shared helper)
+        so every HAL-TX path — including channel_e — has uniform CAD/LBT
+        visibility in the Tracing tab.
         """
+        pkt_hash8 = _stable_hash(data)[:8]
+        # Friendly channel display name (e.g. "EU-Narrow") — never show raw id.
+        try:
+            _friendly = self.bridge._dn(CHANNEL_E_TX_CHANNEL) if self.bridge else CHANNEL_E_TX_CHANNEL
+        except Exception:
+            _friendly = CHANNEL_E_TX_CHANNEL
         if self.backend is None:
             logger.warning('Channel E TX: no backend, cannot send %d bytes', len(data))
+            _trace(pkt_hash8, 'tx_send', channel=CHANNEL_E_TX_CHANNEL,
+                   detail='TX FAILED on %s: no backend available' % _friendly,
+                   status='error')
             return
 
         try:
@@ -80,12 +97,39 @@ class ChannelEBridge:
                             result.get('send_ms', 0),
                             result.get('airtime_ms', 0)
                         )
+                        # Emit lbt_check + cad_check BEFORE tx_send so they
+                        # appear in chronological order in the trace.
+                        emit_lbt_cad_trace_steps(pkt_hash8, CHANNEL_E_TX_CHANNEL,
+                                                  result)
+                        # Rich multi-line tx_send detail (Frequency / Datarate /
+                        # Airtime / Queue wait / Send) via shared formatter.
+                        try:
+                            _detail = self.bridge._format_tx_result(
+                                result, _friendly, 'Repeater → %s' % _friendly)
+                        except Exception:
+                            # Fallback to a minimal detail if formatter fails.
+                            _send_ms = result.get('send_ms', 0)
+                            _airtime_ms = result.get('airtime_ms', 0)
+                            _queue_wait = result.get('queue_wait_ms', 0)
+                            _detail = ('TX on %s\n  Send: %.1fms\n  Airtime: %.1fms'
+                                       '\n  Queue wait: %.1fms' % (
+                                           _friendly, _send_ms, _airtime_ms, _queue_wait))
+                        _trace(pkt_hash8, 'tx_send', channel=CHANNEL_E_TX_CHANNEL,
+                               detail=_detail,
+                               status='ok')
                     else:
                         self.tx_errors += 1
                         logger.warning(
                             'Channel E TX FAIL: %s (%d bytes)',
                             result.get('error', 'unknown'), len(data)
                         )
+                        # Still emit CAD/LBT for failed TX (may contain useful
+                        # diagnostic info like LBT BLOCKED).
+                        emit_lbt_cad_trace_steps(pkt_hash8, CHANNEL_E_TX_CHANNEL,
+                                                  result)
+                        _trace(pkt_hash8, 'tx_send', channel=CHANNEL_E_TX_CHANNEL,
+                               detail='TX FAILED on %s: %s' % (_friendly, result.get('error', 'unknown')),
+                               status='error')
                     return
                 else:
                     logger.warning('Channel E TX: no channel_e queue found in TXQueueManager')
@@ -99,17 +143,44 @@ class ChannelEBridge:
             self.tx_packets += 1
             logger.info('Channel E TX: sent %d bytes via backend.send() (tx_power=%d)',
                        len(data), _tx_power)
+            # backend.send() return shape may also contain cad_/lbt_ keys —
+            # route through the shared helper for consistency.
+            if isinstance(meta, dict):
+                emit_lbt_cad_trace_steps(pkt_hash8, CHANNEL_E_TX_CHANNEL, meta)
+            _trace(pkt_hash8, 'tx_send', channel=CHANNEL_E_TX_CHANNEL,
+                   detail='TX on %s via backend.send() (tx_power=%d dBm, %d bytes)' % (_friendly, _tx_power, len(data)),
+                   status='ok')
         except Exception as e:
             self.tx_errors += 1
             logger.error('Channel E TX error: %s', e)
+            _trace(pkt_hash8, 'tx_send', channel=CHANNEL_E_TX_CHANNEL,
+                   detail='TX FAILED on %s: %s' % (_friendly, e),
+                   status='error')
 
 
     def _rx_from_backend(self, payload, rssi=0, snr=0.0):
         """Callback invoked by WM1303Backend when a channel_e-frequency packet arrives."""
         self.packets_received += 1
-        pkt_hash = hashlib.sha256(payload).hexdigest()[:12]
+        pkt_hash = _stable_hash(payload)
+        pkt_hash8 = pkt_hash[:8] if pkt_hash else _stable_hash(payload)[:8]
         logger.info("Channel E RX (via backend): %dB rssi=%d snr=%.1f hash=%s",
                     len(payload), rssi, snr, pkt_hash)
+        # Emit a `received` trace step BEFORE inject_packet so it becomes the
+        # first step in the Tracing UI for channel_e packets. RSSI/SNR come
+        # straight from the SX1261 RX metadata. Packet type is looked up via
+        # the bridge helper for consistent labelling across channels.
+        try:
+            if self.bridge is not None and hasattr(self.bridge, 'emit_received_trace'):
+                _pt = 'UNKNOWN'
+                try:
+                    _pt = self.bridge._get_packet_type_name(payload)
+                except Exception:
+                    pass
+                self.bridge.emit_received_trace(
+                    pkt_hash8, CHANNEL_E_NAME, _pt, len(payload),
+                    rssi=rssi, snr=snr)
+        except Exception as _te:
+            logger.debug('Channel E RX: received-trace emit failed: %s', _te)
         try:
             if self._loop is not None:
                 self._loop.call_soon_threadsafe(
@@ -166,7 +237,7 @@ class ChannelEBridge:
                     continue
 
                 self.packets_received += 1
-                pkt_hash = hashlib.sha256(data).hexdigest()[:12]
+                pkt_hash = _stable_hash(data)
 
                 mc_hdr = data[0]
                 mc_type = (mc_hdr >> 2) & 0x0F

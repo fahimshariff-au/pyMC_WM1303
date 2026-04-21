@@ -58,6 +58,11 @@ warn() {
 fail() {
     echo -e "${RED}✗${NC} $1"
     echo -e "  ${RED}See ${LOG_FILE} for details${NC}"
+    if [ -n "${UPGRADE_BACKUP:-}" ] && [ -d "${UPGRADE_BACKUP:-}" ]; then
+        echo -e "  ${YELLOW}Rollback: backups are at ${UPGRADE_BACKUP}${NC}"
+        echo -e "  ${YELLOW}  Config: cp -a ${UPGRADE_BACKUP}/pymc_repeater_config/* ${CONFIG_DIR}/${NC}"
+        echo -e "  ${YELLOW}  DB:     cp ${UPGRADE_BACKUP}/db/*.db ${DATA_DIR}/${NC}"
+    fi
     exit 1
 }
 
@@ -153,6 +158,16 @@ info "Installation directory: ${INSTALL_BASE}"
 info "Overlay directory: ${OVERLAY_DIR}"
 info "Log file: ${LOG_FILE}"
 
+# Refuse downgrade
+if [ "${CURRENT_VERSION}" != "unknown" ] && [ "${UPGRADE_VERSION}" != "unknown" ]; then
+    CURRENT_SORT=$(echo "${CURRENT_VERSION#v}" | tr -d '[:space:]')
+    UPGRADE_SORT=$(echo "${UPGRADE_VERSION#v}" | tr -d '[:space:]')
+    HIGHER=$(printf '%s\n%s\n' "${CURRENT_SORT}" "${UPGRADE_SORT}" | sort -V | tail -1)
+    if [ "${HIGHER}" = "${CURRENT_SORT}" ] && [ "${CURRENT_SORT}" != "${UPGRADE_SORT}" ]; then
+        fail "Downgrade refused: installed ${CURRENT_VERSION} is newer than upgrade target ${UPGRADE_VERSION}"
+    fi
+fi
+
 # =============================================================================
 # Phase 1: Pre-upgrade Backup
 # =============================================================================
@@ -172,7 +187,14 @@ fi
 if [ -f "${PKTFWD_DIR}/lora_pkt_fwd" ]; then
     cp "${PKTFWD_DIR}/lora_pkt_fwd" "${UPGRADE_BACKUP}/lora_pkt_fwd.bak" >> "${LOG_FILE}" 2>&1
 fi
-ok "Backup created"
+step "Backing up databases"
+mkdir -p "${UPGRADE_BACKUP}/db"
+for dbfile in "${DATA_DIR}/repeater.db" "${DATA_DIR}/spectrum_history.db"; do
+    if [ -f "${dbfile}" ]; then
+        cp "${dbfile}" "${UPGRADE_BACKUP}/db/" >> "${LOG_FILE}" 2>&1
+    fi
+done
+ok "Database backup created"
 
 step "Recording current version info"
 {
@@ -465,14 +487,14 @@ step "Applying pyMC_Repeater overlay"
 RPT_DIR="${REPO_DIR}/pyMC_Repeater"
 
 # repeater/ level files
-for f in bridge_engine.py channel_e_bridge.py config_manager.py engine.py main.py identity_manager.py config.py packet_router.py; do
+for f in bridge_engine.py channel_e_bridge.py config_manager.py engine.py main.py identity_manager.py config.py packet_router.py metrics_retention.py; do
     if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_repeater/repeater/${f}" "${RPT_DIR}/repeater/" >> "${LOG_FILE}" 2>&1
     fi
 done
 
 # repeater/web/ level files
-for f in wm1303_api.py http_server.py spectrum_collector.py cad_calibration_engine.py api_endpoints.py debug_collector.py; do
+for f in wm1303_api.py http_server.py spectrum_collector.py cad_calibration_engine.py api_endpoints.py debug_collector.py packet_trace.py; do
     if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/web/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_repeater/repeater/web/${f}" "${RPT_DIR}/repeater/web/" >> "${LOG_FILE}" 2>&1
     fi
@@ -784,27 +806,39 @@ changes = []
 # --- Bridge section ---
 br = cfg.get('bridge', {})
 
-# Rename dedup_ttl_seconds -> dedup_ttl
-if 'dedup_ttl_seconds' in br:
-    old_val = br.pop('dedup_ttl_seconds')
-    if 'dedup_ttl' not in br:
-        br['dedup_ttl'] = 15
-    changes.append('bridge.dedup_ttl_seconds->dedup_ttl')
+# Migrate dedup_ttl -> dedup_ttl_seconds (SSOT key since v2.2.0)
+# The canonical key is bridge.dedup_ttl_seconds (seconds, default 300).
+# Legacy key bridge.dedup_ttl may exist from older installs.
+if 'dedup_ttl' in br and 'dedup_ttl_seconds' not in br:
+    old_val = br.pop('dedup_ttl')
+    # Old configs may have had dedup_ttl in seconds already (300) or
+    # in the legacy small-integer form (15). Accept the value as-is.
+    br['dedup_ttl_seconds'] = int(old_val) if old_val else 300
+    changes.append('bridge.dedup_ttl->dedup_ttl_seconds=%d' % br['dedup_ttl_seconds'])
+elif 'dedup_ttl' in br and 'dedup_ttl_seconds' in br:
+    # Both keys exist (broken state) — keep dedup_ttl_seconds, remove legacy
+    br.pop('dedup_ttl')
+    changes.append('bridge: removed duplicate dedup_ttl (kept dedup_ttl_seconds=%d)' % br['dedup_ttl_seconds'])
 
-# Ensure dedup_ttl exists with correct value
-if 'dedup_ttl' not in br:
-    br['dedup_ttl'] = 15
-    changes.append('bridge.dedup_ttl=15')
+# Ensure dedup_ttl_seconds exists with correct default
+if 'dedup_ttl_seconds' not in br:
+    br['dedup_ttl_seconds'] = 300
+    changes.append('bridge.dedup_ttl_seconds=300')
 
 cfg['bridge'] = br
 
 # --- Repeater section ---
 rep = cfg.get('repeater', {})
 
-# cache_ttl: 60 -> 30
-if rep.get('cache_ttl', 0) >= 60:
-    rep['cache_ttl'] = 30
-    changes.append('repeater.cache_ttl=30')
+# Ensure cache_ttl has a sane value (default 300 since v2.2.0)
+if 'cache_ttl' not in rep:
+    rep['cache_ttl'] = 300
+    changes.append('repeater.cache_ttl=300')
+
+# Ensure max_cache_size exists (default 1000 since v2.2.0)
+if 'max_cache_size' not in rep:
+    rep['max_cache_size'] = 1000
+    changes.append('repeater.max_cache_size=1000')
 
 # tx_delay_factor: set to 0 (v2.1.0: CAD handles collision avoidance)
 if rep.get('tx_delay_factor', 0) != 0:
@@ -1193,6 +1227,11 @@ def migrate(db_path):
         ('packets', 'lbt_channel_busy', 'BOOLEAN DEFAULT FALSE'),
         ('channel_stats_history', 'noise_floor_dbm', 'REAL'),
         ('channel_stats_history', 'pkt_count', 'INTEGER'),
+        # Defensive for pre-v2.1 installs (cad_events HW/SW split)
+        ('cad_events', 'cad_hw_clear', 'INTEGER DEFAULT 0'),
+        ('cad_events', 'cad_hw_detected', 'INTEGER DEFAULT 0'),
+        ('cad_events', 'cad_sw_clear', 'INTEGER DEFAULT 0'),
+        ('cad_events', 'cad_sw_detected', 'INTEGER DEFAULT 0'),
     ]
     for table, column, coldef in col_migrations:
         if not has_column(table, column):
@@ -1290,6 +1329,21 @@ else
     info "Database not found at ${DB_PATH}, skipping migration"
 fi
 
+# One-time VACUUM on upgrade (retention cutover from mixed days to uniform 8)
+if [ -f "${DB_PATH}" ]; then
+    step "Running one-time VACUUM (retention cutover cleanup)"
+    ${VENV_DIR}/bin/python3 -c "
+import sqlite3
+try:
+    conn = sqlite3.connect('${DB_PATH}')
+    conn.execute('VACUUM')
+    conn.close()
+    print('ok')
+except Exception as e:
+    print('skip: ' + str(e))
+" >> "${LOG_FILE}" 2>&1 && ok "VACUUM complete" || ok "VACUUM skipped"
+fi
+
 # Clean up orphaned tables in spectrum_history.db
 # Since v2.x, CAD and LBT data is tracked in repeater.db by _packet_activity_recorder.
 # The spectrum_collector no longer writes to lbt_events/cad_events in spectrum_history.db.
@@ -1353,6 +1407,17 @@ if command -v curl &>/dev/null; then
     else
         ok "Web interface not yet responding (may need a few more seconds)"
     fi
+fi
+
+step "Checking journal for post-startup errors"
+sleep 7
+JOURNAL_ERRORS=$(journalctl -u pymc-repeater --since "30 seconds ago" -p err --no-pager 2>/dev/null | grep -v "^-- " | head -5)
+if [ -z "${JOURNAL_ERRORS}" ]; then
+    ok "No errors in journal"
+else
+    warn "Errors detected in journal after startup:"
+    echo "${JOURNAL_ERRORS}" | head -5 | sed 's/^/    /'
+    info "Review with: journalctl -u pymc-repeater --since '5 minutes ago'"
 fi
 
 # =============================================================================

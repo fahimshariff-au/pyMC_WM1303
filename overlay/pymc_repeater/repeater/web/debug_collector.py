@@ -41,6 +41,7 @@ MAX_JOURNAL_LINES = 10000  # Safety cap
 _REDACT_KEYS = {
     "identity_key", "jwt_secret", "password", "secret",
     "private_key", "api_key", "token",
+    "gateway_id", "gateway_ID", "concentrator_serial",
 }
 
 
@@ -108,6 +109,10 @@ class DebugCollector:
             await self._collect_file_integrity(work_dir)
             await self._collect_database_info(work_dir)
             await self._collect_identity_info(work_dir)
+            self._collect_metrics_data(work_dir)
+            self._collect_packet_traces(work_dir)
+            self._collect_versions(work_dir)
+            self._write_manifest(work_dir)
 
             # Package into tar.gz
             hostname = self._run_cmd("hostname").strip() or "unknown"
@@ -713,16 +718,8 @@ class DebugCollector:
 
         self._write(db_dir / "db_info.txt", "\n".join(info))
 
-        # Recent metrics (last 100 records from the first db found)
-        if db_files:
-            first_db = db_files.split("\n")[0].strip()
-            if first_db:
-                metrics = self._run_cmd(
-                    f"sqlite3 -json '{first_db}' "
-                    f"'SELECT * FROM metrics ORDER BY timestamp DESC LIMIT 100' 2>/dev/null"
-                )
-                if metrics:
-                    self._write(db_dir / "recent_metrics.json", metrics)
+        # Note: 'metrics' table does not exist in any current DB.
+        # Use _collect_metrics_data() instead for structured metric dumps.
 
     async def _collect_identity_info(self, work_dir: Path):
         """Collect repeater identity (PUBLIC info only!)."""
@@ -765,3 +762,133 @@ class DebugCollector:
         info["_note"] = "Private keys and JWT secrets are NOT included in this bundle."
 
         self._write_json(identity_dir / "node_info.json", info)
+
+
+    # ------------------------------------------------------------------
+    # Extended collectors (v2)
+    # ------------------------------------------------------------------
+
+    def _dump_table_json(self, db_path, table, ts_col, out_path, days=3):
+        """Dump recent rows of a table to JSONL. Returns row count or -1 on error."""
+        import sqlite3 as _sql
+        import time as _t
+        cutoff = _t.time() - days * 86400
+        try:
+            if not os.path.exists(db_path):
+                return 0
+            with _sql.connect(db_path, timeout=5) as conn:
+                conn.row_factory = _sql.Row
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,)
+                ).fetchone()
+                if not exists:
+                    return 0
+                rows = conn.execute(
+                    f"SELECT * FROM {table} WHERE {ts_col} > ? ORDER BY {ts_col}",
+                    (cutoff,)
+                ).fetchall()
+            with open(out_path, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(dict(r)) + "\n")
+            return len(rows)
+        except Exception:
+            return -1
+
+    def _collect_metrics_data(self, work_dir):
+        """Dump recent metric rows from all known SQLite metric tables."""
+        out_dir = os.path.join(str(work_dir), "database", "metrics")
+        os.makedirs(out_dir, exist_ok=True)
+        dumps = [
+            ("repeater.db",         "channel_stats_history",   "timestamp"),
+            ("repeater.db",         "noise_floor_history",     "timestamp"),
+            ("repeater.db",         "cad_events",              "timestamp"),
+            ("repeater.db",         "packet_activity",         "timestamp"),
+            ("repeater.db",         "origin_channel_stats",    "timestamp"),
+            ("spectrum_history.db", "spectrum_scans",          "timestamp"),
+        ]
+        summary = {}
+        for db, table, ts_col in dumps:
+            out_path = os.path.join(out_dir, f"{table}.jsonl")
+            n = self._dump_table_json(f"/var/lib/pymc_repeater/{db}", table, ts_col, out_path, days=3)
+            summary[table] = n
+        # packets tail (exclude payload and raw_packet)
+        try:
+            import sqlite3 as _sql
+            with _sql.connect("/var/lib/pymc_repeater/repeater.db", timeout=5) as conn:
+                conn.row_factory = _sql.Row
+                rows = conn.execute(
+                    "SELECT id, timestamp, type, rssi, snr, length, "
+                    "src_hash, dst_hash, path_hash, packet_hash, "
+                    "score, transmitted, is_duplicate, drop_reason, "
+                    "tx_delay_ms, lbt_attempts, lbt_channel_busy "
+                    "FROM packets ORDER BY timestamp DESC LIMIT 500"
+                ).fetchall()
+            with open(os.path.join(out_dir, "packets_tail.jsonl"), "w") as f:
+                for r in rows:
+                    f.write(json.dumps(dict(r)) + "\n")
+            summary["packets_tail"] = len(rows)
+        except Exception:
+            summary["packets_tail"] = -1
+        with open(os.path.join(out_dir, "_summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+
+    def _collect_packet_traces(self, work_dir):
+        """Dump recent packet traces from the packet_trace ring buffer."""
+        try:
+            from repeater.web.packet_trace import get_traces
+            traces = get_traces(limit=200)
+            out_dir = os.path.join(str(work_dir), "stats")
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "packet_traces.json"), "w") as f:
+                json.dump(traces, f, indent=2, default=str)
+        except Exception:
+            pass
+
+    def _collect_versions(self, work_dir):
+        """Collect package and binary versions."""
+        out = []
+        try:
+            with open("/etc/pymc_repeater/version") as f:
+                out.append(f"pymc_repeater: {f.read().strip()}")
+        except Exception:
+            pass
+        import subprocess as _sp
+        for repo in ["/opt/pymc_repeater/repos/pyMC_core",
+                     "/opt/pymc_repeater/repos/pyMC_Repeater",
+                     "/opt/pymc_repeater/repos/sx1302_hal"]:
+            try:
+                r = _sp.run(["git", "-C", repo, "describe", "--always", "--dirty"],
+                            capture_output=True, text=True, timeout=5)
+                out.append(f"{os.path.basename(repo)}: {r.stdout.strip() or 'unknown'}")
+            except Exception:
+                pass
+        try:
+            r = _sp.run(["/home/pi/wm1303_pf/lora_pkt_fwd", "-v"],
+                        capture_output=True, text=True, timeout=5)
+            out.append(f"lora_pkt_fwd: {(r.stdout or r.stderr).strip()[:200]}")
+        except Exception:
+            pass
+        integrity_dir = os.path.join(str(work_dir), "integrity")
+        os.makedirs(integrity_dir, exist_ok=True)
+        with open(os.path.join(integrity_dir, "versions.txt"), "w") as f:
+            f.write("\n".join(out))
+
+    def _write_manifest(self, work_dir):
+        """Write a manifest.json listing every file in the bundle with size."""
+        import datetime as _dt
+        manifest = {
+            "generated_at": _dt.datetime.utcnow().isoformat() + "Z",
+            "generator": "debug_collector v2",
+            "files": []
+        }
+        for root, _, files in os.walk(str(work_dir)):
+            for fn in files:
+                full = os.path.join(root, fn)
+                rel = os.path.relpath(full, str(work_dir))
+                try:
+                    manifest["files"].append({"path": rel, "size": os.path.getsize(full)})
+                except Exception:
+                    pass
+        with open(os.path.join(str(work_dir), "manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=2)

@@ -88,6 +88,38 @@ def _parse_datr(datr):
         return int(m.group(1)), int(m.group(2)) * 1000
     return None, None
 
+def _extract_mc_payload(data: bytes) -> bytes:
+    """Extract payload bytes after MeshCore header + path data.
+
+    The payload stays constant across hop iterations, making it
+    suitable for stable hashing in self-echo and dedup detection.
+
+    MeshCore header layout:
+      byte 0: [VER(2) | TYPE(4) | ROUTE(2)]
+      TFLOOD/TDIRECT (route 0x00/0x03): bytes 1-4 timestamp, byte 5 path_len
+      FLOOD/DIRECT   (route 0x01/0x02): byte 1 path_len
+      path_len byte: bits[5:0] = hops, bits[7:6]+1 = hop_size (1-4 bytes)
+      Following: hops * hop_size bytes of path data
+      After that: the stable message payload
+    """
+    if not data or len(data) < 2:
+        return data
+    hdr = data[0]
+    rt = hdr & 0x03
+    has_tc = rt in (0x00, 0x03)  # TFLOOD or TDIRECT have timestamp
+    idx = 5 if has_tc else 1     # path_raw byte offset
+    if idx >= len(data):
+        return data
+    pl_raw = data[idx]
+    hops = pl_raw & 0x3F
+    hsz = ((pl_raw >> 6) & 0x03) + 1  # hop hash size: 1, 2, 3, or 4 bytes
+    pbytes = hops * hsz
+    payload_start = idx + 1 + pbytes
+    if payload_start >= len(data):
+        return data  # malformed, return all for safe hashing
+    return data[payload_start:]
+
+
 
 # Semtech reference TX gain LUT for SX1250 + SKY66420 FEM (EU868)
 # 16 entries from 12 dBm to 27 dBm via RF0
@@ -579,6 +611,19 @@ class WM1303Backend:
         # CAD config cache
         self._cad_config_cache: dict[str, bool] = {}  # channel_id -> cad_enabled
         self._cad_config_cache_time: float = 0
+
+        # WM1303 post-TX TX_ACK correlation (Approach 3 hybrid):
+        # C code emits a second TX_ACK after lgw_send() with phase="post_tx"
+        # carrying CAD/LBT results. We correlate by token — _send_pull_resp
+        # registers a Future before sendto(), and the _handle_udp reader
+        # thread resolves it when the post-TX ACK arrives.
+        # Cache is kept for late arrivals and diagnostic lookups (30s TTL).
+        self._pending_tx_acks: dict[int, asyncio.Future] = {}
+        self._tx_ack_cache: collections.OrderedDict = collections.OrderedDict()
+        self._tx_ack_cache_ttl = 30.0  # seconds
+        self._tx_ack_cache_max = 512
+        self._tx_ack_lock = threading.Lock()
+
 
 
         # SX1261 for LBT/CAD only (not TX)
@@ -2427,12 +2472,61 @@ class WM1303Backend:
             self._send_ack(addr, token, PKT_PULL_ACK)
 
         elif pkt_type == PKT_TX_ACK:     # TX result
+            ack_info: dict = {}
+            is_post_tx = False
+            err = 'NONE'
             if len(data) > 4:
                 raw_payload = data[4:]
+                # WM1303: the HAL emits TX_ACK with a 12-byte header
+                # (4-byte Semtech proto + 8-byte gateway MAC) before the
+                # optional JSON body. Older code assumed 4-byte header and
+                # silently failed to parse JSON. Find the first '{' to
+                # locate the JSON body robustly.
+                _brace_idx = raw_payload.find(b'{')
+                _json_bytes = raw_payload[_brace_idx:] if _brace_idx >= 0 else b''
                 try:
-                    ack = json.loads(raw_payload.decode())
-                    err = ack.get('txpk_ack', {}).get('error', 'NONE')
-                    if err != 'NONE':
+                    if not _json_bytes:
+                        raise json.JSONDecodeError('no JSON body', '', 0)
+                    ack = json.loads(_json_bytes.decode())
+                    txpk_ack = ack.get('txpk_ack', {}) if isinstance(ack, dict) else {}
+                    err = txpk_ack.get('error', 'NONE')
+                    is_post_tx = (txpk_ack.get('phase') == 'post_tx')
+                    if is_post_tx:
+                        # WM1303 post-TX ack: carries CAD/LBT outcomes
+                        ack_info = {
+                            'ok': (err == 'NONE' and txpk_ack.get('tx_result') == 'sent'),
+                            'error': err,
+                            'tx_result': txpk_ack.get('tx_result', 'unknown'),
+                            'phase': 'post_tx',
+                            'cad': txpk_ack.get('cad', {}) or {},
+                            'lbt': txpk_ack.get('lbt', {}) or {},
+                        }
+                        # Flatten convenience fields for consumers
+                        cad = ack_info['cad']
+                        lbt = ack_info['lbt']
+                        ack_info.update({
+                            'cad_enabled': bool(cad.get('enabled', False)),
+                            'cad_detected': bool(cad.get('detected', False)),
+                            'cad_retries': int(cad.get('retries', 0)),
+                            'cad_rssi_dbm': int(cad.get('rssi_dbm', 0)) if cad.get('rssi_dbm') is not None else None,
+                            'cad_reason': cad.get('reason', ''),
+                            'lbt_enabled': bool(lbt.get('enabled', False)),
+                            'lbt_pass': bool(lbt.get('pass', True)),
+                            'lbt_rssi_dbm': int(lbt.get('rssi_dbm', 0)) if lbt.get('rssi_dbm') is not None else None,
+                            'lbt_threshold_dbm': int(lbt.get('threshold_dbm', 0)) if lbt.get('threshold_dbm') is not None else None,
+                            'lbt_retries': int(lbt.get('retries', 0)),
+                        })
+                        logger.info('WM1303Backend: TX_ACK post-TX token=0x%04x '
+                                    'tx_result=%s cad[en=%s det=%s r=%d rssi=%s reason=%s] '
+                                    'lbt[en=%s pass=%s rssi=%s thr=%s r=%d]',
+                                    token, ack_info['tx_result'],
+                                    ack_info['cad_enabled'], ack_info['cad_detected'],
+                                    ack_info['cad_retries'], ack_info['cad_rssi_dbm'],
+                                    ack_info['cad_reason'],
+                                    ack_info['lbt_enabled'], ack_info['lbt_pass'],
+                                    ack_info['lbt_rssi_dbm'], ack_info['lbt_threshold_dbm'],
+                                    ack_info['lbt_retries'])
+                    elif err != 'NONE':
                         logger.warning('WM1303Backend: TX_ACK error: %s (full: %s)', err, ack)
                     else:
                         logger.info('WM1303Backend: TX_ACK OK (json)')
@@ -2445,6 +2539,80 @@ class WM1303Backend:
             else:
                 logger.info('WM1303Backend: TX_ACK (minimal, %d bytes)', len(data))
 
+            # WM1303: if this is the post-TX ack, resolve the pending future
+            # (registered by _send_pull_resp) and/or stash into the short-TTL cache.
+            if is_post_tx:
+                self._tx_ack_store(token, ack_info)
+
+
+
+    # ------------------------------------------------------------------
+    # WM1303 post-TX TX_ACK helpers (Approach 3 hybrid)
+    # ------------------------------------------------------------------
+
+    def _tx_ack_register_future(self, token: int) -> asyncio.Future:
+        """Register a pending-future for a given 16-bit TX_ACK token.
+
+        Must be called from the asyncio loop. Returns a Future that will be
+        resolved when the post-TX ACK arrives (from the reader thread) or
+        cancelled on timeout by the caller.
+        """
+        loop = self._loop if self._loop is not None else asyncio.get_event_loop()
+        fut = loop.create_future()
+        with self._tx_ack_lock:
+            self._pending_tx_acks[token & 0xFFFF] = fut
+        return fut
+
+    def _tx_ack_unregister_future(self, token: int) -> None:
+        """Remove a pending-future registration (called on timeout/cleanup)."""
+        with self._tx_ack_lock:
+            self._pending_tx_acks.pop(token & 0xFFFF, None)
+
+    def _tx_ack_store(self, token: int, ack_info: dict) -> None:
+        """Store a post-TX ack in the short-TTL cache and resolve any pending
+        future for the same token.
+
+        Called from the UDP reader thread; uses loop.call_soon_threadsafe
+        to safely resolve asyncio futures owned by the backend event loop.
+        """
+        tok = token & 0xFFFF
+        now = time.monotonic()
+        fut: asyncio.Future | None = None
+        with self._tx_ack_lock:
+            # Cache: prune stale entries, enforce max size
+            for k in list(self._tx_ack_cache.keys()):
+                ts, _ = self._tx_ack_cache[k]
+                if now - ts > self._tx_ack_cache_ttl:
+                    self._tx_ack_cache.pop(k, None)
+                else:
+                    break  # OrderedDict is insertion-ordered; older entries are earlier
+            while len(self._tx_ack_cache) >= self._tx_ack_cache_max:
+                self._tx_ack_cache.popitem(last=False)
+            self._tx_ack_cache[tok] = (now, ack_info)
+            self._tx_ack_cache.move_to_end(tok)
+            # Pending future resolution
+            fut = self._pending_tx_acks.pop(tok, None)
+        if fut is not None and not fut.done():
+            loop = fut.get_loop()
+            try:
+                loop.call_soon_threadsafe(
+                    lambda f=fut, a=ack_info: (not f.done()) and f.set_result(a))
+            except RuntimeError:
+                # Loop might be closed at shutdown — ignore
+                pass
+
+    def tx_ack_get_cached(self, token: int) -> dict | None:
+        """Retrieve a cached post-TX ack by token, or None if missing/expired."""
+        tok = token & 0xFFFF
+        with self._tx_ack_lock:
+            entry = self._tx_ack_cache.get(tok)
+            if entry is None:
+                return None
+            ts, info = entry
+            if time.monotonic() - ts > self._tx_ack_cache_ttl:
+                self._tx_ack_cache.pop(tok, None)
+                return None
+            return info
 
     def _send_ack(self, addr: tuple, token: int, ack_type: int) -> None:
         pkt = bytes([PROTOCOL_VER, (token >> 8) & 0xFF, token & 0xFF, ack_type])
@@ -2508,7 +2676,9 @@ class WM1303Backend:
             payload = base64.b64decode(payload_b64)
 
             # Self-echo detection: check if this RX matches a recent TX
-            _rx_echo_hash = hashlib.md5(payload).hexdigest()[:12]
+            # Use stable payload hash (excludes path data that changes per hop)
+            _stable_payload = _extract_mc_payload(payload)
+            _rx_echo_hash = hashlib.md5(payload[0:1] + _stable_payload).hexdigest()[:12]
             _now_mono = time.monotonic()
             if _rx_echo_hash in self._tx_echo_hashes:
                 _tx_time = self._tx_echo_hashes[_rx_echo_hash]
@@ -2521,8 +2691,8 @@ class WM1303Backend:
                     return
                 else:
                     del self._tx_echo_hashes[_rx_echo_hash]
-            # Multi-demod dedup: prevent 8x TX for same packet
-            _dd_hash = hashlib.md5(payload).hexdigest()[:12]
+            # Multi-demod dedup: prevent 8x TX for same packet (stable hash)
+            _dd_hash = hashlib.md5(payload[0:1] + _stable_payload).hexdigest()[:12]
             _dd_now = time.monotonic()
             if _dd_hash in self._rx_dedup_cache:
                 if _dd_now - self._rx_dedup_cache[_dd_hash] < 2.0:
@@ -2656,8 +2826,9 @@ class WM1303Backend:
         if tx_power is None:
             tx_power = int(cfg.get('tx_power', 14))
 
-        # Track hash for self-echo detection at enqueue time
-        _tx_hash = hashlib.md5(data).hexdigest()[:12]
+        # Track hash for self-echo detection at enqueue time (stable payload hash)
+        _tx_stable = _extract_mc_payload(data)
+        _tx_hash = hashlib.md5(data[0:1] + _tx_stable).hexdigest()[:12]
         self._tx_echo_hashes[_tx_hash] = time.monotonic()
         logger.info('WM1303Backend: TX echo hash pre-stored: %s (ch=%s)', _tx_hash, channel_id)
 
@@ -2687,8 +2858,27 @@ class WM1303Backend:
         return result
 
     async def _send_for_scheduler(self, txpk: dict, channel_id: str) -> dict:
-        """Send a single txpk via PULL_RESP. Called by GlobalTXScheduler."""
-        return await self._send_pull_resp(txpk)
+        """Send a single txpk via PULL_RESP. Called by GlobalTXScheduler.
+
+        After the send completes and the post-TX TX_ACK has been merged into
+        the result (see _send_pull_resp), forward any HW CAD outcome to the
+        TX queue manager so per-channel stats (cad_clear, cad_hw_clear, etc.)
+        reflect hardware CAD activity — even when SW LBT/CAD is disabled.
+        """
+        result = await self._send_pull_resp(txpk)
+        # Fix (Bug 1 / HW CAD counters): when the HAL C code ran HW CAD before
+        # this TX, the post-TX TX_ACK carries its outcome. Flow it into the
+        # per-channel queue stats so cad_events recorder and the UI see it.
+        try:
+            if self._tx_queue_manager and isinstance(result, dict) and 'cad_enabled' in result:
+                self._tx_queue_manager.record_hw_cad_result(channel_id, {
+                    'enabled': bool(result.get('cad_enabled', False)),
+                    'detected': bool(result.get('cad_detected', False)),
+                    'reason': result.get('cad_reason', ''),
+                })
+        except Exception as _e:
+            logger.debug('WM1303Backend: record_hw_cad_result error: %s', _e)
+        return result
 
     def _update_tx_stats(self, channel_id: str, send_ms: float,
                          airtime_ms: float, wait_ms: float,
@@ -2813,6 +3003,9 @@ class WM1303Backend:
                 await asyncio.sleep(wait_s)
 
             token = random.randint(0, 0xFFFF)
+            # WM1303: register future BEFORE sendto to avoid race where the
+            # post-TX ack arrives before we register (reader thread is fast).
+            _ack_future = self._tx_ack_register_future(token)
             body  = json.dumps({'txpk': txpk}).encode()
             pkt   = bytes([PROTOCOL_VER, (token >> 8) & 0xFF,
                           token & 0xFF, PKT_PULL_RESP]) + body
@@ -2861,12 +3054,13 @@ class WM1303Backend:
                 logger.info('WM1303Backend: TX airtime %.1fms (SF%d BW%d %d bytes)',
                            _airtime_ms_val, _sf, _bw, txpk.get('size', 0))
 
-            # Store TX payload hash for self-echo detection
+            # Store TX payload hash for self-echo detection (stable payload hash)
             try:
                 _tx_data_b64 = txpk.get('data', '')
                 if _tx_data_b64:
                     _tx_payload = base64.b64decode(_tx_data_b64)
-                    _tx_hash = hashlib.md5(_tx_payload).hexdigest()[:12]
+                    _tx_stable = _extract_mc_payload(_tx_payload)
+                    _tx_hash = hashlib.md5(_tx_payload[0:1] + _tx_stable).hexdigest()[:12]
                     self._tx_echo_hashes[_tx_hash] = time.monotonic()
                     logger.info('WM1303Backend: TX echo hash stored: %s (total=%d)',
                                _tx_hash, len(self._tx_echo_hashes))
@@ -2885,8 +3079,49 @@ class WM1303Backend:
             # SX1302 self-recovers in ~90s without restart - no benefit to restarting
             # self._schedule_agc_reset()
 
-            return {'ok': True, 'freq': txpk['freq'], 'datr': txpk['datr'],
-                    'airtime_ms': _airtime_ms_val, 'send_ms': _send_ms}
+            # WM1303 Approach 3: await post-TX ack for CAD/LBT data.
+            # Timeout = max(airtime + 2s, 3s) — graceful degradation if the
+            # C binary is older and never emits the post-TX ack.
+            # NOTE: this await does NOT slow actual RF TX (TX has completed in
+            # C by the time the ack arrives); it only extends the TX-lock hold,
+            # which is acceptable because the next TX would wait for airtime
+            # via self._last_tx_end anyway.
+            _result = {'ok': True, 'freq': txpk['freq'], 'datr': txpk['datr'],
+                       'airtime_ms': _airtime_ms_val, 'send_ms': _send_ms,
+                       'tx_token': token}
+            _ack_timeout_s = max((_airtime_ms_val + 2000.0) / 1000.0, 3.0)
+            try:
+                _post_ack = await asyncio.wait_for(_ack_future, timeout=_ack_timeout_s)
+                if isinstance(_post_ack, dict):
+                    # Merge cad/lbt fields into result (keep our own 'ok' authority
+                    # — the C-side 'ok' reflects tx_result=='sent', but the overall
+                    # send() semantics should say ok=True if UDP sendto succeeded.
+                    # Consumers can still inspect tx_result / lbt_pass / cad_detected.)
+                    for _k in ('tx_result', 'phase', 'cad', 'lbt',
+                               'cad_enabled', 'cad_detected', 'cad_retries',
+                               'cad_rssi_dbm', 'cad_reason',
+                               'lbt_enabled', 'lbt_pass', 'lbt_rssi_dbm',
+                               'lbt_threshold_dbm', 'lbt_retries'):
+                        if _k in _post_ack:
+                            _result[_k] = _post_ack[_k]
+                    # If the C side reports TX was blocked/failed, propagate
+                    # an explicit flag so callers can observe it — but do NOT
+                    # overwrite 'ok' (UDP handoff succeeded; the TX outcome is
+                    # separate and available via 'tx_result').
+                    if _post_ack.get('tx_result') and _post_ack['tx_result'] != 'sent':
+                        _result['tx_blocked'] = True
+            except asyncio.TimeoutError:
+                # Graceful degradation: older pkt_fwd binaries (or error paths
+                # that never reach post-TX) won't send the ack. Cleanup the
+                # registration and return without CAD/LBT fields.
+                self._tx_ack_unregister_future(token)
+                logger.debug('WM1303Backend: post-TX ack timeout for token=0x%04x '
+                             '(older pkt_fwd or TX error path) — returning without cad/lbt',
+                             token)
+            except Exception as _e:
+                self._tx_ack_unregister_future(token)
+                logger.debug('WM1303Backend: post-TX ack await error: %s', _e)
+            return _result
 
     # ------------------------------------------------------------------
     # Status & Stats
@@ -3302,7 +3537,7 @@ class WM1303Backend:
 
     def _channel_stats_snapshot_loop(self) -> None:
         """Background thread: periodically snapshot channel stats to DB."""
-        logger.info("Starting channel stats snapshot loop (interval=300s)")
+        logger.info("Starting channel stats snapshot loop (interval=60s)")
         self._init_channel_stats_db()
         # Wait 60s before first snapshot to let the system stabilize
         for _ in range(12):
@@ -3312,20 +3547,20 @@ class WM1303Backend:
         while self._snapshot_running:
             try:
                 self._snapshot_channel_stats()
-                # Cleanup old data (older than 7 days)
-                cutoff = time.time() - (7 * 86400)
-                try:
-                    with sqlite3.connect(_DB_PATH) as conn:
-                        conn.execute(
-                            "DELETE FROM channel_stats_history WHERE timestamp < ?",
-                            (cutoff,))
-                        conn.commit()
-                except Exception as ce:
-                    logger.error("Error cleaning old channel stats: %s", ce)
+                # Cleanup moved to metrics_retention.py
+                # cutoff = time.time() - (7 * 86400)
+                # try:
+                #     with sqlite3.connect(_DB_PATH) as conn:
+                #         conn.execute(
+                #             "DELETE FROM channel_stats_history WHERE timestamp < ?",
+                #             (cutoff,))
+                #         conn.commit()
+                # except Exception as ce:
+                #     logger.error("Error cleaning old channel stats: %s", ce)
             except Exception as e:
                 logger.error("Error in snapshot loop: %s", e)
-            # Sleep 300 seconds (5 minutes) in small intervals
-            for _ in range(60):
+            # Sleep 60 seconds (1 minute) in small intervals
+            for _ in range(12):
                 if not self._snapshot_running:
                     return
                 time.sleep(5)

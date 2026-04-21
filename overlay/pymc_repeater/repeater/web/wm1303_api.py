@@ -707,6 +707,12 @@ class WM1303API:
             if method == "GET":
                 return self._dedup_events_get(**params)
 
+        # -- packet traces (packet flow tracing) --
+        if resource == "packet_traces":
+            if method == "GET":
+                return self._packet_traces_get(**params)
+
+
 
         # -- per-channel noise floor (enhanced) --
         if resource == "noise_floor":
@@ -1484,6 +1490,20 @@ class WM1303API:
             "bucket_minutes": bucket_min,
         })
 
+    # -- packet traces ---------------------------------------------------------
+    def _packet_traces_get(self, **params):
+        """Return recent packet traces from the in-memory ring buffer."""
+        try:
+            from repeater.web.packet_trace import get_traces
+            limit = int(params.get('limit', 50))
+            status = params.get('status', '')
+            channel = params.get('channel', '')
+            traces = get_traces(limit=limit, status=status, channel=channel)
+            return _j({"traces": traces})
+        except Exception as e:
+            import traceback
+            return _j({"error": str(e), "detail": traceback.format_exc()})
+
     # -- rfchains --------------------------------------------------------------
     def _rfchains_get(self):
         """Return RF0 and RF1 config dynamically from bridge_conf.json."""
@@ -2133,7 +2153,7 @@ class WM1303API:
         h = min(int(hours), 168)
         db_path = "/var/lib/pymc_repeater/repeater.db"
         cutoff = time.time() - (h * 3600)
-        bucket_s = 600
+        bucket_s = 60  # 1-minute buckets
         ui_chs = _load_ui().get("channels", [])
         ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
                      "channel_c": "#10b981", "channel_d": "#f59e0b",
@@ -2149,7 +2169,8 @@ class WM1303API:
                     letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
                     rows = conn.execute(
                         "SELECT timestamp, tx_count, lbt_blocked, lbt_passed, "
-                        "lbt_last_rssi, lbt_threshold, noise_floor_dbm "
+                        "lbt_last_rssi, lbt_threshold, noise_floor_dbm, "
+                        "avg_rssi, avg_snr, rx_count "
                         "FROM channel_stats_history "
                         "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
                         (ch_id, cutoff)
@@ -2157,7 +2178,7 @@ class WM1303API:
                     # noise_floor_dbm now contains per-channel values (spectral scan or LBT fallback).
                     # Use noise_floor_dbm as primary, lbt_last_rssi as secondary fallback.
                     timeseries = []
-                    if len(rows) >= 2:
+                    if len(rows) >= 1:
                         buckets = {}
                         for row in rows:
                             bk = int(row["timestamp"] / bucket_s) * bucket_s
@@ -2177,9 +2198,20 @@ class WM1303API:
                             if not nf_vals:
                                 nf_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
                             avg_nf = round(sum(nf_vals)/len(nf_vals), 1) if nf_vals else None
+                            # lbt_last_rssi as a separate continuous line
+                            lbt_rssi_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
+                            lbt_last_rssi = round(sum(lbt_rssi_vals)/len(lbt_rssi_vals), 1) if lbt_rssi_vals else None
+                            # avg_rssi / avg_snr only present when packets were received
+                            rssi_vals = [r["avg_rssi"] for r in bk_rows if r["avg_rssi"] is not None]
+                            snr_vals = [r["avg_snr"] for r in bk_rows if r["avg_snr"] is not None]
+                            avg_rssi = round(sum(rssi_vals)/len(rssi_vals), 1) if rssi_vals else None
+                            avg_snr = round(sum(snr_vals)/len(snr_vals), 1) if snr_vals else None
                             timeseries.append({
                                 "timestamp": bk_ts,
                                 "noise_floor_dbm": avg_nf,
+                                "lbt_last_rssi": lbt_last_rssi,
+                                "avg_rssi": avg_rssi,
+                                "avg_snr": avg_snr,
                                 "tx_count_delta": tx_delta,
                                 "lbt_blocked_delta": blocked_delta,
                                 "lbt_passed_delta": passed_delta,
@@ -2201,13 +2233,14 @@ class WM1303API:
                 if _che_cfg.get("enabled", False):
                     che_rows = conn.execute(
                         "SELECT timestamp, tx_count, lbt_blocked, lbt_passed, "
-                        "lbt_last_rssi, lbt_threshold, noise_floor_dbm "
+                        "lbt_last_rssi, lbt_threshold, noise_floor_dbm, "
+                        "avg_rssi, avg_snr, rx_count "
                         "FROM channel_stats_history "
                         "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
                         ("channel_e", cutoff)
                     ).fetchall()
                     che_ts = []
-                    if len(che_rows) >= 2:
+                    if len(che_rows) >= 1:
                         che_buckets = {}
                         for row in che_rows:
                             bk = int(row["timestamp"] / bucket_s) * bucket_s
@@ -2226,9 +2259,18 @@ class WM1303API:
                             if not nf_vals:
                                 nf_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
                             avg_nf = round(sum(nf_vals)/len(nf_vals), 1) if nf_vals else None
+                            lbt_rssi_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
+                            lbt_last_rssi = round(sum(lbt_rssi_vals)/len(lbt_rssi_vals), 1) if lbt_rssi_vals else None
+                            rssi_vals = [r["avg_rssi"] for r in bk_rows if r["avg_rssi"] is not None]
+                            snr_vals = [r["avg_snr"] for r in bk_rows if r["avg_snr"] is not None]
+                            avg_rssi = round(sum(rssi_vals)/len(rssi_vals), 1) if rssi_vals else None
+                            avg_snr = round(sum(snr_vals)/len(snr_vals), 1) if snr_vals else None
                             che_ts.append({
                                 "timestamp": bk_ts,
                                 "noise_floor_dbm": avg_nf,
+                                "lbt_last_rssi": lbt_last_rssi,
+                                "avg_rssi": avg_rssi,
+                                "avg_snr": avg_snr,
                                 "tx_count_delta": tx_delta,
                                 "lbt_blocked_delta": blocked_delta,
                                 "lbt_passed_delta": passed_delta,
@@ -2264,7 +2306,7 @@ class WM1303API:
         h = min(int(hours), 168)
         db_path = "/var/lib/pymc_repeater/repeater.db"
         cutoff = time.time() - (h * 3600)
-        bucket_s = 600  # 10-minute buckets
+        bucket_s = 60  # 1-minute buckets
         ui_chs = _load_ui().get("channels", [])
         ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
                      "channel_c": "#10b981", "channel_d": "#f59e0b",
@@ -2287,7 +2329,7 @@ class WM1303API:
                         (ch_id, cutoff)
                     ).fetchall()
                     timeseries = []
-                    if len(rows) >= 2:
+                    if len(rows) >= 1:
                         buckets = {}
                         for row in rows:
                             bk = int(row["timestamp"] / bucket_s) * bucket_s
@@ -2353,7 +2395,7 @@ class WM1303API:
                         ("channel_e", cutoff)
                     ).fetchall()
                     che_ts = []
-                    if len(che_rows) >= 2:
+                    if len(che_rows) >= 1:
                         che_buckets = {}
                         for row in che_rows:
                             bk = int(row["timestamp"] / bucket_s) * bucket_s
@@ -2957,7 +2999,7 @@ class WM1303API:
         h = min(int(hours), 168)
         db_path = "/var/lib/pymc_repeater/repeater.db"
         cutoff = time.time() - (h * 3600)
-        bucket_s = 600  # 10-minute buckets
+        bucket_s = 60  # 1-minute buckets
         ui_chs = _load_ui().get("channels", [])
         ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
                      "channel_c": "#10b981", "channel_d": "#f59e0b",
@@ -3060,10 +3102,10 @@ class WM1303API:
                         "color": "#f97316",
                         "timeseries": che_ts
                     })
-            return _j({"hours": h, "bucket_minutes": 10, "channels": result_channels})
+            return _j({"hours": h, "bucket_minutes": 1, "channels": result_channels})
         except Exception as e:
             logger.error("tx_activity error: %s", e)
-            return _j({"error": str(e), "hours": h, "bucket_minutes": 10, "channels": []})
+            return _j({"error": str(e), "hours": h, "bucket_minutes": 1, "channels": []})
 
 
     @cherrypy.expose
@@ -3073,7 +3115,7 @@ class WM1303API:
         h = min(int(hours), 192)
         db_path = "/var/lib/pymc_repeater/repeater.db"
         cutoff = time.time() - (h * 3600)
-        bucket_s = 600  # 10-minute buckets
+        bucket_s = 60  # 1-minute buckets (match tx_activity + other Spectrum charts)
         ui_chs = _load_ui().get("channels", [])
         ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
                      "channel_c": "#10b981", "channel_d": "#f59e0b",
@@ -3163,10 +3205,10 @@ class WM1303API:
                                     break
             except Exception:
                 pass
-            return _j({"hours": h, "bucket_minutes": 10, "channels": result_channels, "summary": summary})
+            return _j({"hours": h, "bucket_minutes": 1, "channels": result_channels, "summary": summary})
         except Exception as e:
             logger.error("origin_stats error: %s", e)
-            return _j({"error": str(e), "hours": h, "bucket_minutes": 10, "channels": [], "summary": {}})
+            return _j({"error": str(e), "hours": h, "bucket_minutes": 1, "channels": [], "summary": {}})
 
 
 
@@ -3190,9 +3232,9 @@ class WM1303API:
             hal = ui.get("hal_advanced", {})
             gpio = ui.get("gpio_pins", {})
             result = {
-                "dedup_ttl_seconds":    cfg.get("bridge", {}).get("dedup_ttl_seconds", 300),
+                "dedup_ttl_seconds":    cfg.get("bridge", {}).get("dedup_ttl_seconds", cfg.get("bridge", {}).get("dedup_ttl", 300)),
                 "cache_ttl":            cfg.get("repeater", {}).get("cache_ttl", 60),
-                "max_cache_size":       adv.get("max_cache_size", 1000),
+                "max_cache_size":       cfg.get("repeater", {}).get("max_cache_size", adv.get("max_cache_size", 1000)),
                 "queue_size":           cfg.get("wm1303", {}).get("tx_queue", {}).get("queue_size", 15),
                 "inter_packet_delay":   cfg.get("wm1303", {}).get("tx_queue", {}).get("tx_delay_ms", 0),
                 "packet_ttl":           adv.get("tx_packet_ttl_seconds", 5),
@@ -3253,7 +3295,11 @@ class WM1303API:
                     cfg.setdefault("repeater", {})["cache_ttl"] = int(params["cache_ttl"])
                     cfg_changed = True
                 if "max_cache_size" in params:
-                    adv["max_cache_size"] = int(params["max_cache_size"])
+                    cfg.setdefault("repeater", {})["max_cache_size"] = int(params["max_cache_size"])
+                    cfg_changed = True
+                    # Clear any legacy value so UI slider is the single source of truth.
+                    if "max_cache_size" in adv:
+                        adv.pop("max_cache_size", None)
 
             elif group == "tx_queue":
                 tq = cfg.setdefault("wm1303", {}).setdefault("tx_queue", {})
@@ -3544,16 +3590,33 @@ def _packet_activity_recorder():
                     for ch_id, q in _bk._tx_queue_manager.queues.items():
                         cur_clear = q.stats.get("cad_clear", 0) or 0
                         cur_det = q.stats.get("cad_detected", 0) or 0
+                        # Fix (Bug 1 / HW CAD counters): read HW/SW-specific
+                        # counters from queue.stats so cad_events persists them
+                        # accurately. Prior code double-counted all CAD as HW.
+                        cur_hw_clear = q.stats.get("cad_hw_clear", 0) or 0
+                        cur_hw_det = q.stats.get("cad_hw_detected", 0) or 0
+                        cur_sw_clear = q.stats.get("cad_sw_clear", 0) or 0
+                        cur_sw_det = q.stats.get("cad_sw_detected", 0) or 0
                         prev_cad = _cad_last_counts.get(ch_id)
                         if prev_cad is not None:
-                            d_clear = max(0, cur_clear - prev_cad["cad_clear"])
-                            d_det = max(0, cur_det - prev_cad["cad_detected"])
-                            cad_inserts.append((now, ch_id, d_clear, d_det, 0, d_clear, 0, 0, 0))
+                            d_clear = max(0, cur_clear - prev_cad.get("cad_clear", 0))
+                            d_det = max(0, cur_det - prev_cad.get("cad_detected", 0))
+                            d_hw_clear = max(0, cur_hw_clear - prev_cad.get("cad_hw_clear", 0))
+                            d_hw_det = max(0, cur_hw_det - prev_cad.get("cad_hw_detected", 0))
+                            d_sw_clear = max(0, cur_sw_clear - prev_cad.get("cad_sw_clear", 0))
+                            d_sw_det = max(0, cur_sw_det - prev_cad.get("cad_sw_detected", 0))
+                            cad_inserts.append((now, ch_id, d_clear, d_det, 0,
+                                                d_hw_clear, d_hw_det,
+                                                d_sw_clear, d_sw_det))
                         else:
                             cad_inserts.append((now, ch_id, 0, 0, 0, 0, 0, 0, 0))
                         _cad_last_counts[ch_id] = {
                             "cad_clear": cur_clear,
                             "cad_detected": cur_det,
+                            "cad_hw_clear": cur_hw_clear,
+                            "cad_hw_detected": cur_hw_det,
+                            "cad_sw_clear": cur_sw_clear,
+                            "cad_sw_detected": cur_sw_det,
                         }
                 if cad_inserts:
                     with _sq3r.connect(_db) as conn:
@@ -3580,15 +3643,16 @@ def _packet_activity_recorder():
                                 conn.commit()
             except Exception as _origin_e:
                 logger.debug("origin_channel_stats recorder: %s", _origin_e)
-            cutoff = now - 8 * 86400
-            with _sq3r.connect(_db) as conn:
-                conn.execute("DELETE FROM packet_activity WHERE timestamp < ?", (cutoff,))
-                conn.execute("DELETE FROM dedup_events WHERE ts < ?", (cutoff,))
-                conn.execute("DELETE FROM noise_floor WHERE timestamp < ?", (cutoff,))
-                conn.execute("DELETE FROM noise_floor_history WHERE timestamp < ?", (cutoff,))
-                conn.execute("DELETE FROM cad_events WHERE timestamp < ?", (cutoff,))
-                conn.execute("DELETE FROM origin_channel_stats WHERE timestamp < ?", (cutoff,))
-                conn.commit()
+            # Cleanup moved to metrics_retention.py
+            # cutoff = now - 8 * 86400
+            # with _sq3r.connect(_db) as conn:
+            #     conn.execute("DELETE FROM packet_activity WHERE timestamp < ?", (cutoff,))
+            #     conn.execute("DELETE FROM dedup_events WHERE ts < ?", (cutoff,))
+            #     conn.execute("DELETE FROM noise_floor WHERE timestamp < ?", (cutoff,))
+            #     conn.execute("DELETE FROM noise_floor_history WHERE timestamp < ?", (cutoff,))
+            #     conn.execute("DELETE FROM cad_events WHERE timestamp < ?", (cutoff,))
+            #     conn.execute("DELETE FROM origin_channel_stats WHERE timestamp < ?", (cutoff,))
+            #     conn.commit()
         except Exception as _e:
             logger.debug("packet_activity_recorder: %s", _e)
             try:
