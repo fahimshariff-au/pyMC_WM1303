@@ -114,7 +114,7 @@ class ChannelEBridge:
             if self._loop is not None:
                 self._loop.call_soon_threadsafe(
                     self._loop.create_task,
-                    self.bridge.inject_packet(CHANNEL_E_NAME, payload)
+                    self.bridge.inject_packet(CHANNEL_E_NAME, payload, origin_channel='channel_e')
                 )
                 self.packets_injected += 1
             else:
@@ -181,7 +181,7 @@ class ChannelEBridge:
                            len(data), MC_TYPES.get(mc_type, f'?{mc_type}'), pkt_hash)
 
                 try:
-                    await self.bridge.inject_packet(CHANNEL_E_NAME, data)
+                    await self.bridge.inject_packet(CHANNEL_E_NAME, data, origin_channel='channel_e')
                     self.packets_injected += 1
                 except Exception as e:
                     self.packets_errors += 1

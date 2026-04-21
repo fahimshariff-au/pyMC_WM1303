@@ -143,7 +143,7 @@ class BridgeEngine:
     }
 
     # Non-radio endpoints (handled by external callbacks, not in _radio_map)
-    NON_RADIO_ENDPOINTS = {'mqtt', 'repeater'}
+    NON_RADIO_ENDPOINTS = {'mqtt', 'repeater', 'channel_e'}
 
     # Static fallback aliases (overridden by dynamic aliases built in __init__)
     _STATIC_ALIASES = {
@@ -219,7 +219,7 @@ class BridgeEngine:
             rtgt_resolved = self._resolve_channel(rtgt)
             logger.info('BridgeEngine: rule %s: %s(%s) -> %s(%s) '
                        '(filter=%s, packet_types=%s, enabled=%s)',
-                       rule.get('id', '?'), rsrc, rsrc_resolved,
+                       rule.get('name', rule.get('id', '?')), rsrc, rsrc_resolved,
                        rtgt, rtgt_resolved,
                        rule.get('filter', 'all'), rule.get('packet_types', []),
                        rule.get('enabled', True))
@@ -446,7 +446,7 @@ class BridgeEngine:
                 self.dropped_filtered += 1
                 self._record_dedup_event('filtered', source_cid, pkt_hash, len(data), pkt_type_name)
                 logger.info('BridgeEngine: filtered by rule %s (type=%s)',
-                           rule.get('id', '?'), pkt_type_name)
+                           rule.get('name', rule.get('id', '?')), pkt_type_name)
                 continue
 
             rule_target_raw = rule.get('target', '')
@@ -460,7 +460,7 @@ class BridgeEngine:
                     logger.info('BridgeEngine: forwarding %d bytes: %s -> %s '
                                '(rule=%s, type=%s, hash=%s)',
                                len(data), source_cid, rule_target,
-                               rule.get('id', '?'), pkt_type_name, pkt_hash)
+                               rule.get('name', rule.get('id', '?')), pkt_type_name, pkt_hash)
                     try:
                         if tx_delay > 0:
                             await asyncio.sleep(tx_delay)
@@ -495,7 +495,7 @@ class BridgeEngine:
                 continue
 
             tcid = getattr(target, 'channel_id', 'unknown')
-            rule_id = rule.get('id', '?')
+            rule_id = rule.get('name', rule.get('id', '?'))
             radio_sends.append((tcid, rule_id, tx_delay, target))
             logger.info('BridgeEngine: queuing TX %d bytes: %s -> %s '
                        '(rule=%s, type=%s, hash=%s)',
@@ -514,7 +514,15 @@ class BridgeEngine:
                 origin_first = [r for r in radio_sends if r[0] == resolved_origin]
                 others = [r for r in radio_sends if r[0] != resolved_origin]
                 if origin_first:
+                    was_already_first = (radio_sends[0][0] == resolved_origin)
                     radio_sends = origin_first + others
+                    if not was_already_first:
+                        logger.debug('BridgeEngine: origin-channel reordered: '
+                                    'moved %s to front (was at pos %d, %d total sends)',
+                                    resolved_origin,
+                                    next((i for i, r in enumerate(origin_first + others)
+                                          if r[0] == resolved_origin), -1),
+                                    len(radio_sends))
                     logger.info('BridgeEngine: origin-channel-first priority: '
                                '%s goes first (%d total sends)',
                                resolved_origin, len(radio_sends))
@@ -874,7 +882,7 @@ class BridgeEngine:
             rsrc = rule.get('source', '?')
             rtgt = rule.get('target', '?')
             logger.info('BridgeEngine: rule %s: %s -> %s (enabled=%s)',
-                       rule.get('id', '?'), rsrc, rtgt, rule.get('enabled', True))
+                       rule.get('name', rule.get('id', '?')), rsrc, rtgt, rule.get('enabled', True))
         logger.info('BridgeEngine: current aliases: %s', dict(self.CHANNEL_ALIASES))
         logger.info('BridgeEngine: reverse aliases: %s',
                     {k: sorted(v) for k, v in self._reverse_aliases.items()})

@@ -4426,7 +4426,7 @@ void thread_spectral_scan(void) {
                 wait_ms(10);
             } while (status != LGW_SPECTRAL_SCAN_STATUS_COMPLETED && status != LGW_SPECTRAL_SCAN_STATUS_ABORTED);
 
-            printf("INFO: spectral scan status loop exited: status=%d (0=unknown,1=completed,2=aborted)\n", status);
+            printf("INFO: spectral scan status loop exited: status=%d (0=none,1=on_going,2=aborted,3=completed,4=unknown)\n", status);
             if (dbgf) { fprintf(dbgf, "status_loop_exit status=%d\n", status); fflush(dbgf); }
             fflush(stdout);
 

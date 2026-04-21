@@ -118,7 +118,13 @@ class RepeaterDaemon:
                         f"CAD thresholds set from config: peak={peak_threshold}, min={min_threshold}"
                     )
                 else:
-                    logger.warning("Radio does not support CAD configuration")
+                    # For WM1303, CAD is handled at the C-level by pkt_fwd,
+                    # so VirtualLoRaRadio not supporting CAD is expected.
+                    radio_type = self.config.get("radio_type", "sx1262")
+                    if radio_type.lower() == "wm1303":
+                        logger.debug("Radio does not support CAD configuration (expected for WM1303 - handled by pkt_fwd)")
+                    else:
+                        logger.warning("Radio does not support CAD configuration")
 
                 if hasattr(self.radio, "get_frequency"):
                     logger.info(f"Radio config - Freq: {self.radio.get_frequency():.1f}MHz")
@@ -1230,9 +1236,9 @@ class RepeaterDaemon:
             return False
 
     def _signal_shutdown(self, sig, loop):
-        """Handle SIGTERM/SIGINT by scheduling async shutdown."""
+        """Handle SIGTERM/SIGINT by setting the stop event for cooperative exit."""
         logger.info(f"Received signal {sig.name}, shutting down...")
-        loop.create_task(self._shutdown())
+        self._stop_event.set()
 
     async def _shutdown(self):
         """Best-effort shutdown: stop background services and release hardware."""
@@ -1275,12 +1281,7 @@ class RepeaterDaemon:
         except Exception as e:
             logger.debug(f"CH341 reset skipped/failed: {e}")
 
-        # Stop the event loop so the process can exit cleanly
-        try:
-            loop = asyncio.get_running_loop()
-            loop.stop()
-        except RuntimeError:
-            pass
+        logger.info("Shutdown complete")
 
     @staticmethod
     def _detect_container() -> bool:
@@ -1296,6 +1297,9 @@ class RepeaterDaemon:
     async def run(self):
 
         logger.info("Repeater daemon started")
+
+        # Shutdown event — set by signal handler to unblock the main wait
+        self._stop_event = asyncio.Event()
 
         # Register signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
@@ -1420,27 +1424,26 @@ class RepeaterDaemon:
             except Exception as e:
                 logger.error(f"Failed to start HTTP server: {e}")
 
-            # Run dispatcher (handles RX/TX via pymc_core)
-            try:
-                await self.dispatcher.run_forever()
-            except KeyboardInterrupt:
-                logger.info("Shutting down...")
-                for frame_server in getattr(self, "companion_frame_servers", []):
-                    try:
-                        await frame_server.stop()
-                    except Exception as e:
-                        logger.debug(f"Companion frame server stop: {e}")
-                if hasattr(self, "companion_bridges"):
-                    for bridge in self.companion_bridges.values():
-                        if hasattr(bridge, "stop"):
-                            try:
-                                await bridge.stop()
-                            except Exception as e:
-                                logger.debug(f"Companion bridge stop: {e}")
-                if self.router:
-                    await self.router.stop()
-                if self.http_server:
-                    self.http_server.stop()
+            # Keep the daemon alive until a shutdown signal is received.
+            # The dispatcher RX/TX processing happens via callbacks and
+            # background tasks; we just need to block here until SIGTERM.
+            logger.info("Repeater daemon running (waiting for shutdown signal)")
+            await self._stop_event.wait()
+            logger.info("Shutdown signal received, cleaning up...")
+
+            # Best-effort companion cleanup
+            for frame_server in getattr(self, "companion_frame_servers", []):
+                try:
+                    await frame_server.stop()
+                except Exception as e:
+                    logger.debug(f"Companion frame server stop: {e}")
+            if hasattr(self, "companion_bridges"):
+                for bridge in self.companion_bridges.values():
+                    if hasattr(bridge, "stop"):
+                        try:
+                            await bridge.stop()
+                        except Exception as e:
+                            logger.debug(f"Companion bridge stop: {e}")
         finally:
             await self._shutdown()
 
@@ -1480,6 +1483,17 @@ def main():
         asyncio.run(daemon.run())
     except KeyboardInterrupt:
         logger.info("Repeater stopped")
+    except asyncio.CancelledError:
+        # Expected when _shutdown() cancels all tasks for clean exit
+        logger.info("Repeater stopped (clean shutdown)")
+    except RuntimeError as e:
+        # 'Event loop stopped before Future completed' may still occur
+        # in edge cases on Python 3.13+.
+        if "Event loop stopped" in str(e) or "cannot schedule" in str(e).lower():
+            logger.info("Repeater stopped (clean shutdown)")
+        else:
+            logger.error(f"Fatal error: {e}", exc_info=True)
+            sys.exit(1)
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)

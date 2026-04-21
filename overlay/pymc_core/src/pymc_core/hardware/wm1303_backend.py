@@ -78,8 +78,11 @@ def _datr_str(sf: int, bw_hz: int) -> str:
     return f'SF{sf}BW{_bw_hz_to_str(bw_hz)}'
 
 
-def _parse_datr(datr: str):
-    """Parse "SF8BW125" -> (8, 125000)"""
+def _parse_datr(datr):
+    """Parse "SF8BW125" -> (8, 125000). Returns (None, None) for FSK or invalid."""
+    if not isinstance(datr, str):
+        # FSK packets have integer datr (e.g. 50000 for 50kbps bitrate)
+        return None, None
     m = re.match(r'SF(\d+)BW(\d+)', datr)
     if m:
         return int(m.group(1)), int(m.group(2)) * 1000
@@ -602,6 +605,74 @@ class WM1303Backend:
         # Early detection: Channel E RSSI vs SX1302 RX comparison (Detection Method 2)
         self._rssi_spike_count = 0             # strong RSSI detections by Channel E
         self._rssi_spike_window_start = time.monotonic()  # window start for spike counting
+        # Hourly summary counters (reset every 60 min)
+        self._hourly_rx_total = 0
+        self._hourly_rx_crc_ok = 0
+        self._hourly_rx_crc_err = 0
+        self._hourly_tx_ok = 0
+        self._hourly_tx_fail = 0
+        self._hourly_tx_lbt_block = 0
+        self._hourly_fsk_skipped = 0
+        self._hourly_scan_sweeps = 0
+        self._hourly_timer: threading.Timer | None = None
+        self._hourly_lock = threading.Lock()
+
+
+    def _start_hourly_timer(self) -> None:
+        """Start the recurring hourly summary timer."""
+        self._hourly_timer = threading.Timer(3600.0, self._log_hourly_summary)
+        self._hourly_timer.daemon = True
+        self._hourly_timer.start()
+        logger.info('WM1303Backend: hourly summary timer started')
+
+    def _stop_hourly_timer(self) -> None:
+        """Cancel the hourly summary timer."""
+        if self._hourly_timer:
+            self._hourly_timer.cancel()
+            self._hourly_timer = None
+
+    def _log_hourly_summary(self) -> None:
+        """Log an hourly summary of RX/TX/bridge activity and reset counters."""
+        with self._hourly_lock:
+            rx_total = self._hourly_rx_total
+            rx_ok = self._hourly_rx_crc_ok
+            rx_err = self._hourly_rx_crc_err
+            tx_ok = self._hourly_tx_ok
+            tx_fail = self._hourly_tx_fail
+            tx_lbt = self._hourly_tx_lbt_block
+            fsk = self._hourly_fsk_skipped
+            scans = self._hourly_scan_sweeps
+            # Reset counters
+            self._hourly_rx_total = 0
+            self._hourly_rx_crc_ok = 0
+            self._hourly_rx_crc_err = 0
+            self._hourly_tx_ok = 0
+            self._hourly_tx_fail = 0
+            self._hourly_tx_lbt_block = 0
+            self._hourly_fsk_skipped = 0
+            self._hourly_scan_sweeps = 0
+
+        # Get bridge stats if available
+        bridge_fwd = 0
+        dedup_hits = 0
+        try:
+            from repeater.bridge_engine import _active_bridge
+            if _active_bridge:
+                bridge_fwd = _active_bridge.forwarded_packets
+                dedup_hits = _active_bridge.dropped_duplicate
+        except Exception:
+            pass
+
+        logger.info('[HOURLY] RX: %d (CRC_OK=%d, CRC_ERR=%d, FSK_SKIP=%d) | '
+                    'TX: %d (OK=%d, FAIL=%d, LBT_BLOCK=%d) | '
+                    'Bridge: %d fwd, %d dedup | Scan: %d sweeps',
+                    rx_total, rx_ok, rx_err, fsk,
+                    tx_ok + tx_fail + tx_lbt, tx_ok, tx_fail, tx_lbt,
+                    bridge_fwd, dedup_hits, scans)
+
+        # Restart timer for next hour
+        self._start_hourly_timer()
+
 
 
     def register_virtual_radio(self, radio) -> None:
@@ -2032,6 +2103,7 @@ class WM1303Backend:
             self._stdout_thread.join(timeout=3)
             self._stdout_thread = None
         self._pull_addr = None
+        self._stop_hourly_timer()
         logger.info('WM1303Backend: lora_pkt_fwd stopped')
 
     def _start_pktfwd(self) -> None:
@@ -2091,6 +2163,8 @@ class WM1303Backend:
             # Write CAD config for the HAL spectral scan thread
             self._write_cad_config_json()
 
+            # Start hourly summary timer
+            self._start_hourly_timer()
 
         except Exception as e:
             logger.error('WM1303Backend: failed to start lora_pkt_fwd: %s', e)
@@ -2192,16 +2266,50 @@ class WM1303Backend:
 
 
     def _pktfwd_stdout_reader(self) -> None:
-        """Drain lora_pkt_fwd stdout to prevent pipe buffer blocking."""
+        """Drain lora_pkt_fwd stdout to prevent pipe buffer blocking.
+
+        Stats lines (30s periodic reports) are throttled to every 5 minutes
+        at INFO level unless they contain actual TX/RX activity. All other
+        stats output goes to DEBUG to reduce log noise (~10k lines/6h).
+        """
         logger.info('WM1303Backend: stdout reader thread started')
+        _stats_interval = 300  # log stats at INFO every 5 minutes
+        _last_stats_info = 0.0
+        _stats_keywords = ('##### ', 'JSON up:', 'JSON down:', 'REPORT', 'report',
+                           'rxnb', 'txnb', 'ackr', 'dwnb')
+        _activity_keywords = ('TX ', 'ERROR', 'WARNING', 'rejec', 'too late',
+                              'collision', 'BEACON')
         try:
             while self._proc and self._proc.poll() is None:
                 line = self._proc.stdout.readline()
                 if line:
                     line_str = line.strip() if isinstance(line, str) else line.decode(errors='replace').strip()
                     if line_str:
-                        if any(kw in line_str for kw in ('TX ', 'ERROR', 'WARNING', 'PULL', 'PUSH', 'INFO', 'rejec', 'too late', 'collision', 'BEACON')):
+                        # Priority 1: Lines starting with '# ' are stats summary
+                        # lines (e.g. '# TX errors: 0', '# BEACON queued: 0').
+                        # These must be throttled BEFORE checking activity keywords
+                        # because they can match 'TX ' or 'BEACON' falsely.
+                        if line_str.startswith('# '):
+                            _now = time.monotonic()
+                            if _now - _last_stats_info >= _stats_interval:
+                                _last_stats_info = _now
+                                logger.info('pkt_fwd: %s', line_str)
+                            else:
+                                logger.debug('pkt_fwd: %s', line_str)
+                        # Priority 2: always log errors, TX events, warnings at INFO
+                        elif any(kw in line_str for kw in _activity_keywords):
                             logger.info('pkt_fwd: %s', line_str)
+                        # Priority 3: Stats lines: throttle to every 5 min at INFO
+                        elif any(kw in line_str for kw in _stats_keywords):
+                            _now = time.monotonic()
+                            if _now - _last_stats_info >= _stats_interval:
+                                _last_stats_info = _now
+                                logger.info('pkt_fwd: %s', line_str)
+                            else:
+                                logger.debug('pkt_fwd: %s', line_str)
+                        # Priority 4: PULL/PUSH protocol messages: log at DEBUG (high volume)
+                        elif any(kw in line_str for kw in ('PULL', 'PUSH', 'INFO')):
+                            logger.debug('pkt_fwd: %s', line_str)
                         else:
                             logger.debug('pkt_fwd: %s', line_str)
         except Exception as e:
@@ -2353,6 +2461,13 @@ class WM1303Backend:
         _rx_stat = rxpk.get('stat', -1)
         # CRC error = -1, CRC disabled = 0, CRC OK = 1
         _crc_label = {1: 'CRC_OK', 0: 'CRC_DISABLED', -1: 'CRC_ERROR'}.get(_rx_stat, f'CRC_{_rx_stat}')
+        # Hourly summary counters
+        with self._hourly_lock:
+            self._hourly_rx_total += 1
+            if _rx_stat == 1:
+                self._hourly_rx_crc_ok += 1
+            elif _rx_stat == -1:
+                self._hourly_rx_crc_err += 1
         _rx_lsnr = rxpk.get('lsnr', '?')
         _raw_data = rxpk.get('data', '')
         _raw_size = len(_raw_data)
@@ -2381,6 +2496,12 @@ class WM1303Backend:
             freq_hz = int(float(rxpk.get('freq', 0)) * 1e6)
             datr = rxpk.get('datr', 'SF7BW125')
             rx_sf, rx_bw = _parse_datr(datr)
+            if rx_sf is None:
+                # FSK packet or unrecognized modulation - log and skip LoRa processing
+                with self._hourly_lock:
+                    self._hourly_fsk_skipped += 1
+                logger.debug('WM1303Backend: non-LoRa RX (datr=%s) freq=%.3f - skipping channel dispatch', datr, _rx_freq)
+                return
             payload_b64 = rxpk.get('data', '')
             if not payload_b64:
                 return
@@ -2550,9 +2671,17 @@ class WM1303Backend:
 
         if result.get('ok'):
             self._tx_packets_sent_total += 1
+            with self._hourly_lock:
+                self._hourly_tx_ok += 1
             logger.info('WM1303Backend: TX on %s (%d bytes) via GlobalTXScheduler',
                        channel_id, len(data))
         else:
+            with self._hourly_lock:
+                err_reason = result.get('error', '')
+                if 'lbt' in str(err_reason).lower() or 'cad' in str(err_reason).lower():
+                    self._hourly_tx_lbt_block += 1
+                else:
+                    self._hourly_tx_fail += 1
             logger.warning('WM1303Backend: TX failed on %s: %s', channel_id, result)
 
         return result

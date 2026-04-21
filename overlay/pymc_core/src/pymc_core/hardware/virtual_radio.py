@@ -177,7 +177,7 @@ class VirtualLoRaRadio(LoRaRadio):
         return meta
 
     async def wait_for_rx(self) -> bytes:
-        logger.info(
+        logger.debug(
             "VirtualLoRaRadio[%s] wait_for_rx: WAITING on queue_id=%s qsize=%d",
             self.channel_id, id(self._rx_queue), self._rx_queue.qsize(),
         )
