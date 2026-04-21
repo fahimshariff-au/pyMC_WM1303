@@ -185,13 +185,3 @@
 
 *(Diff summary: 13 files changed, +1770 / −231 lines; plus 2 new files.)*
 
----
-
-
-## Design Principles (formalized this release)
-
-See [`design-principles.promptinclude.md`](../design-principles.promptinclude.md) at project root.
-
-- **RX availability is the #1 priority.** Any feature that reduces RX availability must be justified and minimized.
-- **TX duration must be as short as possible**, and packets must be sent ASAP after entering the queue.
-- **No TX holds** for spectral scan, noise-floor measurement, or similar features.
