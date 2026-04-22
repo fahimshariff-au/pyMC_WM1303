@@ -1108,6 +1108,62 @@ int sx1302_modem_enable(void) {
 
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 
+int sx1302_correlator_disable(void) {
+    int err = LGW_REG_SUCCESS;
+
+    /* Disable correlators and their clocks */
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORRELATOR_EN_CORR_EN, 0x00);
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORR_CLOCK_ENABLE_CLK_EN, 0x00);
+
+    /* Clear correlator accumulators */
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORRELATOR_ENABLE_ACC_CLEAR_ENABLE_CORR_ACC_CLEAR, 0xFF);
+
+    if (err == LGW_REG_SUCCESS) {
+        printf("INFO: [sx1302] correlators disabled\n");
+    } else {
+        printf("ERROR: [sx1302] correlator disable FAILED\n");
+    }
+
+    return err;
+}
+
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+
+int sx1302_correlator_reinit(uint8_t channel_mask, uint8_t sf_mask) {
+    int err = LGW_REG_SUCCESS;
+
+    /* Step 1: Disable correlators (if not already disabled by prior call) */
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORRELATOR_EN_CORR_EN, 0x00);
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORR_CLOCK_ENABLE_CLK_EN, 0x00);
+
+    /* Step 2: Clear correlator accumulators */
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORRELATOR_ENABLE_ACC_CLEAR_ENABLE_CORR_ACC_CLEAR, 0xFF);
+
+    /* Step 3: Brief settle time for internal state to clear */
+    wait_ms(1);
+
+    /* Step 4: Re-enable first-detection-edge and accumulator clear */
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORRELATOR_ENABLE_ONLY_FIRST_DET_EDGE_ENABLE_ONLY_FIRST_DET_EDGE, 0xFF);
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORRELATOR_ENABLE_ACC_CLEAR_ENABLE_CORR_ACC_CLEAR, 0xFF);
+
+    /* Step 5: Re-enable SF mask */
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORRELATOR_SF_EN_CORR_SF_EN, sf_mask);
+
+    /* Step 6: Re-enable correlator clocks and correlators */
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORR_CLOCK_ENABLE_CLK_EN, channel_mask);
+    err |= lgw_reg_w(SX1302_REG_RX_TOP_CORRELATOR_EN_CORR_EN, channel_mask);
+
+    if (err == LGW_REG_SUCCESS) {
+        printf("INFO: [sx1302] correlator reinit OK (ch_mask=0x%02X, sf_mask=0x%02X)\n", channel_mask, sf_mask);
+    } else {
+        printf("ERROR: [sx1302] correlator reinit FAILED\n");
+    }
+
+    return err;
+}
+
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+
 int sx1302_lora_syncword(bool public, uint8_t lora_service_sf) {
     int err = LGW_REG_SUCCESS;
 

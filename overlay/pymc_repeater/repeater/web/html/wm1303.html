@@ -3960,17 +3960,38 @@ function hexToRgba(hex, alpha) {
     if (m) return m[1];
     return null;
   }
-  window.toggleTraceDetail = function(hash) {
-    var el = document.getElementById('trace-detail-' + hash);
-    if (!el) return;
-    if (el.style.display === 'none') {
+  window.toggleTraceDetail = function(uid) {
+    var el = document.getElementById('trace-detail-' + uid);
+    if (!el) { console.warn('trace-detail not found for uid:', uid); return; }
+    var wasOpen = (el.style.display !== 'none');
+    // Accordion: close ALL open trace details first
+    var allDetails = document.querySelectorAll('[id^="trace-detail-"]');
+    for (var i = 0; i < allDetails.length; i++) {
+      allDetails[i].style.display = 'none';
+    }
+    _expandedTraces.clear();
+    // Now open the clicked one (unless it was already open)
+    if (!wasOpen) {
       el.style.display = 'block';
-      _expandedTraces.add(hash);
-    } else {
-      el.style.display = 'none';
-      _expandedTraces.delete(hash);
+      _expandedTraces.add(uid);
     }
   };
+  // Event delegation: single click handler on the trace list container
+  (function() {
+    var box = document.getElementById('traceList');
+    if (box) {
+      box.addEventListener('click', function(e) {
+        // Find the closest row wrapper with data-trace-uid
+        var row = e.target.closest('[data-trace-uid]');
+        if (!row) return;
+        // Don't toggle if clicking inside the detail panel
+        var detail = e.target.closest('[data-trace-detail]');
+        if (detail) return;
+        var uid = row.getAttribute('data-trace-uid');
+        if (uid) toggleTraceDetail(uid);
+      });
+    }
+  })();
   function _renderTraces(traces) {
     var box = document.getElementById('traceList');
     var nodata = document.getElementById('traceNoData');
@@ -3988,7 +4009,8 @@ function hexToRgba(hex, alpha) {
     for (var i = 0; i < traces.length; i++) {
       var t = traces[i];
       var hc = _hashColor(t.pkt_hash);
-      html += '<div style="cursor:pointer;border-radius:6px;transition:background .15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseout="this.style.background=\'transparent\'" onclick="toggleTraceDetail(\'' + (t.pkt_hash || i) + '\')">';
+      var _traceUid = 'r' + i + '-' + (t.pkt_hash || 'idx') + '-' + String(t.first_seen || '').replace(/[^a-zA-Z0-9]/g, '');
+      html += '<div data-trace-uid="' + _traceUid + '" style="cursor:pointer;border-radius:6px">';
       html += '<div style="display:grid;grid-template-columns:140px 90px 90px 80px 100px 60px;gap:4px 8px;font-size:12px;padding:6px 8px;align-items:center">';
       html += '<div style="color:var(--txm)">' + _fmtTime(t.first_seen) + '</div>';
       html += '<div style="font-family:monospace;font-size:11px;background:' + hc + '22;color:' + hc + ';padding:1px 6px;border-radius:4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (t.pkt_hash || '').toUpperCase() + '</div>';
@@ -3997,7 +4019,7 @@ function hexToRgba(hex, alpha) {
       html += '<div style="text-align:right;white-space:nowrap;min-width:100px;font-family:monospace;color:var(--txs)">' + (t.total_ms !== undefined ? t.total_ms.toFixed(1) + 'ms' : '-') + '</div>';
       html += '<div style="text-align:center;min-width:60px">' + _statusIcon(t.status) + '</div>';
       html += '</div>';
-      html += '<div id="trace-detail-' + (t.pkt_hash || i) + '" style="display:none;padding:4px 8px 12px 20px;border-bottom:1px solid rgba(255,255,255,0.06)">';
+      html += '<div id="trace-detail-' + _traceUid + '" data-trace-detail="1" style="display:none;padding:4px 8px 12px 20px;border-bottom:1px solid rgba(255,255,255,0.06)">';
       if (t.steps && t.steps.length > 0) {
         // WM1303 v2.1.6: chronological sort safety net. Steps emitted nearly
         // simultaneously (e.g. lbt_check / cad_check / tx_send) may arrive
@@ -4011,6 +4033,38 @@ function hexToRgba(hex, alpha) {
           return a.__orig_idx - b.__orig_idx;
         });
         html += '<div style="position:relative;padding-left:20px">';
+        // Render steps with virtual "waiting" rows before events with significant gaps.
+        // This clearly separates wait time from action time for normal users.
+        var _WAIT_THRESHOLD_MS = 20; // gaps larger than this get a virtual wait row
+
+        // Helper: determine wait reason based on previous & current step context.
+        function _waitReason(prevStep, currStep) {
+          var pn = prevStep ? (prevStep.name || '') : '';
+          var cn = currStep ? (currStep.name || '') : '';
+          var cdet = currStep ? (currStep.detail || '') : '';
+          var pdet = prevStep ? (prevStep.detail || '') : '';
+          // Extract retries count from cad_check detail (e.g. "Retries: 3")
+          var retriesMatch = cdet.match(/Retries:\s*(\d+)/i);
+          var retries = retriesMatch ? parseInt(retriesMatch[1], 10) : 0;
+          if (cn === 'cad_check' && retries > 0) {
+            return { label: 'waiting', reason: 'CAD retries (' + retries + '\u00d7 retry)', icon: '\u23f3' };
+          }
+          if (pn === 'tx_enqueue' || pn === 'tx_send') {
+            return { label: 'waiting', reason: 'rf-chain busy (previous TX airtime + guard)', icon: '\u23f3' };
+          }
+          if (cn === 'cad_check') {
+            return { label: 'waiting', reason: 'CAD scan', icon: '\u23f3' };
+          }
+          if (cn === 'lbt_check') {
+            return { label: 'waiting', reason: 'LBT scan', icon: '\u23f3' };
+          }
+          if (cn === 'tx_send') {
+            return { label: 'waiting', reason: 'scheduler delay', icon: '\u23f3' };
+          }
+          return { label: 'waiting', reason: 'processing delay', icon: '\u23f3' };
+        }
+
+        html += '<div style="position:relative;padding-left:20px">';
         for (var j = 0; j < t.steps.length; j++) {
           var s = t.steps[j];
           var sclr = _stepStatusColor(s.status);
@@ -4020,17 +4074,106 @@ function hexToRgba(hex, alpha) {
           var rowBg = _dirBg(dir);
           var isLast = (j === t.steps.length - 1);
           var txTarget = (dir === 'tx') ? _extractTxTarget(s) : null;
-          // Pill renders the friendly (display) name, not the raw id.
           var txTargetPill = '';
           if (txTarget) {
             var _pillName = _traceFriendlyName(txTarget);
             var tc = _hashColor(txTarget);
             txTargetPill = '<span style="font-size:10px;font-weight:700;background:' + tc + '22;color:' + tc + ';border:1px solid ' + tc + '55;padding:1px 7px;border-radius:10px;white-space:nowrap">\u2192 ' + _pillName + '</span>';
           }
-          // Pill placement: for bridge_forward / tx_enqueue move pill to END
-          // of the row (after detail). For tx_send / lbt_check / cad_check
-          // keep it right after the step name (original layout).
           var pillAtEnd = (s.name === 'bridge_forward' || s.name === 'tx_enqueue');
+
+          var _stepElapsed = (s.elapsed_ms !== undefined) ? s.elapsed_ms : 0;
+          var _prevStep = (j > 0) ? t.steps[j - 1] : null;
+          var _prevElapsed = (_prevStep && _prevStep.elapsed_ms !== undefined) ? _prevStep.elapsed_ms : null;
+          var _stepDelta = (_prevElapsed !== null) ? (_stepElapsed - _prevElapsed) : 0;
+          if (_stepDelta < 0) _stepDelta = 0;
+
+          // If there's a significant gap, insert virtual "waiting" row(s) BEFORE this step.
+          // For rf-chain busy scenarios (previous step = tx_send/tx_enqueue), split into 2 rows:
+          //   1) rf transmission (airtime + 150ms guard) — parsed from previous tx_send detail
+          //   2) scheduling delay (remainder, e.g. JIT pickup + CAD/LBT scan)
+          if (_prevElapsed !== null && _stepDelta > _WAIT_THRESHOLD_MS) {
+            var waitColor = '#f59e0b'; // amber for waits
+            var waitRows = []; // array of {deltaMs, cumEndMs, label, reason}
+            var pn = _prevStep ? (_prevStep.name || '') : '';
+            var cn = s.name || '';
+            var isRfChainWait = (pn === 'tx_enqueue' || pn === 'tx_send');
+            var prevTxAirMs = 0;
+            if (isRfChainWait) {
+              for (var k = j - 1; k >= 0; k--) {
+                if (t.steps[k].name === 'tx_send') {
+                  var _pd = t.steps[k].detail || '';
+                  var _pam = _pd.match(/Airtime:\s*([0-9]+\.?[0-9]*)\s*ms/i);
+                  if (_pam) { prevTxAirMs = parseFloat(_pam[1]); }
+                  break;
+                }
+              }
+            }
+
+            if (isRfChainWait && prevTxAirMs > 0) {
+              var rfTxMs = prevTxAirMs + 150; // airtime + rf guard
+              if (rfTxMs > _stepDelta) rfTxMs = _stepDelta;
+              var remainMs = _stepDelta - rfTxMs;
+              var rfCumEnd = _prevElapsed + rfTxMs;
+              waitRows.push({
+                deltaMs: rfTxMs,
+                cumEndMs: rfCumEnd,
+                label: 'rf transmission',
+                reason: 'airtime (' + prevTxAirMs.toFixed(1) + 'ms) + rf guard (150.0ms)'
+              });
+              if (remainMs > 1) {
+                var _nextReason = 'scheduling delay';
+                if (cn === 'cad_check') {
+                  // Parse retries from current cad_check's detail and include if > 0
+                  var _cd = s.detail || '';
+                  var _crm = _cd.match(/Retries:\s*(\d+)/i);
+                  var _cr = _crm ? parseInt(_crm[1], 10) : 0;
+                  if (_cr > 0) {
+                    _nextReason = 'CAD retries (' + _cr + '\u00d7 retry)';
+                  } else {
+                    _nextReason = 'CAD scan';
+                  }
+                } else if (cn === 'lbt_check') {
+                  _nextReason = 'LBT scan';
+                }
+                waitRows.push({
+                  deltaMs: remainMs,
+                  cumEndMs: _stepElapsed,
+                  label: 'waiting',
+                  reason: _nextReason
+                });
+              }
+            } else {
+              var wr = _waitReason(_prevStep, s);
+              waitRows.push({
+                deltaMs: _stepDelta,
+                cumEndMs: _stepElapsed,
+                label: wr.label,
+                reason: wr.reason
+              });
+            }
+
+            for (var w = 0; w < waitRows.length; w++) {
+              var wrow = waitRows[w];
+              html += '<div style="position:relative;padding-bottom:10px;margin-left:8px">';
+              html += '<div style="position:absolute;left:-16px;top:6px;width:10px;height:10px;border-radius:50%;background:' + waitColor + ';border:2px solid rgba(0,0,0,0.3);z-index:1;opacity:0.8"></div>';
+              html += '<div style="position:absolute;left:-12px;top:16px;bottom:0;width:2px;background:rgba(245,158,11,0.25);border-left:2px dashed rgba(245,158,11,0.4)"></div>';
+              html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:rgba(245,158,11,0.06);border-left:3px solid ' + waitColor + ';padding:4px 8px;border-radius:3px;font-style:italic">';
+              html += '<span style="font-size:9px;font-weight:800;background:' + waitColor + ';color:#0a0a0a;padding:1px 5px;border-radius:3px;letter-spacing:0.5px;min-width:24px;text-align:center;flex-shrink:0">WAIT</span>';
+              html += '<span style="font-weight:700;color:' + waitColor + ';font-size:12px;min-width:110px">\u23f3 ' + wrow.label + '</span>';
+              html += '<span style="font-family:monospace;font-size:11px;min-width:150px;display:inline-flex;gap:6px;align-items:center">' +
+                      '<span style="color:' + waitColor + ';font-weight:600" title="Wait duration">+' + wrow.deltaMs.toFixed(1) + 'ms</span>' +
+                      '<span style="color:var(--txm);opacity:0.7" title="Cumulative time when wait ends">(' + wrow.cumEndMs.toFixed(1) + 'ms)</span>' +
+                      '</span>';
+              html += '<span style="font-size:11px;color:' + waitColor + ';flex:1 1 auto;opacity:0.9">' + wrow.reason + '</span>';
+              html += '</div></div>';
+            }
+            _stepDelta = 0;
+          }
+
+          var _deltaText = '+' + _stepDelta.toFixed(1) + 'ms';
+          var _cumText = '(' + _stepElapsed.toFixed(1) + 'ms)';
+
           html += '<div style="position:relative;padding-bottom:' + (isLast ? '0' : '10') + 'px;margin-left:8px">';
           html += '<div style="position:absolute;left:-16px;top:6px;width:10px;height:10px;border-radius:50%;background:' + sclr + ';border:2px solid rgba(0,0,0,0.3);z-index:1"></div>';
           if (!isLast) { html += '<div style="position:absolute;left:-12px;top:16px;bottom:0;width:2px;background:rgba(255,255,255,0.1)"></div>'; }
@@ -4040,13 +4183,49 @@ function hexToRgba(hex, alpha) {
           if (txTargetPill && !pillAtEnd) {
             html += txTargetPill;
           }
-          html += '<span style="font-family:monospace;font-size:11px;color:var(--txm);min-width:70px">+' + (s.elapsed_ms !== undefined ? s.elapsed_ms.toFixed(1) : '0') + 'ms</span>';
+          html += '<span style="font-family:monospace;font-size:11px;min-width:150px;display:inline-flex;gap:6px;align-items:center">' +
+                  '<span style="color:var(--txs);font-weight:600" title="Duration of this step (event emit time)">' + _deltaText + '</span>' +
+                  '<span style="color:var(--txm);opacity:0.7" title="Cumulative time since first step">' + _cumText + '</span>' +
+                  '</span>';
           html += '<span style="font-size:11px;color:var(--txs);white-space:pre-line;flex:1 1 auto">' + (s.detail || '') + '</span>';
           if (txTargetPill && pillAtEnd) {
             html += txTargetPill;
           }
           html += '</div></div>';
         }
+        // After the LAST tx_send, add a virtual "rf transmission" WAIT row to show
+        // the airtime + rf-chain guard that continues AFTER the last event was emitted.
+        // Without this, the trace would hide the real end-of-TX time for the final packet.
+        var _lastStep = (t.steps.length > 0) ? t.steps[t.steps.length - 1] : null;
+        var _finalWaitMs = 0;
+        var _finalCumMs = (t.steps.length > 0 && t.steps[t.steps.length-1].elapsed_ms !== undefined) ? t.steps[t.steps.length-1].elapsed_ms : 0;
+        if (_lastStep && _lastStep.name === 'tx_send') {
+          var _lastDet = _lastStep.detail || '';
+          var _airMatch = _lastDet.match(/Airtime:\s*([0-9]+\.?[0-9]*)\s*ms/i);
+          var _airMs = _airMatch ? parseFloat(_airMatch[1]) : 0;
+          if (_airMs > 0) {
+            _finalWaitMs = _airMs + 150; // airtime + rf-chain guard margin
+            var _finalEnd = _finalCumMs + _finalWaitMs;
+            var _fwColor = '#f59e0b';
+            html += '<div style="position:relative;padding-bottom:0;margin-left:8px">';
+            html += '<div style="position:absolute;left:-16px;top:6px;width:10px;height:10px;border-radius:50%;background:' + _fwColor + ';border:2px solid rgba(0,0,0,0.3);z-index:1;opacity:0.8"></div>';
+            html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:rgba(245,158,11,0.06);border-left:3px solid ' + _fwColor + ';padding:4px 8px;border-radius:3px;font-style:italic">';
+            html += '<span style="font-size:9px;font-weight:800;background:' + _fwColor + ';color:#0a0a0a;padding:1px 5px;border-radius:3px;letter-spacing:0.5px;min-width:24px;text-align:center;flex-shrink:0">WAIT</span>';
+            html += '<span style="font-weight:700;color:' + _fwColor + ';font-size:12px;min-width:110px">\u23f3 rf transmission</span>';
+            html += '<span style="font-family:monospace;font-size:11px;min-width:150px;display:inline-flex;gap:6px;align-items:center">' +
+                    '<span style="color:' + _fwColor + ';font-weight:600" title="Airtime + rf-chain guard">+' + _finalWaitMs.toFixed(1) + 'ms</span>' +
+                    '<span style="color:var(--txm);opacity:0.7" title="Cumulative time when RF transmission is fully complete">(' + _finalEnd.toFixed(1) + 'ms)</span>' +
+                    '</span>';
+            html += '<span style="font-size:11px;color:' + _fwColor + ';flex:1 1 auto;opacity:0.9">airtime (' + _airMs.toFixed(1) + 'ms) + rf guard (150.0ms)</span>';
+            html += '</div></div>';
+          }
+        }
+        // Total sum row — includes final airtime wait if present
+        var _totalMs = _finalCumMs + _finalWaitMs;
+        html += '<div style="margin-left:8px;margin-top:8px;padding:6px 8px;border-top:1px solid rgba(255,255,255,0.15);display:flex;align-items:center;gap:8px;justify-content:flex-end">' +
+                '<span style="font-size:11px;color:var(--txm);font-weight:600">Total:</span>' +
+                '<span style="font-family:monospace;font-size:12px;color:var(--txs);font-weight:700">' + _totalMs.toFixed(1) + 'ms</span>' +
+                '</div>';
         html += '</div>';
       } else {
         html += '<div style="color:var(--txm);font-size:11px;font-style:italic">No steps recorded</div>';

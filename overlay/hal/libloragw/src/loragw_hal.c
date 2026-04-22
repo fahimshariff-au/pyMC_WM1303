@@ -33,6 +33,8 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #include <unistd.h>     /* symlink, unlink */
 #include <inttypes.h>
 #include <sys/time.h>    /* gettimeofday - AGC reload debounce */
+#include <sys/stat.h>    /* stat - runtime toggle file check */
+#include <time.h>        /* localtime, struct tm */
 
 #include "loragw_reg.h"
 #include "loragw_hal.h"
@@ -1291,29 +1293,11 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
     _meas_time_start(&tm);
 
 
-
-    /* POST-TX AGC RELOAD: detect TX->TX_FREE transition (debounced) */
-    {
-        static uint8_t _ptx = TX_FREE;
-        static struct timeval _last_agc_reload = {0, 0};
-        uint8_t _ctx = sx1302_tx_status(CONTEXT_BOARD.clksrc);
-        if (_ptx != TX_FREE && _ctx == TX_FREE) {
-            struct timeval now;
-            gettimeofday(&now, NULL);
-            long elapsed_ms = (now.tv_sec - _last_agc_reload.tv_sec) * 1000 +
-                              (now.tv_usec - _last_agc_reload.tv_usec) / 1000;
-            if (elapsed_ms >= 500 || _last_agc_reload.tv_sec == 0) {
-                printf("INFO: [hal] TX complete on chain %d - AGC reload\n", CONTEXT_BOARD.clksrc);
-                sx1302_agc_reload(CONTEXT_RF_CHAIN[CONTEXT_BOARD.clksrc].type);
-                _last_agc_reload = now;
-            } else {
-                printf("INFO: [hal] TX complete on chain %d - AGC reload skipped (debounce %ldms)\n",
-                       CONTEXT_BOARD.clksrc, elapsed_ms);
-            }
-        }
-        _ptx = _ctx;
-    }
-    /* END POST-TX AGC RELOAD */
+    /* NOTE: The custom post-TX AGC reload block (previously here) was removed
+       after empirical investigation proved it was the root cause of SX1302
+       correlator state corruption ("snap" events). The AGC MCU firmware handles
+       TX->RX transitions autonomously without any host-side intervention.
+       See investigation report (2026-04-22) for details. */
 
     /* Get packets from SX1302, if any */
     res = sx1302_fetch(&nb_pkt_fetched);

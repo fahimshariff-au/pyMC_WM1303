@@ -680,6 +680,76 @@ if [ "$(cat /sys/module/spidev/parameters/bufsiz 2>/dev/null)" != "32768" ]; the
     REBOOT_REQUIRED=true
 fi
 
+step "Checking VPU core_freq_min=500 (stable SPI clock)"
+BOOT_CONFIG="/boot/firmware/config.txt"
+[ ! -f "$BOOT_CONFIG" ] && BOOT_CONFIG="/boot/config.txt"
+if [ -f "$BOOT_CONFIG" ]; then
+    if grep -q "^core_freq_min=500" "$BOOT_CONFIG"; then
+        ok "Already configured"
+    elif grep -q "^core_freq_min=" "$BOOT_CONFIG"; then
+        sed -i 's/^core_freq_min=.*/core_freq_min=500/' "$BOOT_CONFIG"
+        ok "Updated to 500 (was different)"
+        REBOOT_REQUIRED=true
+    else
+        if grep -q '^\[' "$BOOT_CONFIG"; then
+            sed -i '0,/^\[/{s/^\[/# Lock VPU core clock for stable SPI bus timing\ncore_freq_min=500\n\n[/}' "$BOOT_CONFIG"
+        else
+            echo "" >> "$BOOT_CONFIG"
+            echo "# Lock VPU core clock for stable SPI bus timing" >> "$BOOT_CONFIG"
+            echo "core_freq_min=500" >> "$BOOT_CONFIG"
+        fi
+        ok "Added to config.txt"
+        REBOOT_REQUIRED=true
+    fi
+else
+    warn "Boot config not found — please add core_freq_min=500 manually"
+fi
+
+step "Checking SPI polling_limit_us=250 (persistent)"
+SPI_BCM_CONF="/etc/modprobe.d/spi-bcm2835-opts.conf"
+if [ -f "$SPI_BCM_CONF" ] && grep -q "polling_limit_us=250" "$SPI_BCM_CONF"; then
+    ok "Already configured"
+else
+    echo "options spi_bcm2835 polling_limit_us=250" > "$SPI_BCM_CONF"
+    ok "Set polling_limit_us=250"
+fi
+# Apply at runtime immediately if module is loaded
+SPI_POLL_PARAM="/sys/module/spi_bcm2835/parameters/polling_limit_us"
+if [ -f "$SPI_POLL_PARAM" ]; then
+    CURRENT_POLL=$(cat "$SPI_POLL_PARAM" 2>/dev/null)
+    if [ "$CURRENT_POLL" != "250" ]; then
+        echo 250 > "$SPI_POLL_PARAM" 2>/dev/null
+        info "Runtime polling_limit_us: ${CURRENT_POLL} -> 250"
+    else
+        info "Runtime polling_limit_us: already 250"
+    fi
+fi
+
+step "Setting CPU governor to performance"
+GOV_CHANGED=0
+GOV_TOTAL=0
+for gov_file in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -f "$gov_file" ] || continue
+    GOV_TOTAL=$((GOV_TOTAL + 1))
+    current=$(cat "$gov_file" 2>/dev/null)
+    if [ "$current" != "performance" ]; then
+        echo "performance" > "$gov_file" 2>/dev/null && GOV_CHANGED=$((GOV_CHANGED + 1))
+    fi
+done
+if [ $GOV_TOTAL -eq 0 ]; then
+    warn "No CPU governor files found"
+elif [ $GOV_CHANGED -gt 0 ]; then
+    ok "Set to 'performance' on ${GOV_CHANGED}/${GOV_TOTAL} cores"
+else
+    ok "Already 'performance' on all ${GOV_TOTAL} cores"
+fi
+
+step "Updating SPI optimization service script"
+cp "${SCRIPT_DIR}/config/spi_optimize.sh" "${INSTALL_BASE}/spi_optimize.sh" >> "${LOG_FILE}" 2>&1
+chmod 755 "${INSTALL_BASE}/spi_optimize.sh" 2>/dev/null
+ok "Updated (runs at every service start)"
+
+
 if [ "$FORCE_CONFIG" = true ]; then
     warn "--force-config: overwriting existing configuration files!"
 
@@ -1005,14 +1075,22 @@ AD5338R_RESET_PIN=$((GPIO_BASE + GPIO_AD5338R))
 
 cat > "${PKTFWD_DIR}/reset_lgw.sh" << RESET_EOF
 #!/bin/sh
-# Auto-generated GPIO reset script for WM1303 CoreCell
+# GPIO reset script for WM1303 CoreCell
 # BCM pins: reset=${GPIO_RESET}, power=${GPIO_POWER}, sx1261=${GPIO_SX1261}, ad5338r=${GPIO_AD5338R}
 # GPIO base offset: ${GPIO_BASE}
+#
+# Usage:
+#   reset_lgw.sh start         - Normal start (quick reset + power on)
+#   reset_lgw.sh stop          - Power down and hold resets
+#   reset_lgw.sh deep_reset    - Extended hardware drain (>60s power off)
 
 SX1302_RESET_PIN=${SX1302_RESET_PIN}
 SX1302_POWER_EN_PIN=${SX1302_POWER_PIN}
 SX1261_RESET_PIN=${SX1261_RESET_PIN}
 AD5338R_RESET_PIN=${AD5338R_RESET_PIN}
+
+# Default drain time for deep_reset (seconds)
+DRAIN_TIME=\${2:-60}
 
 WAIT_GPIO() {
     sleep 0.1
@@ -1023,6 +1101,44 @@ init() {
         echo "\${pin}" > /sys/class/gpio/export 2>/dev/null || true; WAIT_GPIO
         echo "out" > /sys/class/gpio/gpio\${pin}/direction; WAIT_GPIO
     done
+}
+
+power_down() {
+    echo "CoreCell power OFF through GPIO\${SX1302_POWER_EN_PIN} (BCM${GPIO_POWER})..."
+    echo "0" > /sys/class/gpio/gpio\${SX1302_POWER_EN_PIN}/value; WAIT_GPIO
+
+    echo "SX1302 RESET asserted through GPIO\${SX1302_RESET_PIN} (BCM${GPIO_RESET})..."
+    echo "1" > /sys/class/gpio/gpio\${SX1302_RESET_PIN}/value; WAIT_GPIO
+
+    echo "SX1261 RESET asserted through GPIO\${SX1261_RESET_PIN} (BCM${GPIO_SX1261})..."
+    echo "1" > /sys/class/gpio/gpio\${SX1261_RESET_PIN}/value; WAIT_GPIO
+
+    echo "AD5338R RESET asserted through GPIO\${AD5338R_RESET_PIN} (BCM${GPIO_AD5338R})..."
+    echo "1" > /sys/class/gpio/gpio\${AD5338R_RESET_PIN}/value; WAIT_GPIO
+}
+
+power_up() {
+    echo "Releasing resets..."
+    echo "0" > /sys/class/gpio/gpio\${SX1302_RESET_PIN}/value; WAIT_GPIO
+    echo "0" > /sys/class/gpio/gpio\${SX1261_RESET_PIN}/value; WAIT_GPIO
+    echo "0" > /sys/class/gpio/gpio\${AD5338R_RESET_PIN}/value; WAIT_GPIO
+    sleep 0.5
+
+    echo "CoreCell power enable through GPIO\${SX1302_POWER_EN_PIN} (BCM${GPIO_POWER})..."
+    echo "1" > /sys/class/gpio/gpio\${SX1302_POWER_EN_PIN}/value; WAIT_GPIO
+    sleep 0.5
+
+    echo "CoreCell reset through GPIO\${SX1302_RESET_PIN} (BCM${GPIO_RESET})..."
+    echo "1" > /sys/class/gpio/gpio\${SX1302_RESET_PIN}/value; WAIT_GPIO
+    echo "0" > /sys/class/gpio/gpio\${SX1302_RESET_PIN}/value; WAIT_GPIO
+
+    echo "SX1261 reset through GPIO\${SX1261_RESET_PIN} (BCM${GPIO_SX1261})..."
+    echo "1" > /sys/class/gpio/gpio\${SX1261_RESET_PIN}/value; WAIT_GPIO
+    echo "0" > /sys/class/gpio/gpio\${SX1261_RESET_PIN}/value; WAIT_GPIO
+
+    echo "AD5338R reset through GPIO\${AD5338R_RESET_PIN} (BCM${GPIO_AD5338R})..."
+    echo "1" > /sys/class/gpio/gpio\${AD5338R_RESET_PIN}/value; WAIT_GPIO
+    echo "0" > /sys/class/gpio/gpio\${AD5338R_RESET_PIN}/value; WAIT_GPIO
 }
 
 reset() {
@@ -1058,11 +1174,38 @@ case "\$1" in
         sleep 1
         ;;
     stop)
-        reset
-        term
+        init
+        power_down
+        ;;
+    deep_reset)
+        echo "=== Extended hardware drain reset ==="
+        echo "Initializing GPIOs..."
+        init
+
+        echo "Powering down all components..."
+        power_down
+
+        echo "Holding all resets for \${DRAIN_TIME} seconds to clear hardware state..."
+        ELAPSED=0
+        while [ \$ELAPSED -lt \$DRAIN_TIME ]; do
+            REMAINING=\$((DRAIN_TIME - ELAPSED))
+            printf "\r  Draining... %d seconds remaining  " \$REMAINING
+            sleep 10
+            ELAPSED=\$((ELAPSED + 10))
+        done
+        printf "\r  Drain complete (%d seconds)          \n" \$DRAIN_TIME
+
+        echo "Powering up with clean state..."
+        power_up
+        sleep 1
+
+        echo "=== Hardware drain reset complete ==="
         ;;
     *)
-        echo "Usage: \$0 {start|stop}"
+        echo "Usage: \$0 {start|stop|deep_reset} [drain_seconds]"
+        echo "  start       - Normal start (quick reset + power on)"
+        echo "  stop        - Power down and hold resets"
+        echo "  deep_reset  - Extended power-off drain (default 60s)"
         exit 1
         ;;
 esac
@@ -1384,6 +1527,10 @@ fi
 # =============================================================================
 phase "Restart and Verify Service"
 
+step "Performing extended hardware drain reset (60s)"
+sudo "${PKTFWD_DIR}/reset_lgw.sh" deep_reset 60 >> "${LOG_FILE}" 2>&1
+ok "Hardware drain reset complete"
+
 step "Starting pymc-repeater service"
 systemctl start pymc-repeater.service >> "${LOG_FILE}" 2>&1
 sleep 3
@@ -1455,7 +1602,7 @@ if [ "$REBOOT_REQUIRED" = true ]; then
     echo -e "  ${BOLD}${YELLOW}║  REBOOT RECOMMENDED to apply kernel/hardware changes     ║${NC}"
     echo -e "  ${BOLD}${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${YELLOW}Some changes (SPI buffer size, I2C) require a reboot to take effect.${NC}"
+    echo -e "  ${YELLOW}Some changes (SPI buffer size, core_freq_min, I2C) require a reboot to take effect.${NC}"
     echo -e "  ${YELLOW}Run: sudo reboot${NC}"
     echo ""
 fi

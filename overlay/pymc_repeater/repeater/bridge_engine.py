@@ -227,6 +227,13 @@ class BridgeEngine:
     # Non-radio endpoints (handled by external callbacks, not in _radio_map)
     NON_RADIO_ENDPOINTS = {'mqtt', 'repeater', 'channel_e'}
 
+    # RF-transmitting endpoints: endpoints that perform actual over-the-air TX
+    # and should participate in TX ordering / origin-channel-first priority,
+    # alongside WM1303 radio channels. Non-RF endpoints (repeater, mqtt) are
+    # excluded because they do internal processing, not RF TX.
+    # Extend this set as more RF endpoints (e.g. extra SX126x channels) are added.
+    RF_ENDPOINTS = {'channel_e'}
+
     # Internal sources that bypass dedup (non-RF origins that re-inject processed packets)
     # channel_e is excluded because it IS an RF source (SX1261 radio)
     DEDUP_BYPASS_SOURCES = {'mqtt', 'repeater'}
@@ -737,8 +744,13 @@ class BridgeEngine:
                 resolved_oc = self._resolve_channel(origin_channel)
                 self._origin_channel_counts[resolved_oc] = self._origin_channel_counts.get(resolved_oc, 0) + 1
 
-        # Collect radio send tasks to fire concurrently
-        radio_sends: list[tuple] = []  # (tcid, rule_id, tx_delay, target)
+        # Collect RF send tasks (both WM1303 radio channels and RF endpoints
+        # like channel_e). Non-RF endpoints (repeater, mqtt) are still processed
+        # inline below because they do internal processing, not RF TX.
+        # Entry shape: (tcid, rule_id, tx_delay, kind, dispatcher, rule_display)
+        #   kind == 'radio'    -> dispatcher is the radio target (has .send())
+        #   kind == 'endpoint' -> dispatcher is the endpoint handler callable
+        rf_sends: list[tuple] = []
 
         for rule in self.rules:
             if not rule.get('enabled', True):
@@ -763,45 +775,64 @@ class BridgeEngine:
             rule_target_raw = rule.get('target', '')
             rule_target = self._resolve_channel(rule_target_raw)
             tx_delay = float(rule.get('tx_delay_ms', 0)) / 1000.0
+            rule_id = rule.get('name', rule.get('id', '?'))
+            rule_display = self._format_rule_name(rule)
 
-            # Check if target is an external endpoint (mqtt, repeater)
+            # Check if target is an external endpoint (mqtt, repeater, channel_e, ...)
             if rule_target in self._endpoint_handlers:
                 handler = self._endpoint_handlers.get(rule_target)
-                if handler:
-                    logger.info('BridgeEngine: forwarding %d bytes: %s -> %s '
-                               '(rule=%s, type=%s, hash=%s)',
-                               len(data), source_cid, rule_target,
-                               rule.get('name', rule.get('id', '?')), pkt_type_name, pkt_hash)
-                    try:
-                        if tx_delay > 0:
-                            await asyncio.sleep(tx_delay)
-                        # Pass origin_channel to repeater handler so the
-                        # source RX channel is preserved through the repeater
-                        # processing pipeline and can be used for TX priority.
-                        # WM1303 v2.1.6+: emit bridge_forward BEFORE invoking
-                        # the handler, so the trace step timestamp reflects
-                        # when forwarding STARTS (near the top of the trace),
-                        # not when it finishes (which could be after all
-                        # downstream re-injection + TXs and would push the
-                        # step to the bottom of the timeline).
-                        _trace(pkt_hash8, 'bridge_forward', channel=source_cid, pkt_type=pkt_type_name, detail='Forwarded to %s (rule: %s)' % (self._dn(rule_target), self._format_rule_name(rule)))
-                        if rule_target == 'repeater':
-                            result = handler(data, origin_channel=source_cid)
-                        else:
-                            result = handler(data)
-                        if asyncio.iscoroutine(result):
-                            await result
-                        self.forwarded_packets += 1
-                        forwarded = True
-                        self._record_dedup_event('forwarded', source_cid, pkt_hash, len(data), pkt_type_name)
-                        logger.info('BridgeEngine: delivered to %s endpoint', rule_target)
-                    except Exception as e:
-                        logger.error('BridgeEngine: handler error for %s: %s', rule_target, e)
-                else:
+                if not handler:
                     logger.debug('BridgeEngine: no handler registered for %s', rule_target)
+                    continue
+
+                # RF endpoints (e.g. channel_e) perform actual over-the-air TX
+                # and MUST participate in origin-channel-first priority ordering
+                # alongside WM1303 radio channels. Defer their execution to the
+                # unified rf_sends serialization below, so we can reorder them.
+                if rule_target in self.RF_ENDPOINTS:
+                    rf_sends.append((rule_target, rule_id, tx_delay, 'endpoint', handler, rule_display))
+                    _trace(pkt_hash8, 'tx_enqueue', channel=source_cid, pkt_type=pkt_type_name,
+                           detail='Queued TX %s \u2192 %s (rule: %s)' % (
+                               self._dn(source_cid), self._dn(rule_target), rule_display))
+                    logger.info('BridgeEngine: queuing RF endpoint TX %d bytes: %s -> %s '
+                               '(rule=%s, type=%s, hash=%s)',
+                               len(data), source_cid, rule_target, rule_id,
+                               pkt_type_name, pkt_hash)
+                    continue
+
+                # Non-RF endpoint (repeater, mqtt): process inline, no RF TX.
+                logger.info('BridgeEngine: forwarding %d bytes: %s -> %s '
+                           '(rule=%s, type=%s, hash=%s)',
+                           len(data), source_cid, rule_target,
+                           rule_id, pkt_type_name, pkt_hash)
+                try:
+                    if tx_delay > 0:
+                        await asyncio.sleep(tx_delay)
+                    # Pass origin_channel to repeater handler so the
+                    # source RX channel is preserved through the repeater
+                    # processing pipeline and can be used for TX priority.
+                    # WM1303 v2.1.6+: emit bridge_forward BEFORE invoking
+                    # the handler, so the trace step timestamp reflects
+                    # when forwarding STARTS (near the top of the trace),
+                    # not when it finishes (which could be after all
+                    # downstream re-injection + TXs and would push the
+                    # step to the bottom of the timeline).
+                    _trace(pkt_hash8, 'bridge_forward', channel=source_cid, pkt_type=pkt_type_name, detail='Forwarded to %s (rule: %s)' % (self._dn(rule_target), rule_display))
+                    if rule_target == 'repeater':
+                        result = handler(data, origin_channel=source_cid)
+                    else:
+                        result = handler(data)
+                    if asyncio.iscoroutine(result):
+                        await result
+                    self.forwarded_packets += 1
+                    forwarded = True
+                    self._record_dedup_event('forwarded', source_cid, pkt_hash, len(data), pkt_type_name)
+                    logger.info('BridgeEngine: delivered to %s endpoint', rule_target)
+                except Exception as e:
+                    logger.error('BridgeEngine: handler error for %s: %s', rule_target, e)
                 continue
 
-            # Radio target - collect for concurrent sending
+            # Radio target - collect for serialized sending
             target = self._radio_map.get(rule_target)
             if not target:
                 logger.warning('BridgeEngine: no radio found for target %r '
@@ -813,71 +844,78 @@ class BridgeEngine:
                 continue
 
             tcid = getattr(target, 'channel_id', 'unknown')
-            rule_id = rule.get('name', rule.get('id', '?'))
-            rule_display = self._format_rule_name(rule)
-            radio_sends.append((tcid, rule_id, tx_delay, target, rule_display))
+            rf_sends.append((tcid, rule_id, tx_delay, 'radio', target, rule_display))
             _trace(pkt_hash8, 'tx_enqueue', channel=source_cid, pkt_type=pkt_type_name, detail='Queued TX %s \u2192 %s (rule: %s)' % (self._dn(source_cid), self._dn(tcid), rule_display))
             logger.info('BridgeEngine: queuing TX %d bytes: %s -> %s '
                        '(rule=%s, type=%s, hash=%s)',
                        len(data), source_cid, tcid, rule_id,
                        pkt_type_name, pkt_hash)
 
-        # Serialize radio sends because channel_a and channel_e share the same physical
-        # rf_chain 0. Concurrent dispatch can overwrite one scheduled TX with another.
-        if radio_sends:
+        # Serialize RF sends (radios + RF endpoints) because all channels share
+        # the same physical TX chain on the WM1303 + SX1261 board. Concurrent
+        # dispatch could collide or overwrite scheduled TX.
+        if rf_sends:
             # Origin-channel-first priority: when a packet was originally
             # received on a specific channel and is now being repeated to
-            # multiple channels, the origin channel gets TX priority (sent first).
+            # multiple channels (WM1303 radios AND/OR RF endpoints like
+            # channel_e), the origin channel gets TX priority (sent first).
             # Remaining channels keep their existing rule order.
             if origin_channel:
                 resolved_origin = self._resolve_channel(origin_channel)
-                origin_first = [r for r in radio_sends if r[0] == resolved_origin]
-                others = [r for r in radio_sends if r[0] != resolved_origin]
+                origin_first = [r for r in rf_sends if r[0] == resolved_origin]
+                others = [r for r in rf_sends if r[0] != resolved_origin]
                 if origin_first:
-                    was_already_first = (radio_sends[0][0] == resolved_origin)
-                    radio_sends = origin_first + others
+                    was_already_first = (rf_sends[0][0] == resolved_origin)
+                    rf_sends = origin_first + others
                     if not was_already_first:
                         logger.debug('BridgeEngine: origin-channel reordered: '
-                                    'moved %s to front (was at pos %d, %d total sends)',
-                                    resolved_origin,
-                                    next((i for i, r in enumerate(origin_first + others)
-                                          if r[0] == resolved_origin), -1),
-                                    len(radio_sends))
+                                    'moved %s to front (%d total sends)',
+                                    resolved_origin, len(rf_sends))
                     logger.info('BridgeEngine: origin-channel-first priority: '
                                '%s goes first (%d total sends)',
-                               resolved_origin, len(radio_sends))
+                               resolved_origin, len(rf_sends))
 
-            logger.info('BridgeEngine: serializing %d radio sends for %s '
+            logger.info('BridgeEngine: serializing %d RF sends for %s '
                        '(type=%s, hash=%s, order=%s)',
-                       len(radio_sends), source_cid, pkt_type_name, pkt_hash,
-                       [r[0] for r in radio_sends])
+                       len(rf_sends), source_cid, pkt_type_name, pkt_hash,
+                       [r[0] for r in rf_sends])
 
-            for tcid, rule_id, tx_delay, target, rule_display in radio_sends:
+            for tcid, rule_id, tx_delay, kind, dispatcher, rule_display in rf_sends:
                 try:
                     if tx_delay > 0:
                         await asyncio.sleep(tx_delay)
                     logger.info('[HEXDUMP] dir=TX ch=%s sz=%d hdr=%s hex=%s',
                                 tcid, len(data), _mc_hdr(data), _hexdump(data))
-                    tx_result = await target.send(data)
-                    # WM1303 v2.1.6: emit LBT/CAD trace steps chronologically
-                    # (they happen BEFORE tx_send on the air). Shared helper
-                    # is also used by channel_e_bridge so every HAL-TX path
-                    # gets consistent visibility.
-                    emit_lbt_cad_trace_steps(pkt_hash8, tcid, tx_result,
-                                              pkt_type_name=pkt_type_name)
+                    if kind == 'radio':
+                        tx_result = await dispatcher.send(data)
+                        # WM1303 v2.1.6: emit LBT/CAD trace steps chronologically
+                        # (they happen BEFORE tx_send on the air). Shared helper
+                        # is also used by channel_e_bridge so every HAL-TX path
+                        # gets consistent visibility.
+                        emit_lbt_cad_trace_steps(pkt_hash8, tcid, tx_result,
+                                                  pkt_type_name=pkt_type_name)
+                        _trace(pkt_hash8, 'tx_send', channel=tcid, pkt_type=pkt_type_name, detail=self._format_tx_result(tx_result, self._dn(tcid), rule_display))
+                        logger.info('BridgeEngine: TX result on %s (rule=%s): %s',
+                                    tcid, rule_id, tx_result)
+                    else:  # kind == 'endpoint' (RF endpoint, e.g. channel_e)
+                        # The endpoint handler itself emits lbt_check / cad_check
+                        # and tx_send trace steps (see channel_e_bridge._tx_handler).
+                        # We do NOT duplicate those traces here.
+                        result = dispatcher(data)
+                        if asyncio.iscoroutine(result):
+                            await result
+                        logger.info('BridgeEngine: RF endpoint TX dispatched to %s (rule=%s)',
+                                    tcid, rule_id)
                 except Exception as e:
                     _trace(pkt_hash8, 'tx_send', channel=tcid, pkt_type=pkt_type_name, detail='TX FAILED on %s: %s' % (self._dn(tcid), e), status='error')
-                    logger.error('BridgeEngine: TX error to %s (rule=%s): %s',
-                                tcid, rule_id, e)
+                    logger.error('BridgeEngine: TX error to %s (kind=%s, rule=%s): %s',
+                                tcid, kind, rule_id, e)
                     continue
 
                 self.forwarded_packets += 1
                 forwarded = True
                 self._store_tx_echo_hash(data)  # store for echo detection
                 self._record_dedup_event('forwarded', source_cid, pkt_hash, len(data), pkt_type_name)
-                _trace(pkt_hash8, 'tx_send', channel=tcid, pkt_type=pkt_type_name, detail=self._format_tx_result(tx_result, self._dn(tcid), rule_display))
-                logger.info('BridgeEngine: TX result on %s (rule=%s): %s',
-                            tcid, rule_id, tx_result)
 
         if not forwarded:
             logger.debug('BridgeEngine: no rule matched for %s on %s (type=%s, '

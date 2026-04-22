@@ -52,11 +52,15 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #include "base64.h"
 #include "loragw_hal.h"
 #include "loragw_aux.h"
+#include "loragw_sx1302.h"  /* WM1303: for SX1302 register monitoring */
+#include "loragw_sx1250.h"  /* WM1303: for SX1250 status monitoring */
+#include "sx1250_defs.h"    /* WM1303: SX1250 opcode definitions */
 #include "loragw_reg.h"
 #include "loragw_gps.h"
 #include "loragw_sx1261.h"  /* for sx1261_cad_scan() */
 #include "loragw_lbt.h"     /* for lgw_lbt_rssi_check() */
 #include "capture_thread.h" /* for CAPTURE_RAM streaming */
+#include "loragw_sx1302.h"  /* WM1303: for SX1302 register monitoring */
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE MACROS ------------------------------------------------------- */
@@ -2470,6 +2474,22 @@ int main(int argc, char ** argv)
 }
 
 /* -------------------------------------------------------------------------- */
+/* --- WM1303: SX1302 monitoring code REMOVED -------------------------------- */
+/*                                                                            */
+/* The periodic SX1302 register monitoring (sx1302_monitor_dump) and all      */
+/* recovery escalation code (L0 burst / L1 correlator reinit / L2 full        */
+/* restart / L2b semi-dead detection) were removed after empirical            */
+/* investigation (2026-04-22) proved the root cause to be the custom post-TX  */
+/* AGC reload block in loragw_hal.c.  Removing that block eliminated the      */
+/* "snap" events entirely, and 24h+ of stable operation on pi03 without      */
+/* monitoring confirmed no residual issues.                                   */
+/*                                                                            */
+/* If problems reappear in the future, the monitoring code can be restored    */
+/* from git history (commits prior to removal). The Python-side Detection 4   */
+/* in wm1303_backend.py remains as a last-resort safety net.                  */
+/* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
 /* --- THREAD 1: RECEIVING PACKETS AND FORWARDING THEM ---------------------- */
 
 void thread_up(void) {
@@ -4152,6 +4172,8 @@ void thread_jit(void) {
                             pthread_mutex_lock(&mx_meas_dw);
                             meas_nb_tx_ok += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
+                            /* Note: TX timestamp tracking removed — was used for L0 burst detection
+                               (AGC-reload bursts), no longer needed after AGC reload removal. */
                             MSG_DEBUG(DEBUG_PKT_FWD, "lgw_send done on rf_chain %d: count_us=%u\n", i, pkt.count_us);
                             /* WM1303: emit post-TX TX_ACK with CAD/LBT results */
                             extra.tx_result = "sent";
@@ -4196,14 +4218,14 @@ void thread_jit(void) {
                             {
                                 struct timespec new_expiry;
                                 clock_gettime(CLOCK_MONOTONIC, &new_expiry);
-                                uint64_t add_ns = (uint64_t)(est_airtime_ms + 50) * 1000000ULL;
+                                uint64_t add_ns = (uint64_t)(est_airtime_ms + 150) * 1000000ULL;
                                 new_expiry.tv_nsec += add_ns;
                                 new_expiry.tv_sec  += new_expiry.tv_nsec / 1000000000;
                                 new_expiry.tv_nsec  = new_expiry.tv_nsec % 1000000000;
                                 if (difftimespec(new_expiry, custom_lbt_guard_expiry) > 0) {
                                     custom_lbt_guard_expiry = new_expiry;
                                     MSG("INFO: [jit] TX guard extended: %u ms (SF%u, BW=%u, size=%u)\n",
-                                        est_airtime_ms + 50, pkt.datarate, pkt.bandwidth, pkt.size);
+                                        est_airtime_ms + 150, pkt.datarate, pkt.bandwidth, pkt.size);
                                 }
                             }
 

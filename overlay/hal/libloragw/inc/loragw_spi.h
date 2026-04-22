@@ -32,7 +32,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #define LGW_SPI_SUCCESS     0
 #define LGW_SPI_ERROR       -1
 
-#define SPI_SPEED       16000000
+#define SPI_SPEED       4000000
 
 /* -------------------------------------------------------------------------- */
 /* --- PUBLIC FUNCTIONS PROTOTYPES ------------------------------------------ */

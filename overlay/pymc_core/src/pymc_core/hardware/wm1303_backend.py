@@ -642,6 +642,14 @@ class WM1303Backend:
         self._watchdog_thread: threading.Thread | None = None
         self._watchdog_running = False
 
+        # pkt_fwd subprocess respawn tracking (Detection Method 4: process exit)
+        # When C-level L2 watchdog triggers exit_sig, pkt_fwd exits cleanly but
+        # the Python backend must respawn it. Rate-limited to prevent crash loops.
+        self._respawn_times: list[float] = []  # monotonic timestamps of recent respawns
+        self._respawn_max_per_hour = 10        # hard cap to prevent infinite crash loops
+        self._respawn_total = 0                # cumulative count since backend start
+
+
         # Early detection: PUSH_DATA stat monitoring (Detection Method 1)
         self._zero_rx_stat_count = 0   # consecutive stat windows with rxnb=0
         self._last_stat_rxnb = -1      # last rxnb value from PUSH_DATA stats
@@ -2233,21 +2241,68 @@ class WM1303Backend:
             raise
 
     def _watchdog_loop(self) -> None:
-        """Monitor RX activity with 3 detection methods and restart pkt_fwd if stuck.
+        """Monitor RX activity with 4 detection methods and restart pkt_fwd if stuck.
 
         Detection 1 (STAT): PUSH_DATA stats show rxnb=0 for 2+ consecutive windows (~60s)
         Detection 2 (RSSI): Channel E sees strong RF but SX1302 not receiving (60s)
         Detection 3 (TIMEOUT): Original fallback - no RX for full timeout (180s)
+        Detection 4 (PROCESS_EXIT): pkt_fwd subprocess has exited (e.g. C-level L2 watchdog)
         """
         logger.info('WM1303Backend: RX watchdog started (timeout=%ds, '
                     'stat_detect=2 windows, rssi_detect=5 spikes/60s)',
                     self._watchdog_timeout)
+        _cycle_num = 0
         while self._watchdog_running:
+            _cycle_num += 1
+            logger.info('WM1303Backend: WATCHDOG_DIAG pre-sleep cycle=%d', _cycle_num)
             time.sleep(30)  # check every 30 seconds
+            logger.info('WM1303Backend: WATCHDOG_DIAG post-sleep cycle=%d', _cycle_num)
             if not self._watchdog_running:
                 break
 
-            elapsed = time.monotonic() - self._last_rx_timestamp
+            try:
+                elapsed = time.monotonic() - self._last_rx_timestamp
+            except Exception as _e:
+                logger.error('WM1303Backend: WATCHDOG_DIAG elapsed calc failed: %s', _e)
+                continue
+
+            # DIAGNOSTIC: log watchdog cycle state at INFO level
+            try:
+                _proc_state = 'None' if self._proc is None else 'pid=%s,poll=%s' % (self._proc.pid, self._proc.poll())
+            except Exception as _e:
+                _proc_state = 'ERR(%s)' % _e
+            logger.info('WM1303Backend: WATCHDOG_DIAG cycle=%d proc=%s elapsed=%.0fs '
+                        'stat_zero=%d rssi_spikes=%d respawn_total=%d',
+                        _cycle_num, _proc_state, elapsed, self._zero_rx_stat_count,
+                        self._rssi_spike_count, self._respawn_total)
+
+            # Detection 4: pkt_fwd subprocess has exited (C-level L2 watchdog
+            # triggered exit_sig, or pkt_fwd crashed). Must respawn so RX resumes.
+            if self._proc is not None and self._proc.poll() is not None:
+                exit_code = self._proc.returncode
+                now_m = time.monotonic()
+                # Drop respawn timestamps older than 1 hour
+                self._respawn_times = [t for t in self._respawn_times if now_m - t < 3600]
+                if len(self._respawn_times) >= self._respawn_max_per_hour:
+                    logger.error(
+                        'WM1303Backend: WATCHDOG [PROCESS_EXIT] - pkt_fwd exited '
+                        '(code=%s) but respawn rate limit reached (%d/hour); '
+                        'NOT restarting to prevent crash loop — manual intervention needed',
+                        exit_code, self._respawn_max_per_hour
+                    )
+                    time.sleep(60)  # cooldown before re-checking
+                    continue
+                self._respawn_times.append(now_m)
+                self._respawn_total += 1
+                logger.warning(
+                    'WM1303Backend: WATCHDOG [PROCESS_EXIT] - pkt_fwd has exited '
+                    '(code=%s), respawning (count=%d/%d in last hour, total=%d since start)',
+                    exit_code, len(self._respawn_times),
+                    self._respawn_max_per_hour, self._respawn_total
+                )
+                self._do_watchdog_restart('process_exit')
+                continue
+
 
             # Detection 1: PUSH_DATA stats show no RX for 2+ windows (~60s)
             if self._zero_rx_stat_count >= 999:
@@ -2674,6 +2729,20 @@ class WM1303Backend:
             if not payload_b64:
                 return
             payload = base64.b64decode(payload_b64)
+
+            # ── Minimum packet size filter ─────────────────────────────────
+            # Real MeshCore packets are ≥ 5 bytes (header + path_raw + payload).
+            # Tiny CRC_ERROR fragments (2-4 bytes) from noise/interference flood
+            # the bridge and cause feedback loops.  Discard them early.
+            _MIN_MC_PACKET = 5
+            if len(payload) < _MIN_MC_PACKET:
+                logger.debug('WM1303Backend: noise filter: discarding %d-byte packet '
+                             '(min=%d) freq=%.3f rssi=%s snr=%s',
+                             len(payload), _MIN_MC_PACKET, _rx_freq, _rx_rssi, _rx_lsnr)
+                with self._hourly_lock:
+                    self._hourly_noise_discarded = getattr(self, '_hourly_noise_discarded', 0) + 1
+                return
+
 
             # Self-echo detection: check if this RX matches a recent TX
             # Use stable payload hash (excludes path data that changes per hop)

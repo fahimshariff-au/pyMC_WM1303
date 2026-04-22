@@ -1887,14 +1887,14 @@ class WM1303API:
         if _bk and hasattr(_bk, "_tx_hold_until"):
             import time as _time
             try:
-                # Set TX hold for 5 seconds to give HAL spectral scan thread a clear window
-                _hold_until = _time.monotonic() + 5.0
+                # Set TX hold for 2 seconds to give HAL spectral scan thread a clear window (was 5s)
+                _hold_until = _time.monotonic() + 2.0
                 if _hold_until > _bk._tx_hold_until:
                     _bk._tx_hold_until = _hold_until
-                    logger.info("_do_spectrum_scan: TX hold set for 5s to enable spectral scan")
+                    logger.info("_do_spectrum_scan: TX hold set for 2s to enable spectral scan")
 
-                # Wait for HAL to perform scans (pace_s=1, so should get data within 2-3s)
-                _time.sleep(3.0)
+                # Wait for HAL to perform scans (pace_s=1, so should get data within 1-2s)
+                _time.sleep(1.5)
 
                 # Read recent SPECTRAL SCAN lines from journal
                 try:
@@ -3240,7 +3240,7 @@ class WM1303API:
                 "packet_ttl":           adv.get("tx_packet_ttl_seconds", 5),
                 "overflow_policy":      adv.get("tx_overflow_policy", "drop_oldest"),
                 "nf_interval":          adv.get("noise_floor_interval_seconds", 30),
-                "nf_tx_hold":           adv.get("noise_floor_tx_hold_seconds", 4),
+                "nf_tx_hold":           adv.get("noise_floor_tx_hold_seconds", 2),
                 "nf_buffer_size":       adv.get("noise_floor_buffer_size", 20),
                 "force_host_fe_ctrl":   hal.get("force_host_fe_ctrl", False),
                 "lna_lut":              hal.get("lna_lut", "0x03"),

@@ -297,6 +297,21 @@ int sx1302_agc_reload(lgw_radio_type_t radio_type);
 int sx1302_agc_start(uint8_t version, lgw_radio_type_t radio_type, uint8_t ana_gain, uint8_t dec_gain, bool full_duplex, bool lbt_enable);
 
 /**
+@brief Disable the multiSF correlators before AGC reload to prevent receiving with corrupt state.
+@return LGW_REG_SUCCESS on success, LGW_REG_ERROR otherwise
+*/
+int sx1302_correlator_disable(void);
+
+/**
+@brief Reinitialize the multiSF correlators after AGC reload to prevent demodulator stall.
+@param channel_mask bitmask of enabled multiSF channels (1 bit per channel, up to 8)
+@param sf_mask bitmask of enabled spreading factors (SF5..SF12)
+@return LGW_REG_SUCCESS on success, LGW_REG_ERROR otherwise
+*/
+int sx1302_correlator_reinit(uint8_t channel_mask, uint8_t sf_mask);
+
+
+/**
 @brief TODO
 @param TODO
 @return TODO

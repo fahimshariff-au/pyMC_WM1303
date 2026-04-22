@@ -1,7 +1,7 @@
-# Agent Zero project metadata
+# Project metadata
 .a0proj/
 
-# Reference files extracted from pi01 (contains sensitive data)
+# Reference files (contains sensitive data)
 _collect/
 # Development tools (not needed for installation)
 _tools/

@@ -102,7 +102,7 @@ class ChannelTXQueue:
     def __init__(self, channel_id: str, freq_hz: int, bw_khz: float,
                  sf: int, cr: int, preamble: int = 17,
                  tx_power: int = 14, queue_size: int = 15,
-                 ttl_seconds: float = 5.0):
+                 ttl_seconds: float = 30.0):
         self.channel_id = channel_id
         self.freq_hz = freq_hz
         self.bw_khz = bw_khz
@@ -348,7 +348,7 @@ class TXQueueManager:
                     bw_khz: float = 125.0, sf: int = 8,
                     cr: int = 5, preamble: int = 17,
                     tx_power: int = 14,
-                    ttl_seconds: float = 5.0) -> None:
+                    ttl_seconds: float = 30.0) -> None:
         """Add a channel TX queue."""
         if len(self.queues) >= MAX_CHANNELS:
             raise ValueError(f"Maximum {MAX_CHANNELS} TX queues supported")
@@ -607,7 +607,7 @@ class GlobalTXScheduler:
         #   - CAD scan overhead (~50ms when CAD is enabled)
         #   - SX1302 TX scheduling latency (~50ms)
         #   - Safety buffer
-        _rf_guard_margin_ms = 250.0  # margin to cover JIT + CAD + scheduling
+        _rf_guard_margin_ms = 150.0  # margin to cover JIT + CAD + scheduling (was 250)
         _shared_rf_guard_ms = airtime_est_ms + _rf_guard_margin_ms
         logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
                     "(airtime_est=%.1fms + %.0fms margin)",
