@@ -1293,11 +1293,29 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
     _meas_time_start(&tm);
 
 
-    /* NOTE: The custom post-TX AGC reload block (previously here) was removed
-       after empirical investigation proved it was the root cause of SX1302
-       correlator state corruption ("snap" events). The AGC MCU firmware handles
-       TX->RX transitions autonomously without any host-side intervention.
+    /* Periodic AGC reload — every 60s, decoupled from TX events.
+       Prevents potential AGC gain drift over time while avoiding the
+       rapid-burst reload pattern that caused correlator state corruption.
        See investigation report (2026-04-22) for details. */
+    {
+        static struct timeval last_agc_reload = {0, 0};
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        if (last_agc_reload.tv_sec == 0) {
+            /* First call — initialise timer, no reload needed yet */
+            last_agc_reload = now;
+        } else {
+            long elapsed_s = now.tv_sec - last_agc_reload.tv_sec;
+            if (elapsed_s >= 60) {
+                printf("INFO: [agc_periodic] %lds since last reload — refreshing AGC\n", elapsed_s);
+                sx1302_correlator_disable();
+                sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
+                sx1302_correlator_reinit(0x01, 0xFF);
+                last_agc_reload = now;
+                printf("INFO: [agc_periodic] done — next in 60s\n");
+            }
+        }
+    }
 
     /* Get packets from SX1302, if any */
     res = sx1302_fetch(&nb_pkt_fetched);
