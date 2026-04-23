@@ -616,6 +616,39 @@ static bool tx_ack_token_claim(uint8_t rf_chain, const struct lgw_pkt_tx_s *pkt,
     return found;
 }
 
+/* Forward declaration (defined later in file) */
+static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error, int32_t error_value, const tx_ack_extra_t *extra);
+
+/* WM1303: Periodically sweep stale token slots and send TOO_LATE ACKs
+   for packets that were enqueued but never transmitted (e.g. JIT drops).
+   This prevents Python-side ACK timeouts (3+ seconds) by proactively
+   notifying the caller within ~3 seconds of enqueue. */
+static void tx_ack_token_sweep_stale(void) {
+    struct timespec now_ts;
+    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+    pthread_mutex_lock(&mx_tx_ack_tokens);
+    for (int rf = 0; rf < LGW_RF_CHAIN_NB; rf++) {
+        for (int s = 0; s < TX_ACK_TOKEN_SLOTS; s++) {
+            if (!tx_ack_tokens[rf][s].used) continue;
+            double age = difftimespec(now_ts, tx_ack_tokens[rf][s].enq_ts);
+            if (age > 2.0) {
+                uint8_t th = tx_ack_tokens[rf][s].token_h;
+                uint8_t tl = tx_ack_tokens[rf][s].token_l;
+                tx_ack_tokens[rf][s].used = false;
+                /* Release mutex briefly to send ACK (uses UDP socket) */
+                pthread_mutex_unlock(&mx_tx_ack_tokens);
+                MSG("WARNING: [stale-ack] token 0x%02x%02x aged %.1fs — sending TOO_LATE ACK\n", th, tl, age);
+                send_tx_ack(th, tl, JIT_ERROR_TOO_LATE, 0, NULL);
+                /* Re-acquire and restart the inner loop for this rf chain */
+                pthread_mutex_lock(&mx_tx_ack_tokens);
+                s = -1; /* will be incremented to 0 by for loop */
+            }
+        }
+    }
+    pthread_mutex_unlock(&mx_tx_ack_tokens);
+}
+
+
 
 static void sig_handler(int sigio) {
     if (sigio == SIGQUIT) {
@@ -2574,6 +2607,18 @@ void thread_up(void) {
             break;
         }
 
+        /* WM1303: sweep stale TX-ACK tokens every ~1 second */
+        {
+            static struct timespec _last_sweep = {0, 0};
+            struct timespec _now_sweep;
+            clock_gettime(CLOCK_MONOTONIC, &_now_sweep);
+            if (difftimespec(_now_sweep, _last_sweep) >= 1.0) {
+                tx_ack_token_sweep_stale();
+                _last_sweep = _now_sweep;
+            }
+        }
+
+
         /* check if there are status report to send */
         send_report = report_ready; /* copy the variable so it doesn't change mid-function */
         /* no mutex, we're only reading */
@@ -3763,7 +3808,321 @@ void thread_down(void) {
                 }
             }
 
-            /* insert packet to be sent into JIT queue */
+            /* WM1303: For IMMEDIATE mode, bypass JIT and send directly.
+               The JIT converts IMMEDIATE→TIMESTAMPED+80ms which causes
+               drops when the concentrator counter resets during L1/L1.5
+               recovery.  Direct send eliminates this failure mode. */
+            if (jit_result == JIT_ERROR_OK && sent_immediate) {
+                uint8_t tx_status;
+                int wait_loops = 0;
+                const int max_wait = 50; /* 50 * 10ms = 500ms max wait */
+
+                /* Wait for TX_FREE with timeout */
+                pthread_mutex_lock(&mx_concent);
+                do {
+                    lgw_status(txpkt.rf_chain, TX_STATUS, &tx_status);
+                    if (tx_status == TX_FREE) break;
+                    pthread_mutex_unlock(&mx_concent);
+                    wait_ms(10);
+                    pthread_mutex_lock(&mx_concent);
+                    wait_loops++;
+                } while (wait_loops < max_wait);
+
+                if (tx_status != TX_FREE) {
+                    pthread_mutex_unlock(&mx_concent);
+                    jit_result = JIT_ERROR_TOO_LATE;
+                    MSG("WARNING: [imme] TX not free after %dms, dropping packet\n", wait_loops * 10);
+                } else {
+                    /* === WM1303: Pre-TX CAD/LBT check (same as JIT path) ===
+                       CAD is MANDATORY for every TX.  LBT only when enabled
+                       for the target channel in the per-channel config. */
+                    tx_ack_extra_t imme_extra = {0};
+                    imme_extra.cad_reason = "not_run";
+                    imme_extra.tx_result  = "unknown";
+                    bool imme_blocked = false;
+
+                    /* Abort any running spectral scan so SX1261 is available */
+                    if (spectral_scan_params.enable == true) {
+                        int ss_err = lgw_spectral_scan_abort();
+                        if (ss_err != LGW_HAL_SUCCESS) {
+                            MSG("WARNING: [imme] lgw_spectral_scan_abort failed\n");
+                        }
+                    }
+
+                    /* Look up per-channel config for optional LBT */
+                    int imme_ch_idx = custom_lbt_find_channel(txpkt.freq_hz);
+                    bool imme_lbt_enabled = false;
+                    int8_t imme_rssi_thr = -80;
+                    if (imme_ch_idx >= 0) {
+                        imme_lbt_enabled = custom_lbt_channels[imme_ch_idx].lbt_enabled;
+                        imme_rssi_thr    = custom_lbt_channels[imme_ch_idx].rssi_threshold_dbm;
+                    }
+                    imme_extra.lbt_enabled       = imme_lbt_enabled;
+                    imme_extra.lbt_threshold_dbm  = imme_rssi_thr;
+                    imme_extra.lbt_pass           = true; /* optimistic default */
+
+                    /* --- MANDATORY CAD check with retry --- */
+                    {
+                        int cad_bw = custom_lbt_hal_bw_to_cad(txpkt.bandwidth);
+                        if (cad_bw >= 0) {
+                            imme_extra.cad_enabled = true;
+                            const int CAD_MAX_RETRIES = 5;
+                            const int cad_delays_ms[] = {50, 100, 200, 300, 400};
+                            int cad_retry = 0;
+                            bool cad_clear = false;
+                            uint8_t lbt_retries = 0;
+
+                            while (cad_retry <= CAD_MAX_RETRIES) {
+                                /* Inhibit SX1261 LoRa RX before CAD scan */
+                                sx1261_set_tx_inhibit_rx(true);
+
+                                sx1261_cad_result_t cad_result;
+                                int cad_err = sx1261_cad_scan(txpkt.freq_hz, txpkt.datarate,
+                                                              (uint8_t)cad_bw, &cad_result);
+                                if (cad_err != 0) {
+                                    MSG("WARNING: [imme] CAD scan failed (err=%d) — proceeding with TX\n", cad_err);
+                                    cad_clear = true;
+                                    imme_extra.cad_reason   = "scan_error";
+                                    imme_extra.cad_retries  = (uint8_t)cad_retry;
+                                    imme_extra.cad_detected = false;
+                                    break;
+                                }
+
+                                /* LBT RSSI check (only when enabled for this channel) */
+                                if (imme_lbt_enabled && cad_result.rssi_dbm > imme_rssi_thr) {
+                                    MSG("INFO: [imme] LBT BLOCKED (freq=%u, RSSI=%d > thr=%d) — retry %d/%d\n",
+                                        txpkt.freq_hz, cad_result.rssi_dbm, imme_rssi_thr,
+                                        cad_retry + 1, CAD_MAX_RETRIES);
+                                    imme_extra.lbt_rssi_dbm = cad_result.rssi_dbm;
+                                    imme_extra.lbt_pass     = false;
+                                    lbt_retries++;
+                                    /* Restore RX during wait */
+                                    sx1261_set_tx_inhibit_rx(false);
+                                    sx1261_lora_rx_restart_light();
+                                    if (cad_retry < CAD_MAX_RETRIES) {
+                                        pthread_mutex_unlock(&mx_concent);
+                                        wait_ms(cad_delays_ms[cad_retry]);
+                                        pthread_mutex_lock(&mx_concent);
+                                        cad_retry++;
+                                        continue;
+                                    } else {
+                                        MSG("WARNING: [imme] LBT still blocked after %d retries — FORCING TX\n",
+                                            CAD_MAX_RETRIES);
+                                        sx1261_set_tx_inhibit_rx(true);
+                                        cad_clear = true;
+                                        imme_extra.cad_retries  = (uint8_t)cad_retry;
+                                        imme_extra.cad_last_rssi = cad_result.rssi_dbm;
+                                        imme_extra.cad_reason   = "lbt_forced_after_retries";
+                                        imme_extra.cad_detected = cad_result.detected;
+                                        break;
+                                    }
+                                }
+
+                                /* CAD activity check */
+                                if (!cad_result.detected) {
+                                    /* Channel clear */
+                                    if (cad_retry == 0) {
+                                        if (imme_lbt_enabled) {
+                                            MSG("INFO: [imme] CAD+LBT clear (freq=%u, RSSI=%d, thr=%d)\n",
+                                                txpkt.freq_hz, cad_result.rssi_dbm, imme_rssi_thr);
+                                        } else {
+                                            MSG("INFO: [imme] CAD clear (freq=%u, RSSI=%d)\n",
+                                                txpkt.freq_hz, cad_result.rssi_dbm);
+                                        }
+                                    } else {
+                                        MSG("INFO: [imme] CAD clear after %d retries (freq=%u, RSSI=%d)\n",
+                                            cad_retry, txpkt.freq_hz, cad_result.rssi_dbm);
+                                    }
+                                    cad_clear = true;
+                                    imme_extra.cad_detected  = false;
+                                    imme_extra.cad_retries   = (uint8_t)cad_retry;
+                                    imme_extra.cad_last_rssi = cad_result.rssi_dbm;
+                                    imme_extra.cad_reason    = (cad_retry == 0) ? "clear" : "cleared_after_retries";
+                                    if (imme_lbt_enabled) {
+                                        imme_extra.lbt_rssi_dbm = cad_result.rssi_dbm;
+                                        imme_extra.lbt_pass     = true;
+                                    }
+                                    /* Keep inhibit ON — proceeding to lgw_send */
+                                    break;
+                                }
+
+                                /* CAD detected activity — restore RX during wait */
+                                sx1261_set_tx_inhibit_rx(false);
+                                sx1261_lora_rx_restart_light();
+
+                                if (cad_retry < CAD_MAX_RETRIES) {
+                                    MSG("INFO: [imme] CAD DETECTED (freq=%u, SF%u, RSSI=%d) — retry %d/%d, wait %d ms\n",
+                                        txpkt.freq_hz, txpkt.datarate, cad_result.rssi_dbm,
+                                        cad_retry + 1, CAD_MAX_RETRIES, cad_delays_ms[cad_retry]);
+                                    pthread_mutex_unlock(&mx_concent);
+                                    wait_ms(cad_delays_ms[cad_retry]);
+                                    pthread_mutex_lock(&mx_concent);
+                                    cad_retry++;
+                                } else {
+                                    /* Max retries — force TX */
+                                    MSG("WARNING: [imme] CAD still active after %d retries (freq=%u, RSSI=%d) — FORCING TX\n",
+                                        CAD_MAX_RETRIES, txpkt.freq_hz, cad_result.rssi_dbm);
+                                    sx1261_set_tx_inhibit_rx(true);
+                                    cad_clear = true;
+                                    imme_extra.cad_detected  = true;
+                                    imme_extra.cad_retries   = (uint8_t)cad_retry;
+                                    imme_extra.cad_last_rssi = cad_result.rssi_dbm;
+                                    imme_extra.cad_reason    = "forced_after_retries";
+                                    break;
+                                }
+                            }
+                            imme_extra.lbt_retries = lbt_retries;
+
+                            if (!cad_clear) {
+                                imme_blocked = true;
+                            }
+                        } else {
+                            MSG_DEBUG(DEBUG_PKT_FWD, "[imme] Unsupported BW 0x%02x for CAD, skipping\n",
+                                      txpkt.bandwidth);
+                            imme_extra.cad_reason = "unsupported_bw";
+                        }
+                    }
+
+                    /* --- Optional post-CAD RSSI check --- */
+                    if (!imme_blocked && imme_lbt_enabled) {
+                        bool lbt_tx_ok = true;
+                        int16_t lbt_rssi = 0;
+                        int lbt_err = lgw_lbt_rssi_check(txpkt.freq_hz, txpkt.bandwidth,
+                                                         imme_rssi_thr,
+                                                         custom_lbt_rssi_offset,
+                                                         &lbt_rssi, &lbt_tx_ok);
+                        if (lbt_err == 0 && !lbt_tx_ok) {
+                            MSG("INFO: [imme] LBT RSSI BUSY (freq=%u, RSSI=%d, thr=%d) — TX BLOCKED\n",
+                                txpkt.freq_hz, lbt_rssi, imme_rssi_thr);
+                            imme_blocked = true;
+                            imme_extra.lbt_rssi_dbm = lbt_rssi;
+                            imme_extra.lbt_pass     = false;
+                        } else if (lbt_err == 0) {
+                            MSG("INFO: [imme] LBT RSSI clear (freq=%u, RSSI=%d)\n",
+                                txpkt.freq_hz, lbt_rssi);
+                            imme_extra.lbt_rssi_dbm = lbt_rssi;
+                            imme_extra.lbt_pass     = true;
+                        }
+                    }
+
+                    /* --- Self-signal verification --- */
+                    if (imme_blocked) {
+                        uint8_t verify_status = TX_STATUS_UNKNOWN;
+                        lgw_status(txpkt.rf_chain, TX_STATUS, &verify_status);
+                        if (verify_status == TX_EMITTING) {
+                            MSG("INFO: [imme] LBT block overridden — TX_EMITTING (self-signal)\n");
+                            imme_blocked = false;
+                        }
+                    }
+
+                    /* --- Handle blocked TX --- */
+                    if (imme_blocked) {
+                        sx1261_set_tx_inhibit_rx(false);
+                        sx1261_lora_rx_restart_light();
+                        pthread_mutex_unlock(&mx_concent);
+
+                        pthread_mutex_lock(&mx_meas_dw);
+                        meas_nb_tx_fail += 1;
+                        pthread_mutex_unlock(&mx_meas_dw);
+
+                        MSG("INFO: [imme] TX BLOCKED by CAD/LBT (freq=%u) — skipping\n", txpkt.freq_hz);
+                        imme_extra.tx_result = "blocked";
+                        send_tx_ack(buff_down[1], buff_down[2], JIT_ERROR_OK, warning_value, &imme_extra);
+
+                        jit_result = JIT_ERROR_TOO_LATE; /* prevent JIT fallback */
+                        continue;
+                    }
+
+                    /* === Direct send (CAD/LBT clear or forced) === */
+                    /* SX1261 TX inhibit is already ON from CAD loop */
+                    int send_err = lgw_send(&txpkt);
+                    pthread_mutex_unlock(&mx_concent);
+
+                    if (send_err == LGW_HAL_SUCCESS) {
+                        MSG("INFO: [imme] direct TX sent (freq=%u, SF%u, %u bytes)\n",
+                            txpkt.freq_hz, txpkt.datarate, txpkt.size);
+
+                        /* Estimate airtime for guard and RX restart scheduling */
+                        uint32_t imme_airtime_ms = 500; /* default fallback */
+                        if (txpkt.bandwidth == BW_125KHZ) {
+                            switch (txpkt.datarate) {
+                                case DR_LORA_SF7:  imme_airtime_ms = 50 + txpkt.size * 2;   break;
+                                case DR_LORA_SF8:  imme_airtime_ms = 100 + txpkt.size * 3;  break;
+                                case DR_LORA_SF9:  imme_airtime_ms = 200 + txpkt.size * 5;  break;
+                                case DR_LORA_SF10: imme_airtime_ms = 400 + txpkt.size * 9;  break;
+                                case DR_LORA_SF11: imme_airtime_ms = 800 + txpkt.size * 17; break;
+                                case DR_LORA_SF12: imme_airtime_ms = 1600 + txpkt.size * 33; break;
+                                default: imme_airtime_ms = 500; break;
+                            }
+                        } else if (txpkt.bandwidth == BW_250KHZ) {
+                            switch (txpkt.datarate) {
+                                case DR_LORA_SF7:  imme_airtime_ms = 30 + txpkt.size * 1;   break;
+                                case DR_LORA_SF8:  imme_airtime_ms = 50 + txpkt.size * 2;   break;
+                                default: imme_airtime_ms = 250; break;
+                            }
+                        } else if (txpkt.bandwidth == BW_500KHZ) {
+                            imme_airtime_ms = 25 + txpkt.size * 1;
+                        } else {
+                            /* BW_62K5HZ (Channel E) */
+                            switch (txpkt.datarate) {
+                                case DR_LORA_SF7:  imme_airtime_ms = 100 + txpkt.size * 4;  break;
+                                case DR_LORA_SF8:  imme_airtime_ms = 200 + txpkt.size * 7;  break;
+                                case DR_LORA_SF9:  imme_airtime_ms = 400 + txpkt.size * 13; break;
+                                default: imme_airtime_ms = 1000; break;
+                            }
+                        }
+
+                        /* Record TX guard expiry (airtime + 150ms margin) */
+                        {
+                            struct timespec new_expiry;
+                            clock_gettime(CLOCK_MONOTONIC, &new_expiry);
+                            uint64_t add_ns = (uint64_t)(imme_airtime_ms + 150) * 1000000ULL;
+                            new_expiry.tv_nsec += add_ns;
+                            new_expiry.tv_sec  += new_expiry.tv_nsec / 1000000000;
+                            new_expiry.tv_nsec  = new_expiry.tv_nsec % 1000000000;
+                            if (difftimespec(new_expiry, custom_lbt_guard_expiry) > 0) {
+                                custom_lbt_guard_expiry = new_expiry;
+                            }
+                        }
+
+                        /* Schedule non-blocking LoRa RX restart after TX airtime */
+                        {
+                            struct timespec rx_ts;
+                            clock_gettime(CLOCK_MONOTONIC, &rx_ts);
+                            uint64_t rx_add_ns = (uint64_t)(imme_airtime_ms + 20) * 1000000ULL;
+                            rx_ts.tv_nsec += rx_add_ns;
+                            rx_ts.tv_sec  += rx_ts.tv_nsec / 1000000000;
+                            rx_ts.tv_nsec  = rx_ts.tv_nsec % 1000000000;
+                            if (!custom_lbt_rx_restart_pending ||
+                                difftimespec(rx_ts, custom_lbt_rx_restart_after) > 0) {
+                                custom_lbt_rx_restart_after = rx_ts;
+                            }
+                            custom_lbt_rx_restart_pending = true;
+                            MSG("INFO: [imme] SX1261 RX restart scheduled in %u ms\n",
+                                imme_airtime_ms + 20);
+                        }
+
+                        /* Emit post-TX ACK with CAD/LBT results */
+                        imme_extra.tx_result = "sent";
+                        send_tx_ack(buff_down[1], buff_down[2], JIT_ERROR_OK, warning_value, &imme_extra);
+
+                        pthread_mutex_lock(&mx_meas_dw);
+                        meas_nb_tx_requested += 1;
+                        meas_nb_tx_ok += 1;
+                        pthread_mutex_unlock(&mx_meas_dw);
+
+                        /* Skip the normal JIT enqueue + ACK path */
+                        continue;
+                    } else {
+                        /* TX failed — release SX1261 inhibit immediately */
+                        sx1261_set_tx_inhibit_rx(false);
+                        jit_result = JIT_ERROR_TOO_LATE;
+                        MSG("ERROR: [imme] lgw_send() failed (err=%d)\n", send_err);
+                    }
+                }
+            }
+
+            /* Fallback: use JIT queue for timestamped packets or if direct send failed */
             if (jit_result == JIT_ERROR_OK) {
                 pthread_mutex_lock(&mx_concent);
                 lgw_get_instcnt(&current_concentrator_time);
@@ -3953,7 +4312,7 @@ void thread_jit(void) {
                                     const int CAD_MAX_RETRIES = 5;
                                     const int cad_delays_ms[] = {50, 100, 200, 300, 400};
                                     int cad_retry = 0;
-                                    int cad_wait_ms = 0;
+                                    int cad_wait_ms __attribute__((unused)) = 0;
                                     bool cad_clear = false;
                                     uint8_t lbt_retries_in_cad = 0;
 

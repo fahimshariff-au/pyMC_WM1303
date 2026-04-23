@@ -96,6 +96,9 @@ static bool sx1261_lora_rx_boosted = true; /* default: boosted LNA for max sensi
    which would prevent the SX1302 PA from activating for TX.
    Channel E RX resumes immediately after lgw_send completes. */
 static volatile bool sx1261_tx_inhibit_rx = false;
+/* WM1303: deferred RX restart flag — set when spectral scan abort finds
+   tx_inhibit active. Checked and cleared when tx_inhibit is released. */
+static volatile bool sx1261_deferred_rx_restart = false;
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS ---------------------------------------------------- */
@@ -885,7 +888,8 @@ int sx1261_spectral_scan_abort(void) {
         printf("SX1261: Restarting LoRa RX after spectral scan abort\n");
         sx1261_lora_rx_restart_light();
     } else if (sx1261_lora_rx_enabled && sx1261_tx_inhibit_rx) {
-        printf("SX1261: LoRa RX restart skipped after scan abort (TX inhibit active)\n");
+        /* TX inhibit active — defer RX restart until inhibit clears */
+        sx1261_deferred_rx_restart = true;
     }
 
     return LGW_REG_SUCCESS;
@@ -1930,6 +1934,15 @@ int sx1261_get_rssi_inst(int16_t *rssi_dbm) {
  */
 void sx1261_set_tx_inhibit_rx(bool inhibit) {
     sx1261_tx_inhibit_rx = inhibit;
+    /* WM1303: when TX inhibit is released and a deferred RX restart is
+       pending, restart LoRa RX immediately to minimize RX downtime. */
+    if (!inhibit && sx1261_deferred_rx_restart && sx1261_lora_rx_enabled) {
+        sx1261_deferred_rx_restart = false;
+        printf("SX1261: Deferred LoRa RX restart after TX inhibit cleared\n");
+        sx1261_lora_rx_restart_light();
+    } else if (!inhibit) {
+        sx1261_deferred_rx_restart = false;
+    }
 }
 
 /**

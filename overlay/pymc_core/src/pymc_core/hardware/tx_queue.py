@@ -584,11 +584,33 @@ class GlobalTXScheduler:
                 except Exception as _cb_err:
                     logger.debug("GlobalTXScheduler: post_tx_callback error: %s", _cb_err)
         else:
-            queue.stats["total_failed"] += 1
+            # Check if this was a JIT drop (not a real failure) — eligible for retry
+            _tx_result = result.get('tx_result', '') if isinstance(result, dict) else ''
+            _retry_count = request.get('_retry_count', 0)
+            _max_retries = 2  # max 2 retries (3 total attempts)
+            if _tx_result == 'dropped' and _retry_count < _max_retries:
+                # Re-enqueue the packet for retry
+                request['_retry_count'] = _retry_count + 1
+                request['enqueue_time'] = time.time()  # refresh enqueue time
+                try:
+                    queue.queue.put_nowait(request)
+                    queue.stats['pending'] = queue.queue.qsize()
+                    queue.stats.setdefault('total_retried', 0)
+                    queue.stats['total_retried'] += 1
+                    logger.warning("GlobalTXScheduler: TX DROPPED on %s, "
+                                  "re-enqueued for retry %d/%d "
+                                  "(queue_wait=%.1fms)",
+                                  channel_id, _retry_count + 1, _max_retries,
+                                  queue_wait_ms)
+                    return  # Don't resolve future yet — will be sent on retry
+                except asyncio.QueueFull:
+                    logger.warning("GlobalTXScheduler: TX DROPPED on %s, "
+                                  "retry failed (queue full)", channel_id)
+            queue.stats['total_failed'] += 1
             logger.warning("GlobalTXScheduler: TX FAIL on %s: %s "
-                          "(send=%.1fms, queue_wait=%.1fms)",
-                          channel_id, result.get("error", "unknown"),
-                          send_ms, queue_wait_ms)
+                          "(send=%.1fms, queue_wait=%.1fms, retries=%d)",
+                          channel_id, result.get('error', _tx_result or 'unknown'),
+                          send_ms, queue_wait_ms, _retry_count)
 
         # Resolve the caller's future
         future = request.get("future")

@@ -2633,6 +2633,23 @@ class WM1303Backend:
                                     ack_info['lbt_retries'])
                     elif err != 'NONE':
                         logger.warning('WM1303Backend: TX_ACK error: %s (full: %s)', err, ack)
+                        # WM1303: For TOO_LATE/COLLISION errors, resolve the pending
+                        # future immediately so the caller doesn't wait for a full
+                        # timeout. The packet was dropped by JIT, not transmitted.
+                        if err in ('TOO_LATE', 'COLLISION_PACKET', 'COLLISION_BEACON'):
+                            ack_info = {
+                                'ok': False,
+                                'error': err,
+                                'tx_result': 'dropped',
+                                'phase': 'post_tx',
+                                'cad': {}, 'lbt': {},
+                                'cad_enabled': False, 'cad_detected': False,
+                                'cad_retries': 0, 'cad_rssi_dbm': None,
+                                'cad_reason': '', 'lbt_enabled': False,
+                                'lbt_pass': True, 'lbt_rssi_dbm': None,
+                                'lbt_threshold_dbm': None, 'lbt_retries': 0,
+                            }
+                            is_post_tx = True  # ensure future is resolved below
                     else:
                         logger.info('WM1303Backend: TX_ACK OK (json)')
                 except (UnicodeDecodeError, json.JSONDecodeError):
@@ -3260,15 +3277,8 @@ class WM1303Backend:
             try:
                 _post_ack = await asyncio.wait_for(_ack_future, timeout=_ack_timeout_s)
                 if isinstance(_post_ack, dict):
-                    # ── ACK received: TX has started on RF ──
-                    # Set _last_tx_end precisely: now + airtime.
-                    # This overwrites the conservative estimate (now + airtime + 2s)
-                    # set before the ACK wait.
-                    self._last_tx_end = time.monotonic() + _airtime_s
                     _result['ack_received'] = True
                     self._consecutive_ack_timeouts = 0  # Layer 2: reset on successful ACK
-                    logger.info('WM1303Backend: post-TX ACK received — precise guard: '
-                                '_last_tx_end = now + %.1fms airtime', _airtime_ms_val)
                     # Merge cad/lbt fields into result
                     for _k in ('tx_result', 'phase', 'cad', 'lbt',
                                'cad_enabled', 'cad_detected', 'cad_retries',
@@ -3277,8 +3287,29 @@ class WM1303Backend:
                                'lbt_threshold_dbm', 'lbt_retries'):
                         if _k in _post_ack:
                             _result[_k] = _post_ack[_k]
-                    if _post_ack.get('tx_result') and _post_ack['tx_result'] != 'sent':
+                    if _post_ack.get('tx_result') == 'dropped':
+                        # Packet was dropped by JIT (TOO_LATE/COLLISION),
+                        # never transmitted. Reset _last_tx_end to now —
+                        # no RF airtime to wait for.
+                        self._last_tx_end = time.monotonic()
+                        logger.warning('WM1303Backend: post-TX ACK: packet DROPPED '
+                                       '(token=0x%04x, error=%s) — _last_tx_end reset to now',
+                                       token, _post_ack.get('error', 'unknown'))
+                        _result['ok'] = False
+                        _result['tx_result'] = 'dropped'
                         _result['tx_blocked'] = True
+                    elif _post_ack.get('tx_result') and _post_ack['tx_result'] != 'sent':
+                        # Other non-sent results
+                        self._last_tx_end = time.monotonic() + _airtime_s
+                        logger.info('WM1303Backend: post-TX ACK received — precise guard: '
+                                    '_last_tx_end = now + %.1fms airtime', _airtime_ms_val)
+                        _result['tx_blocked'] = True
+                    else:
+                        # ── ACK received: TX has started on RF ──
+                        # Set _last_tx_end precisely: now + airtime.
+                        self._last_tx_end = time.monotonic() + _airtime_s
+                        logger.info('WM1303Backend: post-TX ACK received — precise guard: '
+                                    '_last_tx_end = now + %.1fms airtime', _airtime_ms_val)
             except asyncio.TimeoutError:
                 # Graceful degradation: conservative _last_tx_end stays
                 # (set earlier to now + airtime + 2s). No precise guard.
