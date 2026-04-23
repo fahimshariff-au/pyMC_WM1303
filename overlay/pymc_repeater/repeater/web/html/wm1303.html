@@ -2200,6 +2200,67 @@ showTab = function(name, btn) {
   </div>
 
 
+  <!-- ═══ Packet Metrics (per-channel timeseries) ═══ -->
+  <div style="display:flex;align-items:center;gap:12px;margin:20px 0 12px">
+    <h3 style="margin:0;font-size:14px;font-weight:600;color:var(--tx)">📦 Packet Metrics per Channel</h3>
+    <div style="display:flex;gap:4px">
+      <button class="btn pri sm" onclick="setPmHours(1)" id="pmbtn-1">1h</button>
+      <button class="btn sec sm" onclick="setPmHours(6)" id="pmbtn-6">6h</button>
+      <button class="btn sec sm" onclick="setPmHours(24)" id="pmbtn-24">24h</button>
+      <button class="btn sec sm" onclick="setPmHours(72)" id="pmbtn-72">3d</button>
+      <button class="btn sec sm" onclick="setPmHours(168)" id="pmbtn-168">1w</button>
+    </div>
+    <span style="font-size:11px;color:var(--txm)" id="pmStatus">—</span>
+  </div>
+
+  <!-- Chart 6: RX bytes per channel over time -->
+  <div class="gl" style="padding:18px;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;font-weight:600;color:#3b82f6">📥 RX Bytes per Channel</span>
+      <span style="font-size:11px;color:var(--txm)" id="pmRxBytesCount">0 buckets</span>
+    </div>
+    <div style="height:250px;position:relative"><canvas id="pmRxBytesChart"></canvas></div>
+  </div>
+
+  <!-- Chart 7: TX bytes per channel over time -->
+  <div class="gl" style="padding:18px;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;font-weight:600;color:#10b981">📤 TX Bytes per Channel</span>
+      <span style="font-size:11px;color:var(--txm)" id="pmTxBytesCount">0 buckets</span>
+    </div>
+    <div style="height:250px;position:relative"><canvas id="pmTxBytesChart"></canvas></div>
+  </div>
+
+  <!-- Chart 8: TX airtime + wait time per channel over time -->
+  <div class="gl" style="padding:18px;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;font-weight:600;color:#f59e0b">⏱️ TX Airtime &amp; Wait Time per Channel</span>
+      <span style="font-size:11px;color:var(--txm)" id="pmTxTimingCount">0 buckets</span>
+    </div>
+    <div style="height:280px;position:relative"><canvas id="pmTxTimingChart"></canvas></div>
+    <div style="font-size:10px;color:var(--txm);opacity:0.7;margin-top:6px">Solid line = airtime (ms) &middot; Dashed line = wait time (ms, queue + CAD + guard)</div>
+  </div>
+
+  <!-- Chart 9: RX hops per channel over time -->
+  <div class="gl" style="padding:18px;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;font-weight:600;color:#a78bfa">🔁 RX Hops per Channel</span>
+      <span style="font-size:11px;color:var(--txm)" id="pmHopsCount">0 buckets</span>
+    </div>
+    <div style="height:250px;position:relative"><canvas id="pmHopsChart"></canvas></div>
+    <div style="font-size:10px;color:var(--txm);opacity:0.7;margin-top:6px">Average hop count of received packets per minute (0 = direct from origin)</div>
+  </div>
+
+  <!-- Chart 10: RX CRC error ratio per channel over time -->
+  <div class="gl" style="padding:18px;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;font-weight:600;color:#ef4444">⚠️ RX CRC Error Ratio per Channel</span>
+      <span style="font-size:11px;color:var(--txm)" id="pmCrcCount">0 buckets</span>
+    </div>
+    <div style="height:250px;position:relative"><canvas id="pmCrcChart"></canvas></div>
+    <div style="font-size:10px;color:var(--txm);opacity:0.85;margin-top:6px;line-height:1.5"><b>How to read:</b> shows the fraction of received packets that failed CRC check, per minute. <b>0.0</b> = all packets valid (healthy RF). <b>1.0</b> = all packets corrupted (heavy interference or weak signal). Values consistently above ~0.3 indicate RF problems: interference, wrong SF/frequency settings, or signals below sensitivity threshold. <i>Note:</i> channel_e (SX1261) runs spectrum-scan mode and naturally produces many CRC errors from sub-threshold signals — this is expected, not a fault.</div>
+  </div>
+
   <!-- LBT channel info -->
   <div id="specLbtList" style="margin-top:12px"></div>
 </div>
@@ -2932,6 +2993,7 @@ if (typeof TABS !== 'undefined' && TABS.spectrum) {
   TABS.spectrum = function() {
     try { _prev(); } catch(e) { console.error('prev specLoad err:', e); }
     loadSignalData();
+    try { loadPacketMetrics(); } catch(e) { console.error('loadPacketMetrics err:', e); }
     startSigRefresh();
   };
 } else if (typeof TABS !== 'undefined') {
@@ -3286,6 +3348,202 @@ function hexToRgba(hex, alpha) {
   var g = parseInt(hex.slice(3,5), 16);
   var b = parseInt(hex.slice(5,7), 16);
   return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Packet Metrics charts (RX bytes, TX bytes, TX timing, RX hops)
+// ═══════════════════════════════════════════════════════════════════
+var pmHours = 1;
+var pmRxBytesChart = null, pmTxBytesChart = null, pmTxTimingChart = null, pmHopsChart = null, pmCrcChart = null;
+
+function setPmHours(h) {
+  pmHours = h;
+  document.querySelectorAll('[id^="pmbtn-"]').forEach(function(b) { b.className = 'btn sec sm'; });
+  var ab = document.getElementById('pmbtn-' + h);
+  if (ab) ab.className = 'btn pri sm';
+  loadPacketMetrics();
+}
+
+async function loadPacketMetrics() {
+  if (typeof Chart === 'undefined') { console.warn('Chart.js not loaded'); return; }
+  var statusEl = document.getElementById('pmStatus');
+  if (statusEl) statusEl.textContent = 'loading\u2026';
+  try {
+    var d = await api('GET', '/api/wm1303/packet_metrics?hours=' + pmHours);
+    var channels = (d && d.channels) || [];
+    var totalBuckets = 0;
+    channels.forEach(function(c) { totalBuckets += (c.data || []).length; });
+    if (statusEl) statusEl.textContent = channels.length + ' channels, ' + totalBuckets + ' total buckets';
+    renderPmRxBytesChart(channels);
+    renderPmTxBytesChart(channels);
+    renderPmTxTimingChart(channels);
+    renderPmHopsChart(channels);
+    renderPmCrcChart(channels);
+  } catch(e) {
+    console.error('loadPacketMetrics error:', e);
+    if (statusEl) statusEl.textContent = 'error loading data';
+    renderPmRxBytesChart([]);
+    renderPmTxBytesChart([]);
+    renderPmTxTimingChart([]);
+    renderPmHopsChart([]);
+    renderPmCrcChart([]);
+  }
+}
+
+function _pmBuildDatasets(channels, field, dashed) {
+  var datasets = [];
+  var totalPts = 0;
+  channels.forEach(function(ch, i) {
+    var color = ch.color || getChColor(i);
+    var pts = (ch.data || []).map(function(pt) {
+      var v = pt[field];
+      return { x: new Date(pt.t * 1000), y: (v !== null && v !== undefined) ? v : null };
+    }).filter(function(p) { return p.y !== null; });
+    if (pts.length === 0) return;
+    totalPts += pts.length;
+    var ds = {
+      label: ch.label || ch.id,
+      data: pts,
+      borderColor: color,
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius: 0,
+      spanGaps: true,
+      tension: 0.3
+    };
+    if (dashed) ds.borderDash = [6, 3];
+    datasets.push(ds);
+  });
+  return { datasets: datasets, totalPts: totalPts };
+}
+
+function _pmTimeUnit() {
+  return pmHours <= 1 ? 'minute' : (pmHours >= 72 ? 'day' : 'hour');
+}
+
+function _pmBaseOpts(yLabel) {
+  return {
+    responsive: true, maintainAspectRatio: false,
+    scales: {
+      x: { type: 'time', time: { unit: _pmTimeUnit() }, grid: { color: 'rgba(128,128,128,0.1)' }, ticks: { color: '#999', maxTicksLimit: 12 } },
+      y: { title: { display: true, text: yLabel, color: '#999' }, grid: { color: 'rgba(128,128,128,0.1)' }, ticks: { color: '#999' }, beginAtZero: true }
+    },
+    plugins: { legend: { labels: { color: '#999', usePointStyle: true } } }
+  };
+}
+
+function renderPmRxBytesChart(channels) {
+  var canvas = document.getElementById('pmRxBytesChart');
+  if (!canvas) return;
+  if (pmRxBytesChart) pmRxBytesChart.destroy();
+  var built = _pmBuildDatasets(channels, 'rx_bytes', false);
+  var el = document.getElementById('pmRxBytesCount');
+  if (el) el.textContent = built.totalPts + ' buckets';
+  pmRxBytesChart = new Chart(canvas, { type: 'line', data: { datasets: built.datasets }, options: _pmBaseOpts('RX bytes / minute') });
+}
+
+function renderPmTxBytesChart(channels) {
+  var canvas = document.getElementById('pmTxBytesChart');
+  if (!canvas) return;
+  if (pmTxBytesChart) pmTxBytesChart.destroy();
+  var built = _pmBuildDatasets(channels, 'tx_bytes', false);
+  var el = document.getElementById('pmTxBytesCount');
+  if (el) el.textContent = built.totalPts + ' buckets';
+  pmTxBytesChart = new Chart(canvas, { type: 'line', data: { datasets: built.datasets }, options: _pmBaseOpts('TX bytes / minute') });
+}
+
+function renderPmTxTimingChart(channels) {
+  var canvas = document.getElementById('pmTxTimingChart');
+  if (!canvas) return;
+  if (pmTxTimingChart) pmTxTimingChart.destroy();
+  // Solid lines = airtime, dashed lines = wait time, one pair per channel
+  var datasets = [];
+  var totalPts = 0;
+  channels.forEach(function(ch, i) {
+    var color = ch.color || getChColor(i);
+    var airPts = (ch.data || []).map(function(pt) {
+      return { x: new Date(pt.t * 1000), y: (pt.tx_airtime_ms && pt.tx_airtime_ms > 0) ? pt.tx_airtime_ms : null };
+    }).filter(function(p) { return p.y !== null; });
+    var waitPts = (ch.data || []).map(function(pt) {
+      return { x: new Date(pt.t * 1000), y: (pt.tx_wait_ms && pt.tx_wait_ms > 0) ? pt.tx_wait_ms : null };
+    }).filter(function(p) { return p.y !== null; });
+    totalPts += airPts.length + waitPts.length;
+    if (airPts.length) {
+      datasets.push({
+        label: (ch.label || ch.id) + ' airtime',
+        data: airPts, borderColor: color, backgroundColor: 'transparent',
+        borderWidth: 2, pointRadius: 0, spanGaps: true, tension: 0.3
+      });
+    }
+    if (waitPts.length) {
+      datasets.push({
+        label: (ch.label || ch.id) + ' wait',
+        data: waitPts, borderColor: color, backgroundColor: 'transparent',
+        borderWidth: 2, borderDash: [6, 3], pointRadius: 0, spanGaps: true, tension: 0.3
+      });
+    }
+  });
+  var el = document.getElementById('pmTxTimingCount');
+  if (el) el.textContent = totalPts + ' buckets';
+  pmTxTimingChart = new Chart(canvas, { type: 'line', data: { datasets: datasets }, options: _pmBaseOpts('Milliseconds (avg / minute)') });
+}
+
+function renderPmHopsChart(channels) {
+  var canvas = document.getElementById('pmHopsChart');
+  if (!canvas) return;
+  if (pmHopsChart) pmHopsChart.destroy();
+  var built = _pmBuildDatasets(channels, 'rx_hops', false);
+  // Enhance visibility: thicker lines + visible point markers so sparse data (e.g. channel_a
+  // with only a few valid hop samples) stands out clearly instead of disappearing against the axis.
+  built.datasets.forEach(function(ds) {
+    ds.borderWidth = 3;
+    ds.pointRadius = 4;
+    ds.pointHoverRadius = 6;
+    ds.pointBackgroundColor = ds.borderColor;
+  });
+  var el = document.getElementById('pmHopsCount');
+  if (el) el.textContent = built.totalPts + ' buckets';
+  var opts = _pmBaseOpts('Average hop count');
+  // Force Y-axis to start at 0 so low values (like 1 hop) are clearly separated from the X-axis baseline.
+  opts.scales.y.min = 0;
+  opts.scales.y.beginAtZero = true;
+  pmHopsChart = new Chart(canvas, { type: 'line', data: { datasets: built.datasets }, options: opts });
+}
+
+
+function renderPmCrcChart(channels) {
+  var canvas = document.getElementById('pmCrcChart');
+  if (!canvas) return;
+  if (pmCrcChart) pmCrcChart.destroy();
+  // Only include buckets where RX packets existed (to avoid meaningless 0s)
+  var datasets = [];
+  var totalPts = 0;
+  channels.forEach(function(ch, i) {
+    var color = ch.color || getChColor(i);
+    var pts = (ch.data || []).map(function(pt) {
+      var total = (pt.rx_crc_ok || 0) + (pt.rx_crc_err || 0);
+      if (total === 0) return { x: new Date(pt.t * 1000), y: null };
+      return { x: new Date(pt.t * 1000), y: pt.rx_crc_err_ratio || 0 };
+    }).filter(function(p) { return p.y !== null; });
+    if (pts.length === 0) return;
+    totalPts += pts.length;
+    datasets.push({
+      label: ch.label || ch.id,
+      data: pts,
+      borderColor: color,
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius: 0,
+      spanGaps: true,
+      tension: 0.3
+    });
+  });
+  var el = document.getElementById('pmCrcCount');
+  if (el) el.textContent = totalPts + ' buckets';
+  var opts = _pmBaseOpts('CRC error ratio (0–1)');
+  opts.scales.y.min = 0;
+  opts.scales.y.max = 1;
+  pmCrcChart = new Chart(canvas, { type: 'line', data: { datasets: datasets }, options: opts });
 }
 </script>
 
@@ -3823,7 +4081,7 @@ function hexToRgba(hex, alpha) {
           <option value="200">200</option>
         </select>
         <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer select-none">
-          <input type="checkbox" id="traceAutoRefresh" checked onchange="traceToggleAuto()" class="accent-indigo-500">
+          <input type="checkbox" id="traceAutoRefresh" onchange="traceToggleAuto()" class="accent-indigo-500">
           Auto
         </label>
         <select id="traceAutoInterval" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" onchange="traceToggleAuto()">
@@ -3902,6 +4160,17 @@ function hexToRgba(hex, alpha) {
     if (!iso) return '';
     try { var d = new Date(iso); return d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch(e) { return iso; }
   }
+  function _fmtTimeMs(iso) {
+    if (!iso) return '';
+    try {
+      var d = new Date(iso);
+      var hh = String(d.getHours()).padStart(2,'0');
+      var mm = String(d.getMinutes()).padStart(2,'0');
+      var ss = String(d.getSeconds()).padStart(2,'0');
+      var ms = String(d.getMilliseconds()).padStart(3,'0');
+      return hh + ':' + mm + ':' + ss + '.' + ms;
+    } catch(e) { return iso; }
+  }
   function _stepStatusColor(s) {
     if (s === 'ok') return '#34d399';
     if (s === 'warning') return '#fbbf24';
@@ -3931,7 +4200,7 @@ function hexToRgba(hex, alpha) {
   }
   function _stepDirection(name) {
     if (!name) return 'other';
-    if (name === 'received' || name === 'echo_dedup' || name === 'dedup_drop' || name === 'dedup_skip' || name === 'filter_drop' || name === 'bridge_inject') return 'rx';
+    if (name === 'received' || name === 'echo_dedup' || name === 'dedup_drop' || name === 'dedup_skip' || name === 'dedup_check' || name === 'filter_drop' || name === 'bridge_inject') return 'rx';
     if (name === 'bridge_forward' || name === 'tx_enqueue' || name === 'tx_send' || name === 'lbt_check' || name === 'cad_check') return 'tx';
     return 'other';
   }
@@ -4186,6 +4455,7 @@ function hexToRgba(hex, alpha) {
           if (!isLast) { html += '<div style="position:absolute;left:-12px;top:16px;bottom:0;width:2px;background:rgba(255,255,255,0.1)"></div>'; }
           html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:' + rowBg + ';border-left:3px solid ' + dclr + ';padding:4px 8px;border-radius:3px">';
           html += '<span style="font-size:9px;font-weight:800;background:' + dclr + ';color:#0a0a0a;padding:1px 5px;border-radius:3px;letter-spacing:0.5px;min-width:24px;text-align:center;flex-shrink:0">' + dlbl + '</span>';
+          html += '<span style="font-family:monospace;font-size:10px;color:var(--txm);opacity:0.6;min-width:85px;flex-shrink:0" title="Event timestamp">' + _fmtTimeMs(s.time) + '</span>';
           html += '<span style="font-weight:700;color:' + sclr + ';font-size:12px;min-width:110px">' + (s.name || '') + '</span>';
           if (txTargetPill && !pillAtEnd) {
             html += txTargetPill;

@@ -30,6 +30,7 @@ METRICS_TABLES: List[Tuple[str, str, str]] = [
     ("repeater.db",         "packet_activity",         "timestamp"),
     ("repeater.db",         "origin_channel_stats",    "timestamp"),
     ("repeater.db",         "channel_stats_history",   "timestamp"),
+    ("repeater.db",         "packet_metrics",          "timestamp"),
     ("spectrum_history.db", "spectrum_scans",          "timestamp"),
 ]
 

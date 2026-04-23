@@ -2567,6 +2567,13 @@ void thread_up(void) {
             exit(EXIT_FAILURE);
         }
 
+        /* L1→L2 escalation: HAL signals that correlator recovery is exhausted */
+        if (lgw_l2_restart_requested) {
+            MSG("CRITICAL: [L2 escalation] HAL requested process restart — exiting for full hardware reset\n");
+            quit_sig = true;
+            break;
+        }
+
         /* check if there are status report to send */
         send_report = report_ready; /* copy the variable so it doesn't change mid-function */
         /* no mutex, we're only reading */

@@ -408,6 +408,10 @@ typedef enum lgw_spectral_scan_status_e {
     LGW_SPECTRAL_SCAN_STATUS_UNKNOWN
 } lgw_spectral_scan_status_t;
 
+/* L1→L2 escalation: set true by lgw_receive() when L1 recovery is exhausted.
+   Poll from pkt_fwd main loop and set quit_sig when true. */
+extern volatile bool lgw_l2_restart_requested;
+
 /* -------------------------------------------------------------------------- */
 /* --- PUBLIC FUNCTIONS PROTOTYPES ------------------------------------------ */
 

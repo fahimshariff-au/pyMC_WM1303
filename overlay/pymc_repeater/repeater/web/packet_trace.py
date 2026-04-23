@@ -25,7 +25,7 @@ _collector: TraceCollector | None = None
 MAX_TRACES = 200
 MAX_STEPS_PER_TRACE = 30
 TRACE_TTL = 300       # seconds before a trace is considered stale for grouping
-GAP_THRESHOLD = 30.0  # seconds — start new trace if gap since last event exceeds this
+GAP_THRESHOLD = 450.0  # seconds — start new trace if gap since last event exceeds this
 
 
 class TraceCollector:

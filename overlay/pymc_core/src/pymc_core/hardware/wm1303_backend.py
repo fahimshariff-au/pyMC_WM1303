@@ -375,10 +375,10 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
         logger.warning('_generate_bridge_conf: channel_e read error: %s', _cex)
 
     # WM1303: AGC reload interval from UI advanced config (0 = disabled)
-    _agc_reload_interval_s = 300  # default 300s
+    _agc_reload_interval_s = 30  # default 30s (aggressive to prevent SX1302 correlator stall)
     try:
         _ui_agc = json.loads(Path('/etc/pymc_repeater/wm1303_ui.json').read_text())
-        _agc_reload_interval_s = _ui_agc.get('hal_advanced', {}).get('agc_reload_interval_s', 300)
+        _agc_reload_interval_s = _ui_agc.get('hal_advanced', {}).get('agc_reload_interval_s', 30)
     except Exception:
         pass
     logger.info('_generate_bridge_conf: agc_reload_interval_s=%d', _agc_reload_interval_s)
@@ -656,7 +656,7 @@ class WM1303Backend:
         # When C-level L2 watchdog triggers exit_sig, pkt_fwd exits cleanly but
         # the Python backend must respawn it. Rate-limited to prevent crash loops.
         self._respawn_times: list[float] = []  # monotonic timestamps of recent respawns
-        self._respawn_max_per_hour = 10        # hard cap to prevent infinite crash loops
+        self._respawn_max_per_hour = 30        # hard cap to prevent infinite crash loops
         self._respawn_total = 0                # cumulative count since backend start
         self._consecutive_ack_timeouts = 0      # Layer 2: consecutive post-TX ACK timeouts
         self._l2_ack_timeout_threshold = 3      # trigger restart after N consecutive timeouts
@@ -2176,11 +2176,10 @@ class WM1303Backend:
         logger.info('WM1303Backend: lora_pkt_fwd stopped')
 
     def _start_pktfwd(self) -> None:
-        # Kill any existing lora_pkt_fwd
+        # Kill any stray lora_pkt_fwd (safety net, no long sleep)
         try:
             subprocess.run(['sudo', 'killall', '-9', 'lora_pkt_fwd'],
                           capture_output=True, timeout=5)
-            time.sleep(1.0)
         except Exception:
             pass
 
@@ -2246,8 +2245,7 @@ class WM1303Backend:
             self._stop_pktfwd_process()
         except Exception as e:
             logger.error('WM1303Backend: _restart_pkt_fwd stop error: %s', e)
-        # Wait for hardware to settle after stopping
-        time.sleep(2.0)
+        # Hardware settle handled by _start_pktfwd (GPIO reset + TCXO warmup)
         logger.info('WM1303Backend: _restart_pkt_fwd - starting new process')
         try:
             self._start_pktfwd()
@@ -2271,7 +2269,7 @@ class WM1303Backend:
         while self._watchdog_running:
             _cycle_num += 1
             logger.info('WM1303Backend: WATCHDOG_DIAG pre-sleep cycle=%d', _cycle_num)
-            time.sleep(30)  # check every 30 seconds
+            time.sleep(5)  # check every 5 seconds (fast L2 detection)
             logger.info('WM1303Backend: WATCHDOG_DIAG post-sleep cycle=%d', _cycle_num)
             if not self._watchdog_running:
                 break
@@ -2380,9 +2378,31 @@ class WM1303Backend:
         logger.info('WM1303Backend: RX watchdog stopped')
 
     def _do_watchdog_restart(self, trigger_reason: str) -> None:
-        """Common restart logic for all watchdog triggers."""
+        """Common restart logic for all watchdog triggers.
+
+        Performs a full hardware power-cycle (GPIO drain reset) before
+        restarting pkt_fwd to ensure clean SX1302/SX1250/SX1261 state.
+        """
         logger.warning('WM1303Backend: WATCHDOG restart triggered by: %s', trigger_reason)
         try:
+            # Step 1: Full hardware power-cycle to clear any corrupted radio state.
+            # This is more thorough than the standard reset_lgw.sh and includes
+            # a 3s power-off drain to clear all internal capacitor charge.
+            _power_cycle = PKTFWD_DIR / 'power_cycle_lgw.sh'
+            if _power_cycle.exists():
+                logger.info('WM1303Backend: WATCHDOG - running hardware power cycle before restart')
+                try:
+                    _r = subprocess.run(
+                        ['sudo', 'bash', str(_power_cycle)],
+                        cwd=str(PKTFWD_DIR), capture_output=True, timeout=30
+                    )
+                    logger.info('WM1303Backend: WATCHDOG - power cycle done (rc=%d)', _r.returncode)
+                except Exception as _e:
+                    logger.warning('WM1303Backend: WATCHDOG - power cycle failed: %s', _e)
+            else:
+                logger.info('WM1303Backend: WATCHDOG - power_cycle_lgw.sh not found, using standard reset')
+
+            # Step 2: Restart pkt_fwd (includes standard GPIO reset + TCXO warmup)
             self._restart_pkt_fwd()
             self._last_rx_timestamp = time.monotonic()
             self._zero_rx_stat_count = 0
@@ -2733,6 +2753,51 @@ class WM1303Backend:
                 _hex_preview = '?'
             logger.warning('WM1303Backend: RX %s freq=%.3f datr=%s rssi=%s snr=%s size=%d hex=%s',
                           _crc_label, _rx_freq, _rx_datr, _rx_rssi, _rx_lsnr, _raw_size, _hex_preview)
+            # Store CRC_ERROR / CRC_DISABLED as a packet_metric row so the
+            # Spectrum tab can compute error ratios per channel over time.
+            # Skip tiny fragments to avoid polluting charts with noise.
+            try:
+                # Compute RSSI filter: exclude spectrum-scan noise and sub-threshold detections.
+                # Real RX CRC errors have RSSI above the receiver sensitivity threshold (~-120 dBm).
+                # Below -115 dBm is almost certainly scan-mode noise, not a real RX attempt.
+                try:
+                    _rssi_check = float(_rx_rssi) if _rx_rssi not in (None, '?') else None
+                except (ValueError, TypeError):
+                    _rssi_check = None
+                _rssi_ok_for_crc = (_rssi_check is None) or (_rssi_check >= -115.0)
+                if _rx_stat == -1 and _raw_size >= 5 and _rssi_ok_for_crc:
+                    _freq_hz_key = int(float(_rx_freq) * 1e6)
+                    _crc_ch = self._freq_to_ch_id.get(_freq_hz_key)
+                    if _crc_ch is None:
+                        # Round to nearest kHz to tolerate tiny drift
+                        for _k, _v in self._freq_to_ch_id.items():
+                            if abs(_k - _freq_hz_key) <= 1000:
+                                _crc_ch = _v
+                                break
+                    if _crc_ch:
+                        from repeater.bridge_engine import _active_bridge as _ab
+                        _h = getattr(_ab, '_sqlite_handler', None) if _ab else None
+                        if _h is not None:
+                            try:
+                                _rssi_f = float(_rx_rssi) if _rx_rssi not in (None, '?') else None
+                            except Exception:
+                                _rssi_f = None
+                            try:
+                                _snr_f = float(_rx_lsnr) if _rx_lsnr not in (None, '?') else None
+                            except Exception:
+                                _snr_f = None
+                            _h.store_packet_metric({
+                                'timestamp': time.time(),
+                                'channel_id': str(_crc_ch),
+                                'direction': 'rx',
+                                'length': int(_raw_size),
+                                'hop_count': None,
+                                'crc_ok': False,
+                                'rssi': _rssi_f,
+                                'snr': _snr_f,
+                            })
+            except Exception as _pm_crc_e:
+                logger.debug('packet_metric CRC store failed: %s', _pm_crc_e)
         else:
             logger.info('WM1303Backend: RX %s freq=%.3f datr=%s rssi=%s snr=%s size=%d',
                         _crc_label, _rx_freq, _rx_datr, _rx_rssi, _rx_lsnr, _raw_size)

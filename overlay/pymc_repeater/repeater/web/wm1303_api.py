@@ -698,6 +698,10 @@ class WM1303API:
         if resource == "packet_activity":
             return self._packet_activity(**params)
 
+        # -- packet_metrics (per-packet RX/TX detail for spectrum-tab charts) --
+        if resource == "packet_metrics":
+            return self._packet_metrics(**params)
+
         if resource == "tx_activity":
             return self.tx_activity(**params)
 
@@ -2992,6 +2996,139 @@ class WM1303API:
         except Exception as e:
             logger.error("packet_activity error: %s", e)
             return _j({"error": str(e), "hours": h, "channels": []})
+
+    def _packet_metrics(self, **params):
+        """GET /api/wm1303/packet_metrics - Per-packet RX/TX metrics per channel for spectrum charts.
+
+        Returns per-channel per-bucket arrays:
+          rx_bytes (sum), tx_bytes (sum), tx_airtime_ms (sum), tx_wait_ms (sum),
+          rx_hops (avg), rx_crc_ok (count), rx_crc_err (count).
+        """
+        import sqlite3 as _sq3
+        hours_str = params.get("hours", "24")
+        try:
+            h = min(int(hours_str), 168)
+        except (ValueError, TypeError):
+            h = 24
+        # Same bucket sizes as packet_activity
+        if h <= 1:
+            bucket_s = 60
+        elif h <= 6:
+            bucket_s = 300
+        elif h <= 24:
+            bucket_s = 900
+        elif h <= 72:
+            bucket_s = 3600
+        else:
+            bucket_s = 14400
+        cutoff = time.time() - (h * 3600)
+        db_path = "/var/lib/pymc_repeater/repeater.db"
+        ui_chs = _load_ui().get("channels", [])
+        ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
+        ch_colors = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b",
+                     "#f472b6", "#fb923c", "#06b6d4", "#a3e635"]
+
+        def _agg_channel(conn, ch_id):
+            rows = conn.execute(
+                "SELECT CAST(timestamp / ? AS INTEGER) * ? AS bk, direction, length, "
+                "       airtime_ms, wait_time_ms, hop_count, crc_ok "
+                "FROM packet_metrics WHERE channel_id = ? AND timestamp > ? ORDER BY bk",
+                (bucket_s, bucket_s, ch_id, cutoff)
+            ).fetchall()
+            buckets = {}
+            for r in rows:
+                bk = int(r["bk"])
+                b = buckets.setdefault(bk, {
+                    "rx_bytes": 0, "tx_bytes": 0,
+                    "tx_airtime_ms": 0.0, "tx_wait_ms": 0.0,
+                    "rx_hops_sum": 0, "rx_hops_n": 0,
+                    "rx_crc_ok": 0, "rx_crc_err": 0,
+                })
+                _dir = r["direction"]
+                _len = r["length"] or 0
+                _ok = bool(r["crc_ok"])
+                if _dir == "rx":
+                    if _ok:
+                        # Only count CRC-valid RX as real traffic bytes.
+                        # CRC errors are tracked separately in rx_crc_err_ratio.
+                        b["rx_bytes"] += _len
+                        b["rx_crc_ok"] += 1
+                        _hop = r["hop_count"]
+                        if _hop is not None:
+                            # MeshCore path_len field supports up to 63 hops (6-bit mask).
+                            # In large mesh networks, 10+ hops is entirely plausible.
+                            # Display as "number of transmissions to reach me":
+                            # path_len=0 (direct from node) -> 1 transmission
+                            # path_len=1 (one repeater)     -> 2 transmissions
+                            _hop_int = int(_hop)
+                            if 0 <= _hop_int <= 63:
+                                b["rx_hops_sum"] += _hop_int + 1
+                                b["rx_hops_n"] += 1
+                    else:
+                        b["rx_crc_err"] += 1
+                elif _dir == "tx":
+                    b["tx_bytes"] += _len
+                    b["tx_airtime_ms"] += float(r["airtime_ms"] or 0)
+                    b["tx_wait_ms"] += float(r["wait_time_ms"] or 0)
+            series = []
+            for bk_ts in sorted(buckets.keys()):
+                b = buckets[bk_ts]
+                rx_hops_avg = (b["rx_hops_sum"] / b["rx_hops_n"]) if b["rx_hops_n"] > 0 else None
+                _total_rx = b["rx_crc_ok"] + b["rx_crc_err"]
+                # Option B: ratio = 0 when no valid RX packets (cleaner baseline than 1.0 or null).
+                # Only 1.0 when there IS real RX traffic that's failing CRC.
+                if b["rx_crc_ok"] > 0:
+                    # Normal case: there's valid traffic, compute real error ratio
+                    crc_err_ratio = b["rx_crc_err"] / _total_rx
+                elif b["rx_bytes"] > 0 or b["tx_bytes"] > 0:
+                    # Channel active (any RX/TX) but no valid decodes yet — show 0 baseline
+                    crc_err_ratio = 0.0
+                else:
+                    # Channel completely idle — show gap
+                    crc_err_ratio = None
+                series.append({
+                    "t": bk_ts,
+                    "rx_bytes": b["rx_bytes"],
+                    "tx_bytes": b["tx_bytes"],
+                    "tx_airtime_ms": round(b["tx_airtime_ms"], 1),
+                    "tx_wait_ms": round(b["tx_wait_ms"], 1),
+                    "rx_hops": round(rx_hops_avg, 2) if rx_hops_avg is not None else None,
+                    "rx_crc_ok": b["rx_crc_ok"],
+                    "rx_crc_err": b["rx_crc_err"],
+                    "rx_crc_err_ratio": round(crc_err_ratio, 3) if crc_err_ratio is not None else None,
+                })
+            return series
+
+        result_channels = []
+        try:
+            ch_id_map = _get_ui_channel_id_map()
+            with _sq3.connect(db_path) as conn:
+                conn.row_factory = _sq3.Row
+                for idx, ch_cfg in enumerate(ui_chs):
+                    ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
+                    letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
+                    series = _agg_channel(conn, ch_id)
+                    result_channels.append({
+                        "id": ch_id,
+                        "label": ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}")),
+                        "color": ch_colors[idx % len(ch_colors)],
+                        "data": series,
+                    })
+                # Channel E (SX1261)
+                _che_cfg = _load_ui().get("channel_e", {})
+                if _che_cfg.get("enabled", False):
+                    series_e = _agg_channel(conn, "channel_e")
+                    result_channels.append({
+                        "id": "channel_e",
+                        "label": _che_cfg.get("name", _che_cfg.get("friendly_name", "Channel E")),
+                        "color": "#f97316",
+                        "data": series_e,
+                    })
+            return _j({"hours": h, "bucket_seconds": bucket_s, "channels": result_channels})
+        except Exception as e:
+            logger.error("packet_metrics error: %s", e)
+            return _j({"error": str(e), "hours": h, "channels": []})
+
 
     def tx_activity(self, hours='24'):
         """GET /api/wm1303/tx_activity - TX activity per channel from channel_stats_history."""

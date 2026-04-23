@@ -688,6 +688,10 @@ class BridgeEngine:
                 pkt_hash=_dup_hash, was_duplicate=True,
                 drop_reason="duplicate")
             return
+        else:
+            # Dedup check passed — packet is not a duplicate
+            _pass_hash8 = _stable_hash(data, 8)
+            _trace(_pass_hash8, 'dedup_check', channel=source_name, detail='Dedup check passed (from %s)' % self._dn(source_name), status='ok')
 
         pkt_hash = _stable_hash(data)
         pkt_hash8 = _stable_hash(data, 8)
@@ -696,6 +700,36 @@ class BridgeEngine:
         logger.info('[HEXDUMP] dir=INJECT src=%s sz=%d hdr=%s hex=%s', source_name, len(data), _mc_hdr(data), _hexdump(data))
         logger.info('BridgeEngine: injected %d bytes from %s (type=%s, hash=%s, origin_channel=%s)',
                    len(data), source_name, pkt_type_name, pkt_hash, origin_channel)
+
+        # Store per-packet RX metric for spectrum-tab charts (Option B).
+        # inject_packet is the RX path for channel_e and other injected sources.
+        # We only store for RF endpoints (channel_e) to avoid duplicate rows
+        # from internal sources like 'repeater' (which re-injects processed RX).
+        if source_name in self.RF_ENDPOINTS:
+            try:
+                _hop = None
+                if data and len(data) >= 2:
+                    _hdr_byte = data[0]
+                    _rt = _hdr_byte & 0x03
+                    _has_tc = _rt in (0x00, 0x03)
+                    _idx = 5 if _has_tc else 1
+                    if _idx < len(data):
+                        _hop = data[_idx] & 0x3F
+                if self._sqlite_handler is not None:
+                    self._sqlite_handler.store_packet_metric({
+                        'timestamp': time.time(),
+                        'channel_id': str(source_name),
+                        'direction': 'rx',
+                        'length': int(len(data)),
+                        'hop_count': int(_hop) if _hop is not None else None,
+                        'crc_ok': True,
+                        'rssi': None,
+                        'snr': None,
+                        'pkt_hash': (pkt_hash[:16] if isinstance(pkt_hash, str) else None),
+                    })
+            except Exception as _pm_e:
+                logger.warning('packet_metric RX(inject) store failed on %s: %s', source_name, _pm_e)
+
 
         # Snapshot forwarded counter so we can detect whether at least one
         # rule actually dispatched TX for this packet (matches _rx_loop logic).
@@ -897,6 +931,32 @@ class BridgeEngine:
                         _trace(pkt_hash8, 'tx_send', channel=tcid, pkt_type=pkt_type_name, detail=self._format_tx_result(tx_result, self._dn(tcid), rule_display))
                         logger.info('BridgeEngine: TX result on %s (rule=%s): %s',
                                     tcid, rule_id, tx_result)
+                        # Store per-packet TX metric for spectrum-tab charts (Option B).
+                        try:
+                            if self._sqlite_handler is not None and isinstance(tx_result, dict) and tx_result.get('ok'):
+                                _tx_hop = None
+                                if data and len(data) >= 2:
+                                    _hdr_byte = data[0]
+                                    _rt = _hdr_byte & 0x03
+                                    _has_tc = _rt in (0x00, 0x03)
+                                    _idx = 5 if _has_tc else 1
+                                    if _idx < len(data):
+                                        _tx_hop = data[_idx] & 0x3F
+                                self._sqlite_handler.store_packet_metric({
+                                    'timestamp': time.time(),
+                                    'channel_id': str(tcid),
+                                    'direction': 'tx',
+                                    'length': int(len(data)),
+                                    'airtime_ms': tx_result.get('airtime_ms'),
+                                    'wait_time_ms': tx_result.get('queue_wait_ms'),
+                                    'hop_count': int(_tx_hop) if _tx_hop is not None else None,
+                                    'crc_ok': True,
+                                    'rssi': None,
+                                    'snr': None,
+                                    'pkt_hash': (pkt_hash[:16] if isinstance(pkt_hash, str) else None),
+                                })
+                        except Exception as _pm_tx_e:
+                            logger.warning('packet_metric TX store failed on %s: %s', tcid, _pm_tx_e)
                     else:  # kind == 'endpoint' (RF endpoint, e.g. channel_e)
                         # The endpoint handler itself emits lbt_check / cad_check
                         # and tx_send trace steps (see channel_e_bridge._tx_handler).
@@ -1250,6 +1310,10 @@ class BridgeEngine:
                     drop_reason="duplicate")
                 continue
 
+            # Dedup check passed — packet is new
+            _pass_hash8 = _stable_hash(data, 8)
+            _trace(_pass_hash8, 'dedup_check', channel=cid, detail='Dedup check passed on %s' % self._dn(cid), status='ok')
+
             pkt_hash = _stable_hash(data)
             pkt_hash8 = _stable_hash(data, 8)
             pkt_type_name = self._get_packet_type_name(data)
@@ -1257,6 +1321,36 @@ class BridgeEngine:
             logger.info('BridgeEngine: RX %d bytes on %s (type=%s, hash=%s)',
                        len(data), cid, pkt_type_name, pkt_hash)
             logger.info('[HEXDUMP] dir=RX ch=%s sz=%d hdr=%s hex=%s', cid, len(data), _mc_hdr(data), _hexdump(data))
+
+            # Store per-packet RX metric for spectrum-tab charts (Option B).
+            # Derive hop count from MeshCore header (byte 0) + path_raw (byte 1 or 5 if timestamped).
+            try:
+                _hop = None
+                if data and len(data) >= 2:
+                    _hdr_byte = data[0]
+                    _rt = _hdr_byte & 0x03
+                    _has_tc = _rt in (0x00, 0x03)
+                    _idx = 5 if _has_tc else 1
+                    if _idx < len(data):
+                        _hop = data[_idx] & 0x3F
+                if self._sqlite_handler is None:
+                    logger.warning('packet_metric RX skipped: sqlite_handler is None on %s', cid)
+                else:
+                    _pm_rec = {
+                        'timestamp': time.time(),
+                        'channel_id': str(cid) if cid is not None else '',
+                        'direction': 'rx',
+                        'length': int(len(data)),
+                        'hop_count': int(_hop) if _hop is not None else None,
+                        'crc_ok': True,
+                        'rssi': float(_rx_rssi) if _rx_rssi is not None else None,
+                        'snr': float(_rx_snr) if _rx_snr is not None else None,
+                        'pkt_hash': (pkt_hash[:16] if isinstance(pkt_hash, str) else None),
+                    }
+                    self._sqlite_handler.store_packet_metric(_pm_rec)
+                    logger.debug('packet_metric RX stored: ch=%s len=%d rssi=%s', cid, len(data), _rx_rssi)
+            except Exception as _pm_e:
+                logger.warning('packet_metric RX store failed on %s: %s', cid, _pm_e, exc_info=True)
 
             # Snapshot forwarded counter for repeater engine tracking
             _fwd_before = self.forwarded_packets

@@ -93,6 +93,31 @@ class SQLiteHandler:
                 """
                 )
 
+                # Per-packet metrics for spectrum-tab charts (8-day retention via metrics_retention).
+                # Captures channel, direction, size, airtime, waits, hops, CRC status, RSSI/SNR per packet.
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS packet_metrics (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        direction TEXT NOT NULL,
+                        length INTEGER NOT NULL DEFAULT 0,
+                        airtime_ms REAL,
+                        wait_time_ms REAL,
+                        hop_count INTEGER,
+                        crc_ok INTEGER NOT NULL DEFAULT 1,
+                        rssi REAL,
+                        snr REAL,
+                        pkt_hash TEXT
+                    )
+                """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_pktmet_ts ON packet_metrics(timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_pktmet_ch_ts ON packet_metrics(channel_id, timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_pktmet_dir_ts ON packet_metrics(direction, timestamp)")
+
+
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS transport_keys (
@@ -724,6 +749,66 @@ class SQLiteHandler:
                 ))
         except Exception as e:
             logger.error(f"Failed to store CRC errors in SQLite: {e}")
+
+    def store_packet_metric(self, record: dict):
+        """Store a per-packet metric row for spectrum-tab charts.
+
+        Expected keys (all optional except timestamp, channel_id, direction):
+          timestamp, channel_id, direction ('rx'|'tx'), length,
+          airtime_ms, wait_time_ms, hop_count, crc_ok (bool), rssi, snr, pkt_hash
+        """
+        try:
+            with sqlite3.connect(self.sqlite_path) as conn:
+                conn.execute("""
+                    INSERT INTO packet_metrics (
+                        timestamp, channel_id, direction, length,
+                        airtime_ms, wait_time_ms, hop_count,
+                        crc_ok, rssi, snr, pkt_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    float(record.get("timestamp", time.time())),
+                    str(record.get("channel_id", "")),
+                    str(record.get("direction", "")),
+                    int(record.get("length", 0) or 0),
+                    record.get("airtime_ms"),
+                    record.get("wait_time_ms"),
+                    record.get("hop_count"),
+                    1 if record.get("crc_ok", True) else 0,
+                    record.get("rssi"),
+                    record.get("snr"),
+                    record.get("pkt_hash"),
+                ))
+        except Exception as e:
+            logger.error(f"Failed to store packet_metric in SQLite: {e}")
+
+    def store_packet_metrics_batch(self, records: list):
+        """Store multiple packet metric rows in a single transaction."""
+        if not records:
+            return
+        try:
+            with sqlite3.connect(self.sqlite_path) as conn:
+                conn.executemany("""
+                    INSERT INTO packet_metrics (
+                        timestamp, channel_id, direction, length,
+                        airtime_ms, wait_time_ms, hop_count,
+                        crc_ok, rssi, snr, pkt_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [(
+                    float(r.get("timestamp", time.time())),
+                    str(r.get("channel_id", "")),
+                    str(r.get("direction", "")),
+                    int(r.get("length", 0) or 0),
+                    r.get("airtime_ms"),
+                    r.get("wait_time_ms"),
+                    r.get("hop_count"),
+                    1 if r.get("crc_ok", True) else 0,
+                    r.get("rssi"),
+                    r.get("snr"),
+                    r.get("pkt_hash"),
+                ) for r in records])
+        except Exception as e:
+            logger.error(f"Failed to store packet_metrics batch ({len(records)} rows): {e}")
+
 
     def get_crc_error_count(self, hours: int = 24) -> int:
         """Return total CRC errors within the given time window."""

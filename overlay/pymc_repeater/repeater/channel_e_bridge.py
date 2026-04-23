@@ -117,6 +117,24 @@ class ChannelEBridge:
                         _trace(pkt_hash8, 'tx_send', channel=CHANNEL_E_TX_CHANNEL,
                                detail=_detail,
                                status='ok')
+                        # Store per-packet TX metric for spectrum-tab charts (Option B).
+                        try:
+                            _handler = getattr(self.bridge, '_sqlite_handler', None) if self.bridge else None
+                            if _handler is not None:
+                                import time as _t
+                                _handler.store_packet_metric({
+                                    'timestamp': _t.time(),
+                                    'channel_id': str(CHANNEL_E_TX_CHANNEL),
+                                    'direction': 'tx',
+                                    'length': int(len(data)),
+                                    'hop_count': None,
+                                    'crc_ok': True,
+                                    'airtime_ms': float(result.get('airtime_ms', 0) or 0),
+                                    'wait_time_ms': float(result.get('queue_wait_ms', 0) or 0),
+                                    'pkt_hash': pkt_hash8 if isinstance(pkt_hash8, str) else None,
+                                })
+                        except Exception as _pm_e:
+                            logger.warning('packet_metric TX(ch_e) store failed: %s', _pm_e)
                     else:
                         self.tx_errors += 1
                         logger.warning(
