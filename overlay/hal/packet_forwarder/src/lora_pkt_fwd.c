@@ -733,6 +733,16 @@ static int parse_SX130x_configuration(const char * conf_file) {
     }
     MSG("INFO: antenna_gain %d dBi\n", antenna_gain);
 
+    /* WM1303: configurable AGC periodic reload interval */
+    {
+        extern uint32_t agc_periodic_reload_interval_s;
+        val = json_object_get_value(conf_obj, "agc_reload_interval_s");
+        if (val != NULL && json_value_get_type(val) == JSONNumber) {
+            agc_periodic_reload_interval_s = (uint32_t)json_value_get_number(val);
+        }
+        MSG("INFO: agc_reload_interval_s %u (0=disabled)\n", agc_periodic_reload_interval_s);
+    }
+
     /* set timestamp configuration */
     conf_ts_obj = json_object_get_object(conf_obj, "fine_timestamp");
     if (conf_ts_obj == NULL) {
@@ -3812,7 +3822,11 @@ void thread_jit(void) {
 
         /* Non-blocking LoRa RX restart: check if the TX airtime has elapsed
            and it's safe to put the SX1261 back into LoRa RX mode.
-           This runs every ~1ms without blocking the JIT thread. */
+           This runs every ~1ms without blocking the JIT thread.
+           IMPORTANT: while restart is pending, we do NOT allow new TX packets
+           to be picked up. This prevents the inhibit flag from being re-set
+           before the restart completes, which caused channel E RX starvation
+           on busy gateways (Pi03: 108 skipped restarts in 2 minutes). */
         if (custom_lbt_rx_restart_pending) {
             struct timespec now_ts;
             clock_gettime(CLOCK_MONOTONIC, &now_ts);
@@ -3823,6 +3837,10 @@ void thread_jit(void) {
                 pthread_mutex_unlock(&mx_concent);
                 custom_lbt_rx_restart_pending = false;
                 MSG("INFO: [jit] TX airtime elapsed, LoRa RX restarted (non-blocking)\n");
+            } else {
+                /* Airtime not yet elapsed — skip TX pickup this iteration.
+                   The SX1261 must be restarted before we allow new TX. */
+                continue;
             }
         }
 
@@ -4648,12 +4666,18 @@ void thread_spectral_scan(void) {
             do {
                 /* handle timeout */
                 if (timeout_check(tm_start, 2000) != 0) {
-                    printf("ERROR: %s: TIMEOUT on Spectral Scan\n", __FUNCTION__);
-                    /* Restore LoRa RX after timeout */
+                    printf("ERROR: %s: TIMEOUT on Spectral Scan — performing full SX1261 recovery\n", __FUNCTION__);
+                    /* Full recovery: standby first to clear any stuck state, then restart RX */
                     pthread_mutex_lock(&mx_concent);
+                    {
+                        uint8_t _stby_buf[1] = { 0x00 }; /* STDBY_RC */
+                        sx1261_reg_w(SX1261_SET_STANDBY, _stby_buf, 1);
+                        wait_ms(2); /* Allow SX1261 to settle in standby */
+                    }
                     sx1261_lora_rx_restart_light();
                     pthread_mutex_unlock(&mx_concent);
-                    if (dbgf) { fprintf(dbgf, "LoRa RX restart after TIMEOUT\n"); fflush(dbgf); }
+                    printf("INFO: %s: SX1261 recovered after scan timeout (standby → RX restart)\n", __FUNCTION__);
+                    if (dbgf) { fprintf(dbgf, "LoRa RX restart after TIMEOUT (full recovery)\n"); fflush(dbgf); }
                     fflush(stdout);
                     break;  /* do while */
                 }
@@ -4663,7 +4687,19 @@ void thread_spectral_scan(void) {
                 x = lgw_spectral_scan_get_status(&status);
                 pthread_mutex_unlock(&mx_concent);
                 if (x != 0) {
-                    printf("ERROR: spectral scan status failed\n");
+                    printf("ERROR: spectral scan status read failed — performing SX1261 recovery\n");
+                    /* Recovery: the SX1261 state may be corrupted, force standby + RX restart */
+                    pthread_mutex_lock(&mx_concent);
+                    {
+                        uint8_t _stby_buf[1] = { 0x00 }; /* STDBY_RC */
+                        sx1261_reg_w(SX1261_SET_STANDBY, _stby_buf, 1);
+                        wait_ms(2);
+                    }
+                    sx1261_lora_rx_restart_light();
+                    pthread_mutex_unlock(&mx_concent);
+                    printf("INFO: SX1261 recovered after status read failure (standby → RX restart)\n");
+                    if (dbgf) { fprintf(dbgf, "LoRa RX restart after status_failed (full recovery)\n"); fflush(dbgf); }
+                    fflush(stdout);
                     break; /* do while */
                 }
 
@@ -4874,7 +4910,20 @@ void thread_spectral_scan(void) {
                 if (dbgf) { fprintf(dbgf, "LoRa RX restart after ABORTED scan\n"); fflush(dbgf); }
                 fflush(stdout);
             } else {
-                printf("ERROR: %s: spectral scan status us unexpected 0x%02X\n", __FUNCTION__, status);
+                printf("ERROR: %s: spectral scan status unexpected 0x%02X — performing SX1261 recovery\n", __FUNCTION__, status);
+                /* Recovery: unexpected status means the SX1261 is in an unknown state.
+                   Force standby to clear any stuck operation, then restart LoRa RX. */
+                pthread_mutex_lock(&mx_concent);
+                {
+                    uint8_t _stby_buf[1] = { 0x00 }; /* STDBY_RC */
+                    sx1261_reg_w(SX1261_SET_STANDBY, _stby_buf, 1);
+                    wait_ms(2);
+                }
+                sx1261_lora_rx_restart_light();
+                pthread_mutex_unlock(&mx_concent);
+                printf("INFO: SX1261 recovered after unexpected status (standby → RX restart)\n");
+                if (dbgf) { fprintf(dbgf, "LoRa RX restart after unexpected status 0x%02X\n", status); fflush(dbgf); }
+                fflush(stdout);
             }
         }
     }

@@ -305,7 +305,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
         'freq_start': _scan_start,
         'nb_chan': _nb_chan,  # typically 8-9 channels for 1.6MHz BW
         'nb_scan': 100,  # reduced from 2000 for faster scans
-        'pace_s': 60,  # 1 minute between sweeps
+        'pace_s': 300,  # 5 minutes between sweeps (reduced SPI load)
     }
     logger.info('_generate_bridge_conf: spectral_scan enabled '
                 '(freq_start=%d, nb_chan=%d, freq_stop=%d, center=%d)',
@@ -374,6 +374,15 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
     except Exception as _cex:
         logger.warning('_generate_bridge_conf: channel_e read error: %s', _cex)
 
+    # WM1303: AGC reload interval from UI advanced config (0 = disabled)
+    _agc_reload_interval_s = 300  # default 300s
+    try:
+        _ui_agc = json.loads(Path('/etc/pymc_repeater/wm1303_ui.json').read_text())
+        _agc_reload_interval_s = _ui_agc.get('hal_advanced', {}).get('agc_reload_interval_s', 300)
+    except Exception:
+        pass
+    logger.info('_generate_bridge_conf: agc_reload_interval_s=%d', _agc_reload_interval_s)
+
     conf = {
         'SX130x_conf': {
             'com_type': 'SPI',
@@ -382,6 +391,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             'clksrc': 0,
             'antenna_gain': 0,
             'full_duplex': False,
+            'agc_reload_interval_s': _agc_reload_interval_s,
             'precision_timestamp': {
                 'enable': True,
                 'max_ts_metrics': 255,
@@ -648,6 +658,8 @@ class WM1303Backend:
         self._respawn_times: list[float] = []  # monotonic timestamps of recent respawns
         self._respawn_max_per_hour = 10        # hard cap to prevent infinite crash loops
         self._respawn_total = 0                # cumulative count since backend start
+        self._consecutive_ack_timeouts = 0      # Layer 2: consecutive post-TX ACK timeouts
+        self._l2_ack_timeout_threshold = 3      # trigger restart after N consecutive timeouts
 
 
         # Early detection: PUSH_DATA stat monitoring (Detection Method 1)
@@ -2308,6 +2320,20 @@ class WM1303Backend:
                 continue
 
 
+
+            # Detection 5 (ACK_TIMEOUT): consecutive post-TX ACK timeouts indicate
+            # C-level JIT thread is stuck (SX1302 stall). Layer 1 correlator reinit
+            # runs in C, but if it fails after 3 attempts, Layer 2 restarts pkt_fwd.
+            if self._consecutive_ack_timeouts >= self._l2_ack_timeout_threshold:
+                logger.warning(
+                    'WM1303Backend: WATCHDOG [ACK_TIMEOUT] - %d consecutive post-TX ACK '
+                    'timeouts (threshold=%d), restarting pkt_fwd',
+                    self._consecutive_ack_timeouts, self._l2_ack_timeout_threshold
+                )
+                self._consecutive_ack_timeouts = 0
+                self._do_watchdog_restart('ack_timeout_l2')
+                continue
+
             # Detection 1: PUSH_DATA stats show no RX for 2+ windows (~60s)
             if self._zero_rx_stat_count >= 999:
                 logger.warning(
@@ -3115,20 +3141,23 @@ class WM1303Backend:
 
             # --- Success path: sendto completed ---
 
-            # Calculate LoRa airtime and track TX completion time
+            # Calculate LoRa airtime (but do NOT set _last_tx_end yet —
+            # we set it after receiving the post-TX ACK so the guard
+            # aligns with the actual TX start, not the UDP send time).
             _airtime_ms_val = 0.0
+            _airtime_s = 0.0
             _datr = txpk.get("datr", "SF8BW125")
             _sf_m = re.match(r"SF(\d+)BW(\d+)", _datr)
             if _sf_m:
                 _sf = int(_sf_m.group(1))
                 _bw = int(_sf_m.group(2)) * 1000
-                _airtime = self._lora_airtime_s(_sf, _bw, txpk.get("size", 0), txpk.get("prea", 17))
-                _airtime_ms_val = round(_airtime * 1000, 1)
-                self._last_tx_end = time.monotonic() + _airtime
+                _airtime_s = self._lora_airtime_s(_sf, _bw, txpk.get("size", 0), txpk.get("prea", 17))
+                _airtime_ms_val = round(_airtime_s * 1000, 1)
+                # Set a CONSERVATIVE _last_tx_end in case ACK never arrives.
+                # This will be overwritten with a precise value after ACK.
+                self._last_tx_end = time.monotonic() + _airtime_s + 2.0
                 logger.info('WM1303Backend: TX airtime %.1fms (SF%d BW%d %d bytes)',
                            _airtime_ms_val, _sf, _bw, txpk.get('size', 0))
-
-            # Store TX payload hash for self-echo detection (stable payload hash)
             try:
                 _tx_data_b64 = txpk.get('data', '')
                 if _tx_data_b64:
@@ -3154,23 +3183,28 @@ class WM1303Backend:
             # self._schedule_agc_reset()
 
             # WM1303 Approach 3: await post-TX ack for CAD/LBT data.
-            # Timeout = max(airtime + 2s, 3s) — graceful degradation if the
-            # C binary is older and never emits the post-TX ack.
-            # NOTE: this await does NOT slow actual RF TX (TX has completed in
-            # C by the time the ack arrives); it only extends the TX-lock hold,
-            # which is acceptable because the next TX would wait for airtime
-            # via self._last_tx_end anyway.
+            # The post-TX ACK arrives right after lgw_send() in the C code,
+            # i.e. after CAD/LBT checks are done and the TX buffer is loaded.
+            # By waiting for this ACK we know the EXACT moment TX starts on RF,
+            # so we can set _last_tx_end precisely (overwriting the conservative
+            # estimate set earlier).
             _result = {'ok': True, 'freq': txpk['freq'], 'datr': txpk['datr'],
                        'airtime_ms': _airtime_ms_val, 'send_ms': _send_ms,
-                       'tx_token': token}
+                       'tx_token': token, 'ack_received': False}
             _ack_timeout_s = max((_airtime_ms_val + 2000.0) / 1000.0, 3.0)
             try:
                 _post_ack = await asyncio.wait_for(_ack_future, timeout=_ack_timeout_s)
                 if isinstance(_post_ack, dict):
-                    # Merge cad/lbt fields into result (keep our own 'ok' authority
-                    # — the C-side 'ok' reflects tx_result=='sent', but the overall
-                    # send() semantics should say ok=True if UDP sendto succeeded.
-                    # Consumers can still inspect tx_result / lbt_pass / cad_detected.)
+                    # ── ACK received: TX has started on RF ──
+                    # Set _last_tx_end precisely: now + airtime.
+                    # This overwrites the conservative estimate (now + airtime + 2s)
+                    # set before the ACK wait.
+                    self._last_tx_end = time.monotonic() + _airtime_s
+                    _result['ack_received'] = True
+                    self._consecutive_ack_timeouts = 0  # Layer 2: reset on successful ACK
+                    logger.info('WM1303Backend: post-TX ACK received — precise guard: '
+                                '_last_tx_end = now + %.1fms airtime', _airtime_ms_val)
+                    # Merge cad/lbt fields into result
                     for _k in ('tx_result', 'phase', 'cad', 'lbt',
                                'cad_enabled', 'cad_detected', 'cad_retries',
                                'cad_rssi_dbm', 'cad_reason',
@@ -3178,20 +3212,18 @@ class WM1303Backend:
                                'lbt_threshold_dbm', 'lbt_retries'):
                         if _k in _post_ack:
                             _result[_k] = _post_ack[_k]
-                    # If the C side reports TX was blocked/failed, propagate
-                    # an explicit flag so callers can observe it — but do NOT
-                    # overwrite 'ok' (UDP handoff succeeded; the TX outcome is
-                    # separate and available via 'tx_result').
                     if _post_ack.get('tx_result') and _post_ack['tx_result'] != 'sent':
                         _result['tx_blocked'] = True
             except asyncio.TimeoutError:
-                # Graceful degradation: older pkt_fwd binaries (or error paths
-                # that never reach post-TX) won't send the ack. Cleanup the
-                # registration and return without CAD/LBT fields.
+                # Graceful degradation: conservative _last_tx_end stays
+                # (set earlier to now + airtime + 2s). No precise guard.
                 self._tx_ack_unregister_future(token)
-                logger.debug('WM1303Backend: post-TX ack timeout for token=0x%04x '
-                             '(older pkt_fwd or TX error path) — returning without cad/lbt',
-                             token)
+                self._consecutive_ack_timeouts += 1
+                logger.warning('WM1303Backend: post-TX ack timeout for token=0x%04x '
+                               '— using conservative guard (airtime + 2s), '
+                               'consecutive_timeouts=%d/%d',
+                               token, self._consecutive_ack_timeouts,
+                               self._l2_ack_timeout_threshold)
             except Exception as _e:
                 self._tx_ack_unregister_future(token)
                 logger.debug('WM1303Backend: post-TX ack await error: %s', _e)

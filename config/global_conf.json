@@ -185,7 +185,7 @@
         "freq_start": 863000000,
         "nb_chan": 36,
         "nb_scan": 100,
-        "pace_s": 60
+        "pace_s": 300
       },
       "lbt": {
         "enable": false,

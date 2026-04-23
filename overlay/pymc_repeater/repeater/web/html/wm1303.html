@@ -643,6 +643,12 @@ select.ci option{background:#1e293b}
         <small style="color:var(--txm);display:block;margin-top:4px">Fixed gain for channelizer instead of automatic</small>
       </div>
 
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">AGC Reload Interval (s)</label>
+        <input id="ac-agc-reload" type="number" min="0" max="3600" step="1" value="300" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:var(--txm);display:block;margin-top:4px">Periodic AGC reload interval in seconds. 0 = disabled. Default: 300s. Prevents gain drift; correlator reinit runs after each reload.</small>
+      </div>
+
     </div>
     <div style="margin-top:16px;text-align:right">
       <button onclick="saveAdvGroup('hal_advanced')" style="padding:8px 20px;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:500">&#128308; Save HAL &amp; Restart</button>
@@ -3654,6 +3660,7 @@ function hexToRgba(hex, alpha) {
     'ac-agc-ana':     { key: 'agc_ana_gain',                 source: 'hal' },
     'ac-agc-dec':     { key: 'agc_dec_gain',                 source: 'hal' },
     'ac-chan-fixed':   { key: 'channelizer_fixed_gain',      source: 'hal' },
+    'ac-agc-reload':  { key: 'agc_reload_interval_s',        source: 'hal' },
     'ac-gpio-base':       { key: 'gpio_base_offset',           source: 'gpio' },
     'ac-gpio-sx1302-rst': { key: 'sx1302_reset_pin',           source: 'gpio' },
     'ac-gpio-sx1302-pwr': { key: 'sx1302_power_en_pin',        source: 'gpio' },
@@ -3665,7 +3672,7 @@ function hexToRgba(hex, alpha) {
     dedup_cache:  ['ac-dedup-ttl', 'ac-cache-ttl', 'ac-max-cache'],
     tx_queue:     ['ac-queue-size', 'ac-tx-delay', 'ac-pkt-ttl', 'ac-overflow', 'ac-tx-delay-factor'],
     noise_floor:  ['ac-nf-interval', 'ac-nf-hold', 'ac-nf-buffer'],
-    hal_advanced: ['ac-force-fe', 'ac-lna-lut', 'ac-pa-lut', 'ac-agc-ana', 'ac-agc-dec', 'ac-chan-fixed'],
+    hal_advanced: ['ac-force-fe', 'ac-lna-lut', 'ac-pa-lut', 'ac-agc-ana', 'ac-agc-dec', 'ac-chan-fixed', 'ac-agc-reload'],
     gpio_pins:    ['ac-gpio-base', 'ac-gpio-sx1302-rst', 'ac-gpio-sx1302-pwr', 'ac-gpio-sx1261-rst', 'ac-gpio-ad5338r-rst']
   };
 

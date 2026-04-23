@@ -3254,6 +3254,7 @@ class WM1303API:
                 "sx1261_reset_pin":     gpio.get("sx1261_reset", 5),
                 "ad5338r_reset_pin":    gpio.get("ad5338r_reset", 13),
                 "tx_delay_factor":      cfg.get("delays", {}).get("tx_delay_factor", 0.5),
+                "agc_reload_interval_s": hal.get("agc_reload_interval_s", 300),
             }
             return _j(result)
         except Exception as e:
@@ -3341,6 +3342,8 @@ class WM1303API:
                     hal["agc_dec_gain"] = str(params["agc_dec_gain"])
                 if "channelizer_fixed_gain" in params:
                     hal["channelizer_fixed_gain"] = bool(params["channelizer_fixed_gain"])
+                if "agc_reload_interval_s" in params:
+                    hal["agc_reload_interval_s"] = int(params["agc_reload_interval_s"])
 
             elif group == "gpio_pins":
                 gpio = ui.setdefault("gpio_pins", {})

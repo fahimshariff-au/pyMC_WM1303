@@ -102,7 +102,7 @@ class ChannelTXQueue:
     def __init__(self, channel_id: str, freq_hz: int, bw_khz: float,
                  sf: int, cr: int, preamble: int = 17,
                  tx_power: int = 14, queue_size: int = 15,
-                 ttl_seconds: float = 30.0):
+                 ttl_seconds: float = 60.0):
         self.channel_id = channel_id
         self.freq_hz = freq_hz
         self.bw_khz = bw_khz
@@ -348,7 +348,7 @@ class TXQueueManager:
                     bw_khz: float = 125.0, sf: int = 8,
                     cr: int = 5, preamble: int = 17,
                     tx_power: int = 14,
-                    ttl_seconds: float = 30.0) -> None:
+                    ttl_seconds: float = 60.0) -> None:
         """Add a channel TX queue."""
         if len(self.queues) >= MAX_CHANNELS:
             raise ValueError(f"Maximum {MAX_CHANNELS} TX queues supported")
@@ -600,18 +600,29 @@ class GlobalTXScheduler:
         # rf_chain 0.  The SX1302 can only transmit one packet at a time —
         # calling lgw_send() while a previous TX is still in progress will
         # OVERWRITE the TX buffer, silently killing the first packet.
-        # We must wait at least the full estimated airtime of the packet we
-        # just sent, plus a safety margin, before sending the next one.
-        # The margin accounts for:
-        #   - JIT thread processing delay (~100ms from Python lgw_send to C pickup)
-        #   - CAD scan overhead (~50ms when CAD is enabled)
-        #   - SX1302 TX scheduling latency (~50ms)
-        #   - Safety buffer
-        _rf_guard_margin_ms = 150.0  # margin to cover JIT + CAD + scheduling (was 250)
-        _shared_rf_guard_ms = airtime_est_ms + _rf_guard_margin_ms
-        logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
-                    "(airtime_est=%.1fms + %.0fms margin)",
-                    channel_id, _shared_rf_guard_ms, airtime_est_ms, _rf_guard_margin_ms)
+        #
+        # ACK-based precision guard:
+        # When _send_func() receives a post-TX ACK from the C code, it means
+        # CAD/LBT are done and lgw_send() has loaded the TX buffer — the RF
+        # transmission is starting NOW. The guard then only needs to cover
+        # the actual airtime + a small safety margin.
+        # When no ACK is received (timeout/fallback), _send_func already set
+        # a conservative _last_tx_end; we add a minimal sleep here.
+        _ack_received = result.get('ack_received', False) if isinstance(result, dict) else False
+        if _ack_received:
+            # Precise: ACK confirmed TX started — guard = airtime + margin
+            _rf_guard_margin_ms = 100.0
+            _shared_rf_guard_ms = airtime_est_ms + _rf_guard_margin_ms
+            logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
+                        "(precise: airtime=%.1fms + %.0fms margin)",
+                        channel_id, _shared_rf_guard_ms, airtime_est_ms, _rf_guard_margin_ms)
+        else:
+            # Conservative: no ACK — use minimal sleep, _last_tx_end in
+            # _send_pull_resp already includes airtime + 2s fallback.
+            _shared_rf_guard_ms = 100.0  # minimal sleep; _last_tx_end guards the rest
+            logger.warning("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
+                           "(conservative: no post-TX ACK received)",
+                           channel_id, _shared_rf_guard_ms)
         await asyncio.sleep(_shared_rf_guard_ms / 1000.0)
 
     async def _scheduler_loop(self):

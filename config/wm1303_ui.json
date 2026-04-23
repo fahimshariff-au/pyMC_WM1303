@@ -62,5 +62,10 @@
     "lbt_enabled": false,
     "lbt_threshold": -80
   },
-  "rf_center_freq_mhz": 869.525
+  "rf_center_freq_mhz": 869.525,
+  "adv_config": {
+    "hal_advanced": {
+      "agc_reload_interval_s": 300
+    }
+  }
 }

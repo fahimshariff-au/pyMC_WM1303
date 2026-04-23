@@ -110,6 +110,11 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 /* Version string, used to identify the library version/options once compiled */
 const char lgw_version_string[] = "Version: " LIBLORAGW_VERSION ";";
 
+/* WM1303: Configurable periodic AGC reload interval (seconds).
+   Set by pkt_fwd from global_conf.json. 0 = disabled. */
+uint32_t agc_periodic_reload_interval_s = 300;
+
+
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE VARIABLES ---------------------------------------------------- */
 
@@ -1306,13 +1311,13 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
             last_agc_reload = now;
         } else {
             long elapsed_s = now.tv_sec - last_agc_reload.tv_sec;
-            if (elapsed_s >= 60) {
-                printf("INFO: [agc_periodic] %lds since last reload — refreshing AGC\n", elapsed_s);
+            if (agc_periodic_reload_interval_s > 0 && elapsed_s >= (long)agc_periodic_reload_interval_s) {
+                printf("INFO: [agc_periodic] %lds since last reload (interval=%us) — refreshing AGC\n", elapsed_s, agc_periodic_reload_interval_s);
                 sx1302_correlator_disable();
                 sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
                 sx1302_correlator_reinit(0x01, 0xFF);
                 last_agc_reload = now;
-                printf("INFO: [agc_periodic] done — next in 60s\n");
+                printf("INFO: [agc_periodic] done — next in %us\n", agc_periodic_reload_interval_s);
             }
         }
     }
@@ -1322,6 +1327,43 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
     if (res != LGW_REG_SUCCESS) {
         printf("ERROR: failed to fetch packets from SX1302\n");
         return LGW_HAL_ERROR;
+    }
+
+    /* WM1303 Layer 1: RX stall detection & correlator recovery.
+       If no SX1302 packets for L1_STALL_TIMEOUT_S seconds, perform a full
+       correlator reinit.  This recovers SF-specific demodulator lock-ups
+       that the periodic AGC reload cannot fix. */
+    {
+        static struct timeval last_sx1302_rx = {0, 0};
+        static int l1_reinit_count = 0;
+        #define L1_STALL_TIMEOUT_S  5   /* seconds of zero SX1302 RX before reinit */
+        #define L1_MAX_CONSECUTIVE  3   /* max consecutive reinits before giving up (Layer 2 takes over) */
+
+        struct timeval l1_now;
+        gettimeofday(&l1_now, NULL);
+
+        if (nb_pkt_fetched > 0) {
+            /* SX1302 received packets — reset stall tracking */
+            last_sx1302_rx = l1_now;
+            l1_reinit_count = 0;
+        } else if (last_sx1302_rx.tv_sec > 0) {
+            /* No SX1302 packets this cycle — check stall duration */
+            long stall_s = l1_now.tv_sec - last_sx1302_rx.tv_sec;
+            if (stall_s >= L1_STALL_TIMEOUT_S && l1_reinit_count < L1_MAX_CONSECUTIVE) {
+                printf("WARNING: [L1 recovery] SX1302 RX stall detected (%lds, attempt %d/%d) — correlator reinit\n",
+                       stall_s, l1_reinit_count + 1, L1_MAX_CONSECUTIVE);
+                sx1302_correlator_disable();
+                wait_ms(1);
+                sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
+                sx1302_correlator_reinit(0x01, 0xFF);
+                last_sx1302_rx = l1_now;  /* reset timer to allow next attempt after timeout */
+                l1_reinit_count++;
+                printf("INFO: [L1 recovery] correlator reinit #%d complete\n", l1_reinit_count);
+            }
+        } else {
+            /* First call — initialise */
+            last_sx1302_rx = l1_now;
+        }
     }
 
     /* Update internal counter */
