@@ -695,6 +695,8 @@ class WM1303Backend:
             tx_lbt = self._hourly_tx_lbt_block
             fsk = self._hourly_fsk_skipped
             scans = self._hourly_scan_sweeps
+            noise_disc = getattr(self, '_hourly_noise_discarded', 0)
+            sf_mismatch = getattr(self, '_hourly_sf_mismatch', 0)
             # Reset counters
             self._hourly_rx_total = 0
             self._hourly_rx_crc_ok = 0
@@ -704,6 +706,8 @@ class WM1303Backend:
             self._hourly_tx_lbt_block = 0
             self._hourly_fsk_skipped = 0
             self._hourly_scan_sweeps = 0
+            self._hourly_noise_discarded = 0
+            self._hourly_sf_mismatch = 0
 
         # Get bridge stats if available
         bridge_fwd = 0
@@ -716,10 +720,10 @@ class WM1303Backend:
         except Exception:
             pass
 
-        logger.info('[HOURLY] RX: %d (CRC_OK=%d, CRC_ERR=%d, FSK_SKIP=%d) | '
+        logger.info('[HOURLY] RX: %d (CRC_OK=%d, CRC_ERR=%d, FSK_SKIP=%d, SF_MISMATCH=%d, NOISE=%d) | '
                     'TX: %d (OK=%d, FAIL=%d, LBT_BLOCK=%d) | '
                     'Bridge: %d fwd, %d dedup | Scan: %d sweeps',
-                    rx_total, rx_ok, rx_err, fsk,
+                    rx_total, rx_ok, rx_err, fsk, sf_mismatch, noise_disc,
                     tx_ok + tx_fail + tx_lbt, tx_ok, tx_fail, tx_lbt,
                     bridge_fwd, dedup_hits, scans)
 
@@ -2823,14 +2827,15 @@ class WM1303Backend:
 
         if not matched and freq_only_match:
             cid, radio, ch_sf = freq_only_match
-            logger.warning('WM1303Backend: RX->%s FREQ-ONLY match (ch_sf=%d != rx_sf=%s) '
-                          'freq=%d %d bytes rssi=%.1f - routing anyway',
-                          cid, ch_sf, rx_sf, freq_hz, len(payload), rssi)
-            radio.enqueue_rx(payload, rssi=int(rssi), snr=snr)
-            self._last_rx_timestamp = time.monotonic()  # watchdog: RX activity
-            self._zero_rx_stat_count = 0  # reset stat monitor on valid RX
-            self._rssi_spike_count = 0    # reset RSSI spike monitor on valid RX
-            matched = True
+            logger.info('WM1303Backend: RX SF-MISMATCH on %s (ch_sf=SF%d, rx_sf=SF%s) '
+                        'freq=%d %d bytes rssi=%.1f - NOT routed to bridge (SF filter)',
+                        cid, ch_sf, rx_sf, freq_hz, len(payload), rssi)
+            # Count SF-mismatched packets for hourly stats
+            with self._hourly_lock:
+                self._hourly_sf_mismatch = getattr(self, '_hourly_sf_mismatch', 0) + 1
+            # Still update RX timestamp for watchdog (radio IS receiving)
+            self._last_rx_timestamp = time.monotonic()
+            self._zero_rx_stat_count = 0
 
         # --- Channel E (channel_e) RX injection ---
         if not matched and hasattr(self, "_channel_e_rx_callback") and self._channel_e_rx_callback is not None:

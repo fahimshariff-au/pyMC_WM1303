@@ -8,7 +8,8 @@
 
 ## Highlights
 
-- **SX1302 stability fix (root cause resolution)** — The intermittent RX freeze ("snap") that plagued all previous versions has been traced to a custom post-TX AGC reload routine and permanently eliminated. The SX1302 AGC MCU handles TX→RX transitions autonomously; our code was interfering with its internal state.
+- **SX1302 stability fix (root cause resolution)** — The intermittent RX freeze ("snap") that plagued all previous versions has been traced to a custom post-TX AGC reload routine and permanently eliminated. Replaced with a safe periodic 60-second timer-based AGC recalibration.
+- **RX spreading factor filter** — Packets received on a channel frequency but with a non-matching spreading factor are now logged but not forwarded through the bridge, preventing wasted TX responses that the receiving node cannot decode.
 - **SPI bus stability hardening** — SPI clock lowered from 16 MHz to 4 MHz, VPU core clock locked at ≥500 MHz, SPI polling threshold raised, CPU governor set to performance mode. All applied automatically at install/upgrade and every service start.
 - **Deep hardware reset** — New `deep_reset` mode in `reset_lgw.sh` performs a ≥60 s power drain with all resets asserted, ensuring the SX1302/SX1261 start from a fully discharged state.
 - **Tracing tab UX refinements** — Per-step duration and cumulative timing, virtual WAIT rows with context labels, accordion behavior, and CAD retry counts.
@@ -26,7 +27,7 @@
 | **Symptom** | SX1302 multi-SF demodulator stops detecting preambles every 4–30 minutes ("snap"), requiring a full process restart to recover. Register values appear normal but no packets are received. |
 | **Root cause** | A custom post-TX AGC reload block in `loragw_hal.c` (added in earlier versions) stopped and restarted the AGC MCU after every transmission. During rapid TX bursts (>4 reloads in <15 s), this churned internal SX1302 state — specifically correlator pipeline accumulators, drift trackers, and AGC fine-tuning registers that are not accessible via SPI and cannot be restored by a simple register re-write. |
 | **Evidence** | A controlled A/B test on pi03 proved the fix: Phase A (AGC reload enabled, 4 hours) showed multiple snaps; Phase B (AGC reload disabled, 26+ minutes, 190 TX completions) showed zero snaps, zero dead RX cycles, zero watchdog events. The AGC MCU's autonomous `agc=0x01` status confirmed it handles TX→RX transitions correctly without host intervention. |
-| **Fix** | Removed the entire post-TX AGC reload block (57 lines) from `lgw_receive()` in `loragw_hal.c`. The SX1302 now operates as the Semtech reference HAL intended. |
+| **Fix** | Removed the entire post-TX AGC reload block (57 lines) from `lgw_receive()` in `loragw_hal.c`. Replaced with a safe periodic 60-second timer-based AGC recalibration that is fully decoupled from TX events, preventing burst-reload patterns while maintaining gain calibration. |
 | **Removed recovery code** | All symptom-masking recovery mechanisms that were added to work around the snap have been removed: L0 burst detection, L1 correlator reinit, L2 full process restart, L2b semi-dead detection, and the SX1302 register monitoring function. These added complexity without addressing the root cause. |
 | **Safety net retained** | Python-side Detection 4 (process-exit respawn) remains as a last-resort safety net for any future unexpected pkt_fwd crashes. |
 | **Files** | `overlay/hal/libloragw/src/loragw_hal.c`, `overlay/hal/packet_forwarder/src/lora_pkt_fwd.c` |
@@ -122,6 +123,32 @@
 |---|---|
 | **What** | Packets smaller than 5 bytes are now discarded at the backend level before entering the bridge engine. |
 | **Why** | The SX1302 occasionally reports 2–4 byte CRC_ERROR fragments that are RF noise, not valid packets. When forwarded through the bridge, these created a self-echo feedback loop that consumed TX capacity. |
+| **Files** | `overlay/pymc_core/src/pymc_core/hardware/wm1303_backend.py` |
+
+### Periodic AGC Recalibration (60-Second Timer)
+
+| | Detail |
+|---|---|
+| **What** | A timer-based AGC reload fires every 60 seconds inside the main `lgw_receive()` polling loop. It disables correlators, reloads the AGC MCU firmware, and re-enables correlators. |
+| **Why** | The original post-TX AGC reload was removed because rapid bursts caused SX1302 correlator corruption (the "snap" root cause). Without any recalibration, AGC gain can drift over time due to temperature and environmental changes. The 60-second periodic reload provides a safe middle ground: at most 1 reload per minute, fully decoupled from TX events, with no burst risk. |
+| **Impact** | Reloads reduced from 700+/hour (TX-coupled, with bursts of 6+ in 15 s) to exactly 60/hour (fixed interval, never more than 1 per minute). |
+| **Files** | `overlay/hal/libloragw/src/loragw_hal.c` |
+
+### RX Spreading Factor Filter
+
+| | Detail |
+|---|---|
+| **What** | Packets received on a channel's frequency but with a non-matching spreading factor are now logged as `SF-MISMATCH` and **not routed** to the bridge engine. Previously, these were forwarded with a "FREQ-ONLY match" warning. |
+| **Why** | When a node transmits on the same frequency as a channel but with a different SF, the SX1302 multi-SF demodulator receives it. Without the filter, the bridge would process the packet and transmit a response on the channel's configured SF — which the node cannot decode, wasting TX airtime. |
+| **Behavior** | The RX watchdog timestamp is still updated (the radio IS receiving), and mismatched packets are counted in the new `SF_MISMATCH` hourly stats counter. |
+| **Files** | `overlay/pymc_core/src/pymc_core/hardware/wm1303_backend.py` |
+
+### Enhanced Hourly Stats
+
+| | Detail |
+|---|---|
+| **What** | The `[HOURLY]` log line now includes `SF_MISMATCH` and `NOISE` counters alongside the existing RX, TX, Bridge, and Scan metrics. |
+| **Why** | Provides visibility into how many packets are filtered by the SF filter and the minimum-packet-size noise filter, aiding in channel configuration and RF environment diagnostics. |
 | **Files** | `overlay/pymc_core/src/pymc_core/hardware/wm1303_backend.py` |
 
 ---
