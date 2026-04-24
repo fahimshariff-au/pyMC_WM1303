@@ -235,4 +235,14 @@ pyMC_WM1303/
 
 ## License
 
-See [LICENSE](LICENSE).
+**pyMC_WM1303 is dual-licensed for noncommercial use:**
+
+| What | License | Summary |
+|------|---------|---------|
+| **Code** | [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/) | Free for hobbyists, community, research, education, and any noncommercial project. |
+| **Documentation & assets** | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) | Free to share and adapt with attribution, for noncommercial use. |
+
+> ⛔ **Commercial use is not permitted** under these licenses.  
+> 💼 For commercial licensing, see [COMMERCIAL.md](COMMERCIAL.md).
+
+See [LICENSE](LICENSE) for the full terms.

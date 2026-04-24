@@ -1,21 +1,77 @@
-MIT License
+pyMC_WM1303 — License
+=====================
 
-Copyright (c) 2026 HansvanMeer
+© 2026 HansvanMeer (GitHub: @HansvanMeer)
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This repository contains two categories of content, each covered by
+a different license:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+-------------------------------------------------------------------
+1. SOURCE CODE
+-------------------------------------------------------------------
+All source code in this repository — including but not limited to
+Python, C, shell, JavaScript, HTML, CSS, configuration files, and
+build scripts — is licensed under:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+    PolyForm Noncommercial License 1.0.0
+    https://polyformproject.org/licenses/noncommercial/1.0.0/
+
+The full license text is reproduced in
+LICENSES/PolyForm-Noncommercial-1.0.0.txt.
+
+You may use, copy, modify, and distribute the code for any
+noncommercial purpose. "Noncommercial" means not primarily
+intended for or directed toward commercial advantage or monetary
+compensation.
+
+-------------------------------------------------------------------
+2. DOCUMENTATION AND ASSETS
+-------------------------------------------------------------------
+All documentation and non-code assets — including but not limited
+to README.md, files under docs/, screenshots, diagrams, and
+images — are licensed under:
+
+    Creative Commons Attribution-NonCommercial 4.0 International
+    (CC BY-NC 4.0)
+    https://creativecommons.org/licenses/by-nc/4.0/
+
+The full license text is reproduced in
+LICENSES/CC-BY-NC-4.0.txt.
+
+You may share and adapt the documentation for noncommercial
+purposes, provided you give appropriate credit (name the project
+and link back to this repository).
+
+-------------------------------------------------------------------
+3. COMMERCIAL USE
+-------------------------------------------------------------------
+Commercial use of the code or documentation is NOT permitted
+under the licenses above. All commercial rights are reserved by
+the author. Commercial deployment, resale, or integration into
+for-profit products or services requires a separate written
+agreement with the author.
+
+For commercial licensing inquiries, see COMMERCIAL.md.
+
+-------------------------------------------------------------------
+4. THIRD-PARTY COMPONENTS
+-------------------------------------------------------------------
+This project depends on and overlays the following third-party
+projects, which retain their own licenses:
+
+  - sx1302_hal (Semtech / Revised BSD License)
+  - pyMC_core  (MeshCore project / original license)
+  - pyMC_Repeater (MeshCore project / original license)
+
+These licenses are not affected by this repository's license and
+must be respected when using or redistributing the overlays.
+
+-------------------------------------------------------------------
+5. DISCLAIMER
+-------------------------------------------------------------------
+THE SOFTWARE AND DOCUMENTATION ARE PROVIDED "AS IS", WITHOUT
+WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. THE AUTHOR ACCEPTS NO
+RESPONSIBILITY FOR ANY DAMAGE, INCLUDING BUT NOT LIMITED TO
+HARDWARE DAMAGE, DATA LOSS, SERVICE INTERRUPTION, OR REGULATORY
+NON-COMPLIANCE, RESULTING FROM THE USE OF THIS SOFTWARE OR
+DOCUMENTATION. USE AT YOUR OWN RISK.
