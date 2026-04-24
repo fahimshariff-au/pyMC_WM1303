@@ -5,7 +5,7 @@
 #
 # Usage:
 #   reset_lgw.sh start         - Normal start (quick reset + power on)
-#   reset_lgw.sh stop          - Power down and unexport GPIOs
+#   reset_lgw.sh stop          - Power down and hold resets
 #   reset_lgw.sh deep_reset    - Extended hardware drain (>60s power off)
 
 SX1302_RESET_PIN=529

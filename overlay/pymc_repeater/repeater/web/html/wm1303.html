@@ -3507,6 +3507,8 @@ function renderPmHopsChart(channels) {
   // Force Y-axis to start at 0 so low values (like 1 hop) are clearly separated from the X-axis baseline.
   opts.scales.y.min = 0;
   opts.scales.y.beginAtZero = true;
+  // Add grace so low-hop channels (e.g. channel_a at ~1 hop) don't sit on the X-axis.
+  opts.scales.y.grace = '10%';
   pmHopsChart = new Chart(canvas, { type: 'line', data: { datasets: built.datasets }, options: opts });
 }
 
@@ -4201,7 +4203,7 @@ function renderPmCrcChart(channels) {
   function _stepDirection(name) {
     if (!name) return 'other';
     if (name === 'received' || name === 'echo_dedup' || name === 'dedup_drop' || name === 'dedup_skip' || name === 'dedup_check' || name === 'filter_drop' || name === 'bridge_inject') return 'rx';
-    if (name === 'bridge_forward' || name === 'tx_enqueue' || name === 'tx_send' || name === 'lbt_check' || name === 'cad_check') return 'tx';
+    if (name === 'bridge_forward' || name === 'tx_enqueue' || name === 'tx_send' || name === 'lbt_check' || name === 'cad_check' || name === 'cad_start') return 'tx';
     return 'other';
   }
   function _dirColor(d) {
@@ -4387,7 +4389,7 @@ function renderPmCrcChart(channels) {
             }
 
             if (isRfChainWait && prevTxAirMs > 0) {
-              var rfTxMs = prevTxAirMs + 150; // airtime + rf guard
+              var rfTxMs = prevTxAirMs + 50; // airtime + rf guard
               if (rfTxMs > _stepDelta) rfTxMs = _stepDelta;
               var remainMs = _stepDelta - rfTxMs;
               var rfCumEnd = _prevElapsed + rfTxMs;
@@ -4395,7 +4397,7 @@ function renderPmCrcChart(channels) {
                 deltaMs: rfTxMs,
                 cumEndMs: rfCumEnd,
                 label: 'rf transmission',
-                reason: 'airtime (' + prevTxAirMs.toFixed(1) + 'ms) + rf guard (150.0ms)'
+                reason: 'airtime (' + prevTxAirMs.toFixed(1) + 'ms) + rf guard (50.0ms)'
               });
               if (remainMs > 1) {
                 var _nextReason = 'scheduling delay';
@@ -4481,7 +4483,7 @@ function renderPmCrcChart(channels) {
           var _airMatch = _lastDet.match(/Airtime:\s*([0-9]+\.?[0-9]*)\s*ms/i);
           var _airMs = _airMatch ? parseFloat(_airMatch[1]) : 0;
           if (_airMs > 0) {
-            _finalWaitMs = _airMs + 150; // airtime + rf-chain guard margin
+            _finalWaitMs = _airMs + 50; // airtime + rf-chain guard margin
             var _finalEnd = _finalCumMs + _finalWaitMs;
             var _fwColor = '#f59e0b';
             html += '<div style="position:relative;padding-bottom:0;margin-left:8px">';
@@ -4493,7 +4495,7 @@ function renderPmCrcChart(channels) {
                     '<span style="color:' + _fwColor + ';font-weight:600" title="Airtime + rf-chain guard">+' + _finalWaitMs.toFixed(1) + 'ms</span>' +
                     '<span style="color:var(--txm);opacity:0.7" title="Cumulative time when RF transmission is fully complete">(' + _finalEnd.toFixed(1) + 'ms)</span>' +
                     '</span>';
-            html += '<span style="font-size:11px;color:' + _fwColor + ';flex:1 1 auto;opacity:0.9">airtime (' + _airMs.toFixed(1) + 'ms) + rf guard (150.0ms)</span>';
+            html += '<span style="font-size:11px;color:' + _fwColor + ';flex:1 1 auto;opacity:0.9">airtime (' + _airMs.toFixed(1) + 'ms) + rf guard (50.0ms)</span>';
             html += '</div></div>';
           }
         }

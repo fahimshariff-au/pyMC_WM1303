@@ -462,6 +462,7 @@ typedef struct {
     int8_t       lbt_threshold_dbm;
     bool         lbt_pass;          /* true = below threshold, TX allowed */
     uint8_t      lbt_retries;
+    uint32_t     cad_duration_ms;    /* total CAD scan time including retries (ms) */
     const char * tx_result;         /* "sent", "blocked", "send_failed" */
 } tx_ack_extra_t;
 
@@ -1867,7 +1868,7 @@ static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error,
                      "{\"txpk_ack\":{\"error\":\"%s\",\"phase\":\"post_tx\","
                      "\"tx_result\":\"%s\","
                      "\"cad\":{\"enabled\":%s,\"detected\":%s,\"retries\":%u,"
-                     "\"rssi_dbm\":%d,\"reason\":\"%s\"},"
+                     "\"rssi_dbm\":%d,\"reason\":\"%s\",\"duration_ms\":%u},"
                      "\"lbt\":{\"enabled\":%s,\"pass\":%s,\"rssi_dbm\":%d,"
                      "\"threshold_dbm\":%d,\"retries\":%u}}}",
                      err_name,
@@ -1877,6 +1878,7 @@ static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error,
                      (unsigned)extra->cad_retries,
                      (int)extra->cad_last_rssi,
                      extra->cad_reason ? extra->cad_reason : "",
+                     (unsigned)extra->cad_duration_ms,
                      extra->lbt_enabled ? "true" : "false",
                      extra->lbt_pass ? "true" : "false",
                      (int)extra->lbt_rssi_dbm,
@@ -3887,7 +3889,9 @@ void thread_down(void) {
                         if (cad_bw >= 0) {
                             imme_extra.cad_enabled = true;
                             const int CAD_MAX_RETRIES = 5;
-                            const int cad_delays_ms[] = {50, 100, 200, 300, 400};
+                            const int cad_delays_ms[] = {75, 50, 75, 50, 75};
+                            struct timeval cad_t0, cad_t1;
+                            gettimeofday(&cad_t0, NULL);
                             int cad_retry = 0;
                             bool cad_clear = false;
                             uint8_t lbt_retries = 0;
@@ -3992,6 +3996,8 @@ void thread_down(void) {
                                 }
                             }
                             imme_extra.lbt_retries = lbt_retries;
+                            gettimeofday(&cad_t1, NULL);
+                            imme_extra.cad_duration_ms = (uint32_t)((cad_t1.tv_sec - cad_t0.tv_sec) * 1000 + (cad_t1.tv_usec - cad_t0.tv_usec) / 1000);
 
                             if (!cad_clear) {
                                 imme_blocked = true;
@@ -4331,7 +4337,9 @@ void thread_jit(void) {
                                 if (cad_bw >= 0) {
                                     extra.cad_enabled = true;
                                     const int CAD_MAX_RETRIES = 5;
-                                    const int cad_delays_ms[] = {50, 100, 200, 300, 400};
+                                    const int cad_delays_ms[] = {75, 50, 75, 50, 75};
+                                    struct timeval cad_t0, cad_t1;
+                                    gettimeofday(&cad_t0, NULL);
                                     int cad_retry = 0;
                                     int cad_wait_ms __attribute__((unused)) = 0;
                                     bool cad_clear = false;
@@ -4456,6 +4464,8 @@ void thread_jit(void) {
                                         }
                                     }
                                     extra.lbt_retries = lbt_retries_in_cad;
+                                    gettimeofday(&cad_t1, NULL);
+                                    extra.cad_duration_ms = (uint32_t)((cad_t1.tv_sec - cad_t0.tv_sec) * 1000 + (cad_t1.tv_usec - cad_t0.tv_usec) / 1000);
                                     /* Post-CAD: SX1261 is already in STDBY after CAD exit.
                                        No additional cleanup needed. */
                                     if (!cad_clear) {

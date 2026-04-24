@@ -143,6 +143,22 @@ def emit_lbt_cad_trace_steps(pkt_hash8: str, channel_id: str,
                 _cad_status = 'filtered'
             else:
                 _cad_status = 'ok' if _cad_retries == 0 else 'partial'
+
+            # Get CAD duration from nested 'cad' dict or flat key
+            _cad_obj = tx_result.get('cad', {})
+            _cad_duration_ms = 0
+            if isinstance(_cad_obj, dict):
+                _cad_duration_ms = int(_cad_obj.get('duration_ms', 0) or 0)
+
+            # Emit cad_start backdated by duration, then cad_check at current time
+            if _cad_duration_ms > 0:
+                _trace(pkt_hash8, 'cad_start', channel=channel_id,
+                       pkt_type=pkt_type_name,
+                       detail='CAD scan started\n  Duration: %d ms' % _cad_duration_ms,
+                       status='ok',
+                       ts_offset_ms=float(_cad_duration_ms))
+                _parts.append('  Duration: %d ms' % _cad_duration_ms)
+
             _trace(pkt_hash8, 'cad_check', channel=channel_id,
                    pkt_type=pkt_type_name, detail='\n'.join(_parts),
                    status=_cad_status)

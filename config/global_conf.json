@@ -6,8 +6,9 @@
     "clksrc": 0,
     "antenna_gain": 0,
     "full_duplex": false,
+    "agc_reload_interval_s": 30,
     "precision_timestamp": {
-      "enable": false,
+      "enable": true,
       "max_ts_metrics": 255,
       "nb_symbols": 1
     },
@@ -110,7 +111,7 @@
       ]
     },
     "radio_1": {
-      "enable": false,
+      "enable": true,
       "type": "SX1250",
       "freq": 869525000,
       "rssi_offset": -215.4,
@@ -126,12 +127,12 @@
     "chan_multiSF_0": {
       "enable": true,
       "radio": 0,
-      "if": 0
+      "if": -63000
     },
     "chan_multiSF_1": {
-      "enable": true,
+      "enable": false,
       "radio": 0,
-      "if": 100000
+      "if": 0
     },
     "chan_multiSF_2": {
       "enable": false,
@@ -164,14 +165,14 @@
       "if": 0
     },
     "chan_Lora_std": {
-      "enable": false,
+      "enable": true,
       "radio": 0,
       "if": 0,
       "bandwidth": 250000,
       "spread_factor": 7
     },
     "chan_FSK": {
-      "enable": false,
+      "enable": true,
       "radio": 0,
       "if": 0,
       "bandwidth": 125000,
@@ -180,10 +181,18 @@
     "sx1261_conf": {
       "spi_path": "/dev/spidev0.1",
       "rssi_offset": 0,
+      "lora_rx": {
+        "enable": true,
+        "freq_hz": 869618000,
+        "bandwidth": 62500,
+        "spreading_factor": 8,
+        "coding_rate": 1,
+        "boosted": true
+      },
       "spectral_scan": {
         "enable": true,
-        "freq_start": 863000000,
-        "nb_chan": 36,
+        "freq_start": 868600000,
+        "nb_chan": 9,
         "nb_scan": 100,
         "pace_s": 300
       },
@@ -192,6 +201,23 @@
         "rssi_target": -80,
         "nb_channel": 0,
         "channels": []
+      },
+      "custom_lbt": {
+        "enable": false,
+        "cad_enable": true,
+        "rssi_target": -80,
+        "channels": [
+          {
+            "freq_hz": 869462000,
+            "lbt_enabled": false,
+            "cad_enabled": false
+          },
+          {
+            "freq_hz": 869618000,
+            "lbt_enabled": false,
+            "cad_enabled": false
+          }
+        ]
       }
     }
   },

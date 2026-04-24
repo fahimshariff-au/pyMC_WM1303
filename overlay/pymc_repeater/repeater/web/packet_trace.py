@@ -43,16 +43,24 @@ class TraceCollector:
 
     def trace_event(self, pkt_hash: str, step_name: str,
                     channel: str = '', pkt_type: str = '',
-                    detail: str = '', status: str = 'ok') -> None:
+                    detail: str = '', status: str = 'ok',
+                    ts_offset_ms: float = 0) -> None:
         """Record a trace step for the given packet hash.
 
         If a trace for this hash already exists (within TTL and without
         a large gap since the last event), the step is appended.
         Otherwise a new trace entry is created.
+
+        ts_offset_ms: if positive, backdate the step display time and
+                      elapsed_ms by this amount.  Internal tracking
+                      (gap detection, TTL, _mono_last) uses real time.
         """
-        now_mono = time.monotonic()
-        now_ts = time.time()
-        iso_now = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        real_mono = time.monotonic()
+        real_ts   = time.time()
+        # Display time may be backdated
+        display_ts   = real_ts - (ts_offset_ms / 1000.0)
+        display_mono = real_mono - (ts_offset_ms / 1000.0)
+        iso_now = datetime.fromtimestamp(display_ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
         with self._lock:
             # Find the current active trace for this base hash
@@ -60,11 +68,11 @@ class TraceCollector:
             trace = self._traces.get(lookup_key)
 
             # Check if existing trace is stale (old packet with same hash)
-            if trace and (now_mono - trace['_mono_first']) > TRACE_TTL:
+            if trace and (real_mono - trace['_mono_first']) > TRACE_TTL:
                 trace = None
 
             # Check for large gap since last event — start new trace
-            if trace and (now_mono - trace['_mono_last']) > GAP_THRESHOLD:
+            if trace and (real_mono - trace['_mono_last']) > GAP_THRESHOLD:
                 trace = None
 
             if trace is None:
@@ -88,9 +96,9 @@ class TraceCollector:
                     'status': 'ok',
                     'total_ms': 0.0,
                     'steps': [],
-                    '_mono_first': now_mono,
-                    '_mono_last': now_mono,
-                    '_ts_first': now_ts,
+                    '_mono_first': display_mono,
+                    '_mono_last': real_mono,
+                    '_ts_first': display_ts,
                 }
                 # Evict oldest if at capacity
                 if len(self._traces) >= self._maxlen:
@@ -106,7 +114,7 @@ class TraceCollector:
                 self._traces.move_to_end(lookup_key)
 
             # Update last-event timestamp
-            trace['_mono_last'] = now_mono
+            trace['_mono_last'] = real_mono
 
             # Update trace metadata
             if channel and not trace['channel']:
@@ -115,7 +123,7 @@ class TraceCollector:
                 trace['type'] = pkt_type
 
             # Compute elapsed from first step
-            elapsed_ms = round((now_mono - trace['_mono_first']) * 1000, 1)
+            elapsed_ms = round((display_mono - trace['_mono_first']) * 1000, 1)
 
             # Add step (cap at MAX_STEPS_PER_TRACE)
             if len(trace['steps']) < MAX_STEPS_PER_TRACE:
