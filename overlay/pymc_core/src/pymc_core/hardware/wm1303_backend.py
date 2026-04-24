@@ -659,6 +659,8 @@ class WM1303Backend:
         self._respawn_max_per_hour = 30        # hard cap to prevent infinite crash loops
         self._respawn_total = 0                # cumulative count since backend start
         self._consecutive_ack_timeouts = 0      # Layer 2: consecutive post-TX ACK timeouts
+        self._consecutive_crash_count = 0          # Layer 2 SX1261 escalation: consecutive pkt_fwd crashes
+        self._sx1261_escalation_threshold = 2       # after N consecutive crashes, use extended power-off
         self._l2_ack_timeout_threshold = 3      # trigger restart after N consecutive timeouts
 
 
@@ -2308,13 +2310,17 @@ class WM1303Backend:
                     continue
                 self._respawn_times.append(now_m)
                 self._respawn_total += 1
+                self._consecutive_crash_count += 1
+                _escalate = self._consecutive_crash_count >= self._sx1261_escalation_threshold
                 logger.warning(
                     'WM1303Backend: WATCHDOG [PROCESS_EXIT] - pkt_fwd has exited '
-                    '(code=%s), respawning (count=%d/%d in last hour, total=%d since start)',
+                    '(code=%s), respawning (count=%d/%d in last hour, total=%d since start, '
+                    'consecutive=%d, escalate=%s)',
                     exit_code, len(self._respawn_times),
-                    self._respawn_max_per_hour, self._respawn_total
+                    self._respawn_max_per_hour, self._respawn_total,
+                    self._consecutive_crash_count, _escalate
                 )
-                self._do_watchdog_restart('process_exit')
+                self._do_watchdog_restart('process_exit', escalate=_escalate)
                 continue
 
 
@@ -2377,39 +2383,61 @@ class WM1303Backend:
                         elapsed, self._zero_rx_stat_count, self._rssi_spike_count)
         logger.info('WM1303Backend: RX watchdog stopped')
 
-    def _do_watchdog_restart(self, trigger_reason: str) -> None:
+    def _do_watchdog_restart(self, trigger_reason: str, escalate: bool = False) -> None:
         """Common restart logic for all watchdog triggers.
 
         Performs a full hardware power-cycle (GPIO drain reset) before
         restarting pkt_fwd to ensure clean SX1302/SX1250/SX1261 state.
-        """
-        logger.warning('WM1303Backend: WATCHDOG restart triggered by: %s', trigger_reason)
-        try:
-            # Step 1: Full hardware power-cycle to clear any corrupted radio state.
-            # This is more thorough than the standard reset_lgw.sh and includes
-            # a 3s power-off drain to clear all internal capacitor charge.
-            _power_cycle = PKTFWD_DIR / 'power_cycle_lgw.sh'
-            if _power_cycle.exists():
-                logger.info('WM1303Backend: WATCHDOG - running hardware power cycle before restart')
-                try:
-                    _r = subprocess.run(
-                        ['sudo', 'bash', str(_power_cycle)],
-                        cwd=str(PKTFWD_DIR), capture_output=True, timeout=30
-                    )
-                    logger.info('WM1303Backend: WATCHDOG - power cycle done (rc=%d)', _r.returncode)
-                except Exception as _e:
-                    logger.warning('WM1303Backend: WATCHDOG - power cycle failed: %s', _e)
-            else:
-                logger.info('WM1303Backend: WATCHDOG - power_cycle_lgw.sh not found, using standard reset')
 
-            # Step 2: Restart pkt_fwd (includes standard GPIO reset + TCXO warmup)
+        If *escalate* is True (SX1261 hard-stuck after consecutive crashes),
+        uses an extended 15s power-off drain via reset_lgw.sh deep_reset
+        instead of the standard 3s power_cycle_lgw.sh.
+        """
+        logger.warning('WM1303Backend: WATCHDOG restart triggered by: %s (escalate=%s)',
+                      trigger_reason, escalate)
+        try:
+            if escalate:
+                # Extended power-off drain to recover SX1261 from hard-stuck state.
+                # The SX1261 can latch into status 0x00 after repeated failed starts;
+                # only a prolonged power-off (>=10s) clears this condition.
+                _reset_script = PKTFWD_DIR / 'reset_lgw.sh'
+                if _reset_script.exists():
+                    logger.warning('WM1303Backend: WATCHDOG - ESCALATED: running extended '
+                                  'deep_reset (15s drain) to recover SX1261')
+                    try:
+                        _r = subprocess.run(
+                            ['sudo', 'bash', str(_reset_script), 'deep_reset', '15'],
+                            cwd=str(PKTFWD_DIR), capture_output=True, timeout=60
+                        )
+                        logger.info('WM1303Backend: WATCHDOG - deep_reset done (rc=%d)', _r.returncode)
+                    except Exception as _e:
+                        logger.warning('WM1303Backend: WATCHDOG - deep_reset failed: %s', _e)
+                else:
+                    logger.warning('WM1303Backend: WATCHDOG - reset_lgw.sh not found for escalation')
+            else:
+                # Standard power-cycle (3s drain) for normal restarts.
+                _power_cycle = PKTFWD_DIR / 'power_cycle_lgw.sh'
+                if _power_cycle.exists():
+                    logger.info('WM1303Backend: WATCHDOG - running hardware power cycle before restart')
+                    try:
+                        _r = subprocess.run(
+                            ['sudo', 'bash', str(_power_cycle)],
+                            cwd=str(PKTFWD_DIR), capture_output=True, timeout=30
+                        )
+                        logger.info('WM1303Backend: WATCHDOG - power cycle done (rc=%d)', _r.returncode)
+                    except Exception as _e:
+                        logger.warning('WM1303Backend: WATCHDOG - power cycle failed: %s', _e)
+                else:
+                    logger.info('WM1303Backend: WATCHDOG - power_cycle_lgw.sh not found, using standard reset')
+
+            # Restart pkt_fwd (includes standard GPIO reset + TCXO warmup)
             self._restart_pkt_fwd()
             self._last_rx_timestamp = time.monotonic()
             self._zero_rx_stat_count = 0
             self._rssi_spike_count = 0
             self._rssi_spike_window_start = time.monotonic()
-            logger.info('WM1303Backend: WATCHDOG - pkt_fwd restart complete (trigger=%s)',
-                       trigger_reason)
+            logger.info('WM1303Backend: WATCHDOG - pkt_fwd restart complete (trigger=%s, escalate=%s)',
+                       trigger_reason, escalate)
         except Exception as e:
             logger.error('WM1303Backend: WATCHDOG restart failed (trigger=%s): %s',
                         trigger_reason, e)
@@ -2912,6 +2940,7 @@ class WM1303Backend:
                 self._last_rx_timestamp = time.monotonic()  # watchdog: RX activity
                 self._zero_rx_stat_count = 0  # reset stat monitor on valid RX
                 self._rssi_spike_count = 0    # reset RSSI spike monitor on valid RX
+                self._consecutive_crash_count = 0  # reset SX1261 escalation on valid RX
                 self._update_rx_stats(cid, freq_hz, rssi, snr)
                 # TX batch hold: dynamic delay based on queue depth
                 _dynamic_hold = self._calculate_dynamic_tx_hold()

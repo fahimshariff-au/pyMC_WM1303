@@ -4112,21 +4112,21 @@ void thread_down(void) {
                             }
                         }
 
-                        /* Schedule non-blocking LoRa RX restart after TX airtime */
+                        /* Blocking LoRa RX restart: wait for TX airtime then
+                           immediately restart the SX1261 in RX mode. This avoids
+                           the non-blocking deferred restart which was unreliable
+                           under heavy TX load and caused the SX1261 to get stuck. */
                         {
-                            struct timespec rx_ts;
-                            clock_gettime(CLOCK_MONOTONIC, &rx_ts);
-                            uint64_t rx_add_ns = (uint64_t)(imme_airtime_ms + 20) * 1000000ULL;
-                            rx_ts.tv_nsec += rx_add_ns;
-                            rx_ts.tv_sec  += rx_ts.tv_nsec / 1000000000;
-                            rx_ts.tv_nsec  = rx_ts.tv_nsec % 1000000000;
-                            if (!custom_lbt_rx_restart_pending ||
-                                difftimespec(rx_ts, custom_lbt_rx_restart_after) > 0) {
-                                custom_lbt_rx_restart_after = rx_ts;
-                            }
-                            custom_lbt_rx_restart_pending = true;
-                            MSG("INFO: [imme] SX1261 RX restart scheduled in %u ms\n",
+                            uint32_t wait_us = (imme_airtime_ms + 20) * 1000;
+                            MSG("INFO: [imme] SX1261 blocking RX restart: waiting %u ms\n",
                                 imme_airtime_ms + 20);
+                            usleep(wait_us);
+                            pthread_mutex_lock(&mx_concent);
+                            sx1261_set_tx_inhibit_rx(false);
+                            sx1261_lora_rx_restart_light();
+                            pthread_mutex_unlock(&mx_concent);
+                            custom_lbt_rx_restart_pending = false;
+                            MSG("INFO: [imme] SX1261 LoRa RX restarted (blocking)\n");
                         }
 
                         /* Emit post-TX ACK with CAD/LBT results */
@@ -4213,13 +4213,8 @@ void thread_jit(void) {
     while (!exit_sig && !quit_sig) {
         wait_ms(1); /* WM1303: reduced from 10ms to 1ms for faster TX pickup */
 
-        /* Non-blocking LoRa RX restart: check if the TX airtime has elapsed
-           and it's safe to put the SX1261 back into LoRa RX mode.
-           This runs every ~1ms without blocking the JIT thread.
-           IMPORTANT: while restart is pending, we do NOT allow new TX packets
-           to be picked up. This prevents the inhibit flag from being re-set
-           before the restart completes, which caused channel E RX starvation
-           on busy gateways (Pi03: 108 skipped restarts in 2 minutes). */
+        /* Safety fallback: if a blocking RX restart was somehow missed
+           (should not happen), catch it here and restart immediately. */
         if (custom_lbt_rx_restart_pending) {
             struct timespec now_ts;
             clock_gettime(CLOCK_MONOTONIC, &now_ts);
@@ -4229,10 +4224,9 @@ void thread_jit(void) {
                 sx1261_lora_rx_restart_light();
                 pthread_mutex_unlock(&mx_concent);
                 custom_lbt_rx_restart_pending = false;
-                MSG("INFO: [jit] TX airtime elapsed, LoRa RX restarted (non-blocking)\n");
+                MSG("WARNING: [jit] SX1261 RX restart fallback triggered (blocking restart missed!)\n");
             } else {
-                /* Airtime not yet elapsed — skip TX pickup this iteration.
-                   The SX1261 must be restarted before we allow new TX. */
+                /* Still waiting — skip TX pickup this iteration */
                 continue;
             }
         }
@@ -4645,27 +4639,20 @@ void thread_jit(void) {
                                 }
                             }
 
-                            /* Schedule non-blocking LoRa RX restart after TX airtime.
-                               The SX1302 emits RF autonomously after lgw_send; we must
-                               keep the SX1261 off (FEM in neutral) for the full airtime
-                               so the PA can drive the antenna. The JIT loop checks the
-                               timestamp at each iteration and restarts RX when it expires. */
+                            /* Blocking LoRa RX restart: wait for TX airtime then
+                               immediately restart the SX1261 in RX mode. */
                             {
-                                struct timespec rx_ts;
-                                clock_gettime(CLOCK_MONOTONIC, &rx_ts);
-                                uint64_t rx_add_ns = (uint64_t)(est_airtime_ms + 20) * 1000000ULL;
-                                rx_ts.tv_nsec += rx_add_ns;
-                                rx_ts.tv_sec  += rx_ts.tv_nsec / 1000000000;
-                                rx_ts.tv_nsec  = rx_ts.tv_nsec % 1000000000;
-                                /* Only extend, never shorten the restart window */
-                                if (!custom_lbt_rx_restart_pending ||
-                                    difftimespec(rx_ts, custom_lbt_rx_restart_after) > 0) {
-                                    custom_lbt_rx_restart_after = rx_ts;
-                                }
-                                custom_lbt_rx_restart_pending = true;
-                                MSG("INFO: [jit] LoRa RX restart scheduled in %u ms "
+                                uint32_t wait_us = (est_airtime_ms + 20) * 1000;
+                                MSG("INFO: [jit] SX1261 blocking RX restart: waiting %u ms "
                                     "(rf_chain %d, freq=%u Hz)\n",
                                     est_airtime_ms + 20, i, pkt.freq_hz);
+                                usleep(wait_us);
+                                pthread_mutex_lock(&mx_concent);
+                                sx1261_set_tx_inhibit_rx(false);
+                                sx1261_lora_rx_restart_light();
+                                pthread_mutex_unlock(&mx_concent);
+                                custom_lbt_rx_restart_pending = false;
+                                MSG("INFO: [jit] SX1261 LoRa RX restarted (blocking, rf_chain %d)\n", i);
                             }
                         }
                     } else {
