@@ -3888,8 +3888,8 @@ void thread_down(void) {
                         int cad_bw = custom_lbt_hal_bw_to_cad(txpkt.bandwidth);
                         if (cad_bw >= 0) {
                             imme_extra.cad_enabled = true;
-                            const int CAD_MAX_RETRIES = 5;
-                            const int cad_delays_ms[] = {75, 50, 75, 50, 75};
+                            const int CAD_MAX_RETRIES = 15;
+                            const int cad_delays_ms[] = {10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10};
                             struct timeval cad_t0, cad_t1;
                             gettimeofday(&cad_t0, NULL);
                             int cad_retry = 0;
@@ -4330,8 +4330,8 @@ void thread_jit(void) {
                                 int cad_bw = custom_lbt_hal_bw_to_cad(pkt.bandwidth);
                                 if (cad_bw >= 0) {
                                     extra.cad_enabled = true;
-                                    const int CAD_MAX_RETRIES = 5;
-                                    const int cad_delays_ms[] = {75, 50, 75, 50, 75};
+                                    const int CAD_MAX_RETRIES = 15;
+                                    const int cad_delays_ms[] = {10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10};
                                     struct timeval cad_t0, cad_t1;
                                     gettimeofday(&cad_t0, NULL);
                                     int cad_retry = 0;

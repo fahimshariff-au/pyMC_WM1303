@@ -23,6 +23,14 @@ This patch release fixes a critical SX1261 RX starvation issue where Channel E s
 - Counter resets to 0 on successful RX, preventing false escalation
 - This provides a safety net for rare SX1261 hardware latch states that survive normal GPIO resets
 
+### CAD Retry Configuration (`lora_pkt_fwd.c`)
+
+- **Increased CAD_MAX_RETRIES from 5 to 15** for more persistent channel-clear detection
+- **Reduced retry delays to alternating 10/15ms** (from original 50-400ms) for faster CAD cycling
+- Delay pattern: `{10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10, 15, 10}` ms
+- Worst-case CAD duration: ~809ms (16 scans × 39ms + 15 delays × ~12.5ms avg)
+- Applied to both direct-send and JIT TX paths
+
 ## Problem Description
 
 When Channel A was configured with SF10 (longer airtime ~567ms vs ~100ms at SF7), bridge traffic generated rapid TX bursts on Channel E. The non-blocking RX restart scheduled a deferred restart timestamp, but under heavy TX load, each new TX would extend the timestamp, causing the SX1261 to never return to RX mode. Channel E would die after ~60 seconds.
