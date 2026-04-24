@@ -66,23 +66,23 @@ sometimes OK, sometimes fails → L2 process restart → AGC reload → ...
 | File | Change |
 |---|---|
 | `overlay/hal/libloragw/src/loragw_hal.c` | Removed all custom recovery code (clean-slate) |
-| `overlay/hal/libloragw/src/loragw_sx1302.c` | Synced with pi03 reference |
-| `overlay/hal/libloragw/src/loragw_sx1261.c` | Synced with pi03 reference |
+| `overlay/hal/libloragw/src/loragw_sx1302.c` | Synced with test Sensecap M1 WM1303 reference |
+| `overlay/hal/libloragw/src/loragw_sx1261.c` | Synced with test Sensecap M1 WM1303 reference |
 | `overlay/hal/libloragw/src/loragw_spi.c` | SPI speed 4 MHz |
-| `overlay/hal/libloragw/src/loragw_aux.c` | Synced with pi03 reference |
-| `overlay/hal/libloragw/src/loragw_lbt.c` | Synced with pi03 reference |
-| `overlay/hal/libloragw/src/sx1261_spi.c` | Synced with pi03 reference |
-| `overlay/hal/libloragw/inc/*.h` | All headers synced with pi03 |
+| `overlay/hal/libloragw/src/loragw_aux.c` | Synced with test Sensecap M1 WM1303 reference |
+| `overlay/hal/libloragw/src/loragw_lbt.c` | Synced with test Sensecap M1 WM1303 reference |
+| `overlay/hal/libloragw/src/sx1261_spi.c` | Synced with test Sensecap M1 WM1303 reference |
+| `overlay/hal/libloragw/inc/*.h` | All headers synced with test Sensecap M1 WM1303 |
 | `overlay/hal/packet_forwarder/src/lora_pkt_fwd.c` | CAD duration tracking, optimized retry delays |
-| `overlay/hal/packet_forwarder/src/capture_thread.c` | Synced with pi03 reference |
-| `overlay/hal/packet_forwarder/inc/capture_thread.h` | Synced with pi03 reference |
+| `overlay/hal/packet_forwarder/src/capture_thread.c` | Synced with test Sensecap M1 WM1303 reference |
+| `overlay/hal/packet_forwarder/inc/capture_thread.h` | Synced with test Sensecap M1 WM1303 reference |
 | `overlay/pymc_repeater/repeater/bridge_engine.py` | `cad_start` trace event emission |
 | `overlay/pymc_repeater/repeater/web/packet_trace.py` | `ts_offset_ms` backdate support |
 | `overlay/pymc_repeater/repeater/web/wm1303_backend.py` | Watchdog 1s poll interval |
 | `overlay/pymc_repeater/repeater/web/html/wm1303.html` | RF guard 50ms, chart grace, cad_start step |
-| `config/config.yaml.template` | Synced with pi03 |
-| `config/global_conf.json` | Synced with pi03 |
-| `config/reset_lgw.sh` | Synced with pi03 |
+| `config/config.yaml.template` | Synced with test Sensecap M1 WM1303 |
+| `config/global_conf.json` | Synced with test Sensecap M1 WM1303 |
+| `config/reset_lgw.sh` | Synced with test Sensecap M1 WM1303 |
 
 ## Lessons Learned
 

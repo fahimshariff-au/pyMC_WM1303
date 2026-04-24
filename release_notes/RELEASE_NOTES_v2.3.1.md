@@ -29,7 +29,7 @@ When Channel A was configured with SF10 (longer airtime ~567ms vs ~100ms at SF7)
 
 ## Verification
 
-- Tested on Pi03 with Channel A at SF10 (worst case for TX burst density)
+- Tested on test Sensecap M1 WM1303 with Channel A at SF10 (worst case for TX burst density)
 - Channel E maintained stable operation: 10+ RX/min and 20+ TX/min for 3+ minutes (previously died after ~1 minute)
 - No fallback warnings triggered (blocking restart always completes)
 

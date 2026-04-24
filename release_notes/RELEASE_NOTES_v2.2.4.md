@@ -108,7 +108,7 @@ This release resolves critical TX reliability issues on both channels and improv
 ## Known issues
 
 - **SX1302 correlator stalls** continue to occur intermittently (L1/L1.5 recovery). The existing recovery chain (L1 → L1.5 → process restart) handles these, but brief RX gaps (~5-30s) may occur during recovery cycles.
-- **Pi02 connectivity** was intermittently slow during verification; binary and Python files were confirmed matching pi03 via earlier checks.
+- **test Sensecap M1 WM1303 connectivity** was intermittently slow during verification; binary and Python files were confirmed matching test Sensecap M1 WM1303 via earlier checks.
 
 ---
 
