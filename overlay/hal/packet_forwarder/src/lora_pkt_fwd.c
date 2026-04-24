@@ -15,6 +15,26 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 */
 
 
+/*
+ * ----------------------------------------------------------------------
+ * pyMC_WM1303 — WM1303 Repeater adaptations
+ * ----------------------------------------------------------------------
+ * Copyright (c) 2026 HansvanMeer  (GitHub: @HansvanMeer)
+ *
+ * Licensed under the PolyForm Noncommercial License 1.0.0.
+ * See LICENSE and COMMERCIAL.md in the pyMC_WM1303 repository:
+ *   https://github.com/HansvanMeer/pyMC_WM1303
+ *
+ * Any portions of this file derived from Semtech's sx1302_hal remain
+ * under Semtech's Revised BSD License (where applicable, see header
+ * above). Modifications and original additions in this file are
+ * licensed under PolyForm Noncommercial 1.0.0.
+ *
+ * Commercial use is NOT permitted without a separate written agreement.
+ * See COMMERCIAL.md for commercial licensing inquiries.
+ * ----------------------------------------------------------------------
+ */
+
 /* -------------------------------------------------------------------------- */
 /* --- DEPENDANCIES --------------------------------------------------------- */
 
@@ -4036,6 +4056,7 @@ void thread_down(void) {
                     /* === Direct send (CAD/LBT clear or forced) === */
                     /* SX1261 TX inhibit is already ON from CAD loop */
                     int send_err = lgw_send(&txpkt);
+                    gettimeofday(&lgw_forensic_last_tx, NULL); /* forensic: track TX event */
                     pthread_mutex_unlock(&mx_concent);
 
                     if (send_err == LGW_HAL_SUCCESS) {
@@ -4531,6 +4552,7 @@ void thread_jit(void) {
                         /* Do NOT restart LoRa RX here — SX1302 TX is in progress.
                            The FEM must stay in TX/neutral mode for the full airtime.
                            We release the mutex but keep the inhibit active. */
+                        gettimeofday(&lgw_forensic_last_tx, NULL); /* forensic: track TX event */
                         pthread_mutex_unlock(&mx_concent); /* free concentrator ASAP */
                         if (result != LGW_HAL_SUCCESS) {
                             /* TX failed — release inhibit and restart RX immediately */
@@ -5001,6 +5023,7 @@ void thread_spectral_scan(void) {
 
                 /* Force start spectral scan regardless of TX FSM status */
                 x = lgw_spectral_scan_start(freq_hz, spectral_scan_params.nb_scan);
+                gettimeofday(&lgw_forensic_last_spectral, NULL); /* forensic: track spectral scan */
                 spectral_scan_started = true;
                 printf("INFO: spectral scan FORCED start on freq=%u Hz (chan %d/%d), sweep_idx=%d (recovery after %d deferrals)\n",
                        freq_hz, sweep_idx+1, sweep_total, sweep_idx, deferred_count);
@@ -5021,6 +5044,7 @@ void thread_spectral_scan(void) {
         pthread_mutex_lock(&mx_concent);
         x = lgw_spectral_scan_start(freq_hz, spectral_scan_params.nb_scan);
         spectral_scan_started = true;
+        gettimeofday(&lgw_forensic_last_spectral, NULL); /* forensic: track spectral scan */
         printf("INFO: spectral scan started on freq=%u Hz (chan %d/%d), sweep_idx=%d\n", freq_hz, sweep_idx+1, sweep_total, sweep_idx);
         fflush(stdout);
         pthread_mutex_unlock(&mx_concent);

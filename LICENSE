@@ -60,10 +60,20 @@ This project depends on and overlays the following third-party
 projects, which retain their own licenses:
 
   - sx1302_hal (Semtech / Revised BSD License)
+      Files under overlay/hal/libloragw/ and overlay/hal/packet_forwarder/
+      contain modifications of Semtech's BSD-licensed HAL. These files
+      are dual-licensed: the original Semtech code retains its Revised
+      BSD License, and the modifications by HansvanMeer are licensed
+      under PolyForm Noncommercial 1.0.0. Exceptions:
+        * overlay/hal/packet_forwarder/src/capture_thread.c
+        * overlay/hal/packet_forwarder/inc/capture_thread.h
+      are original work by HansvanMeer (not derived from Semtech code)
+      and are licensed solely under PolyForm Noncommercial 1.0.0.
+
   - pyMC_core  (MeshCore project / original license)
   - pyMC_Repeater (MeshCore project / original license)
 
-These licenses are not affected by this repository's license and
+Third-party licenses are not affected by this repository's license and
 must be respected when using or redistributing the overlays.
 
 -------------------------------------------------------------------

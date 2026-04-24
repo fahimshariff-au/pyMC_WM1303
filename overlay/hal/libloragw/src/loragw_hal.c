@@ -13,6 +13,26 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 */
 
 
+/*
+ * ----------------------------------------------------------------------
+ * pyMC_WM1303 — WM1303 Repeater adaptations
+ * ----------------------------------------------------------------------
+ * Copyright (c) 2026 HansvanMeer  (GitHub: @HansvanMeer)
+ *
+ * Licensed under the PolyForm Noncommercial License 1.0.0.
+ * See LICENSE and COMMERCIAL.md in the pyMC_WM1303 repository:
+ *   https://github.com/HansvanMeer/pyMC_WM1303
+ *
+ * Any portions of this file derived from Semtech's sx1302_hal remain
+ * under Semtech's Revised BSD License (where applicable, see header
+ * above). Modifications and original additions in this file are
+ * licensed under PolyForm Noncommercial 1.0.0.
+ *
+ * Commercial use is NOT permitted without a separate written agreement.
+ * See COMMERCIAL.md for commercial licensing inquiries.
+ * ----------------------------------------------------------------------
+ */
+
 /* -------------------------------------------------------------------------- */
 /* --- DEPENDANCIES --------------------------------------------------------- */
 
@@ -118,6 +138,11 @@ uint32_t agc_periodic_reload_interval_s = 30;
    Polled by pkt_fwd main loop to trigger process exit + full hardware reset. */
 volatile bool lgw_l2_restart_requested = false;
 
+/* Pre-stall forensic timestamps: updated by pkt_fwd, read by lgw_receive() stall detector.
+   These help identify what event preceded an SX1302 RX stall. */
+struct timeval lgw_forensic_last_tx = {0, 0};
+struct timeval lgw_forensic_last_agc = {0, 0};
+struct timeval lgw_forensic_last_spectral = {0, 0};
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE VARIABLES ---------------------------------------------------- */
@@ -1334,6 +1359,7 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
                 sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
                 sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
                 last_agc_reload = now;
+                lgw_forensic_last_agc = now; /* forensic: track AGC reload */
                 printf("INFO: [agc_periodic] done — next in %us\n", agc_periodic_reload_interval_s);
                 fflush(stdout);
             }
@@ -1347,64 +1373,133 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
         return LGW_HAL_ERROR;
     }
 
-    /* WM1303 Layered RX stall recovery:
-       L1   (3×): Correlator reinit — fast, writes ~6 registers (~5ms)
-       L1.5 (1×): Deep modem reinit — writes ALL ~40+ registers (~15ms)
-       L2       : Process exit → Python respawns with full GPIO reset (~8s)
-       Each layer only fires if the previous one failed to restore RX. */
+    /* WM1303 Structural RX stall prevention & recovery (v4):
+
+       PROACTIVE: After every TX, immediately reinit correlator to prevent stall.
+       L1a (1×):  Light correlator reinit (~5ms)
+       L1b (1×):  Full modem+correlator+AGC reinit (~15ms)
+       L1c (1×):  Full reinit + extended stabilisation (~50ms)
+       L2:        Process exit → Python respawns with full GPIO reset
+
+       History:
+         v1: 5s/3×L1+L1.5+L2 → L1/L1.5 never worked, 40s downtime
+         v2: 3s/1×L1+L2 → L1 works 88%, 21s worst case
+         v3: 1s/1×fullL1+L2 → false positives, rapid crash loops
+         v4: 2s/3-tier L1+L2 → balanced detection, escalating recovery */
     {
         static struct timeval last_sx1302_rx = {0, 0};
-        static int recovery_level = 0;   /* 0=idle, 1-3=L1 attempts, 4=L1.5, 5=L2 */
-        #define STALL_TIMEOUT_S     5    /* seconds of zero SX1302 RX before next action */
-        #define L1_MAX_ATTEMPTS     3
+        static int recovery_level = 0;   /* 0=idle, 1=L1a, 2=L1b, 3=L1c, 4=L2 */
+        #define STALL_TIMEOUT_S     2    /* 2s detection — balanced false-positive/speed */
+        #define L1_MAX_ATTEMPTS     3    /* 3-tier escalating recovery */
+
+        /* Pre-stall forensics */
+        static unsigned int stall_count_total = 0;
+        static unsigned int l2_restart_count = 0;
+        static unsigned int proactive_reinit_count = 0;
+        static unsigned int l1a_success = 0, l1b_success = 0, l1c_success = 0;
 
         struct timeval l1_now;
         gettimeofday(&l1_now, NULL);
 
+        /* --- PROACTIVE: post-TX correlator reinit --- */
+        {
+            static struct timeval last_proactive_check = {0, 0};
+            if (lgw_forensic_last_tx.tv_sec > 0 &&
+                (last_proactive_check.tv_sec == 0 ||
+                 lgw_forensic_last_tx.tv_sec > last_proactive_check.tv_sec ||
+                 (lgw_forensic_last_tx.tv_sec == last_proactive_check.tv_sec &&
+                  lgw_forensic_last_tx.tv_usec > last_proactive_check.tv_usec))) {
+                sx1302_correlator_disable();
+                wait_ms(1);
+                sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
+                sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
+                last_proactive_check = lgw_forensic_last_tx;
+                proactive_reinit_count++;
+                if ((proactive_reinit_count % 50) == 1) {
+                    printf("INFO: [proactive] post-TX reinit #%u\n", proactive_reinit_count);
+                    fflush(stdout);
+                }
+            }
+        }
+
         if (nb_pkt_fetched > 0) {
-            /* SX1302 received packets — reset all stall tracking */
+            /* SX1302 received packets — track which recovery level succeeded */
             if (recovery_level > 0) {
-                printf("INFO: [recovery] RX restored at level %d — resetting\n", recovery_level);
+                if (recovery_level == 1) l1a_success++;
+                else if (recovery_level == 2) l1b_success++;
+                else if (recovery_level == 3) l1c_success++;
+                printf("INFO: [recovery] RX restored at L1%c (stalls=%u L2=%u proactive=%u "
+                       "success: a=%u b=%u c=%u)\n",
+                       'a' + recovery_level - 1,
+                       stall_count_total, l2_restart_count, proactive_reinit_count,
+                       l1a_success, l1b_success, l1c_success);
+                fflush(stdout);
             }
             last_sx1302_rx = l1_now;
             recovery_level = 0;
         } else if (last_sx1302_rx.tv_sec > 0) {
-            /* No SX1302 packets this cycle — check stall duration */
             long stall_s = l1_now.tv_sec - last_sx1302_rx.tv_sec;
 
             if (stall_s >= STALL_TIMEOUT_S && recovery_level < L1_MAX_ATTEMPTS) {
-                /* L1: correlator reinit (fast, ~6 registers) */
                 recovery_level++;
-                printf("WARNING: [L1 recovery] SX1302 RX stall detected (%lds, attempt %d/%d) — correlator reinit\n",
-                       stall_s, recovery_level, L1_MAX_ATTEMPTS);
-                sx1302_correlator_disable();
-                wait_ms(1);
-                sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
-                sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
-                last_sx1302_rx = l1_now;  /* reset timer for next check */
-                printf("INFO: [L1 recovery] correlator reinit #%d complete\n", recovery_level);
+                if (recovery_level == 1) stall_count_total++;
 
-            } else if (stall_s >= STALL_TIMEOUT_S && recovery_level == L1_MAX_ATTEMPTS) {
-                /* L1.5: deep modem reinit — restores ALL modem, correlator, and AGC registers */
-                recovery_level = L1_MAX_ATTEMPTS + 1;
-                printf("WARNING: [L1.5 recovery] L1 exhausted — attempting deep modem reinit (ch_mask=0x%02X, sf_mask=0x%02X)\n", recovery_ch_mask, recovery_sf_mask);
-                sx1302_correlator_disable();
-                wait_ms(1);
-                /* Restore per-SF correlator parameters (ACC_PNR, MSP_PNR, etc.) */
-                sx1302_lora_correlator_configure(CONTEXT_IF_CHAIN, &(CONTEXT_DEMOD));
-                /* Restore modem registers (~40+ registers) */
-                sx1302_lora_modem_configure(CONTEXT_RF_CHAIN[0].freq_hz);
-                sx1302_modem_enable();
-                sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
-                sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
-                last_sx1302_rx = l1_now;  /* reset timer for L2 check */
-                printf("INFO: [L1.5 recovery] deep modem reinit complete\n");
+                /* Forensic dump on first detection */
+                if (recovery_level == 1) {
+                    long since_tx = (lgw_forensic_last_tx.tv_sec > 0) ? (l1_now.tv_sec - lgw_forensic_last_tx.tv_sec) : -1;
+                    long since_agc = (lgw_forensic_last_agc.tv_sec > 0) ? (l1_now.tv_sec - lgw_forensic_last_agc.tv_sec) : -1;
+                    long since_spectral = (lgw_forensic_last_spectral.tv_sec > 0) ? (l1_now.tv_sec - lgw_forensic_last_spectral.tv_sec) : -1;
+                    printf("WARNING: [stall #%u] detected (%lds) — "
+                           "tx=%lds agc=%lds spectral=%lds proactive=%u\n",
+                           stall_count_total, stall_s, since_tx, since_agc, since_spectral, proactive_reinit_count);
+                    fflush(stdout);
+                }
 
-            } else if (stall_s >= STALL_TIMEOUT_S && recovery_level > L1_MAX_ATTEMPTS) {
-                /* L2: all software recovery failed — request process exit.
-                   Python backend (Detection 4) will respawn pkt_fwd
-                   with a full hardware GPIO reset. */
-                printf("CRITICAL: [L2 escalation] L1 + L1.5 recovery failed (stall %lds) — requesting process restart\n", stall_s);
+                if (recovery_level == 1) {
+                    /* L1a: light correlator reinit — fast, ~5ms */
+                    printf("INFO: [L1a] light correlator reinit\n");
+                    fflush(stdout);
+                    sx1302_correlator_disable();
+                    wait_ms(1);
+                    sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
+                    sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
+                } else if (recovery_level == 2) {
+                    /* L1b: full modem+correlator+AGC reinit — ~15ms */
+                    printf("INFO: [L1b] full modem+correlator reinit\n");
+                    fflush(stdout);
+                    sx1302_correlator_disable();
+                    wait_ms(1);
+                    sx1302_lora_correlator_configure(CONTEXT_IF_CHAIN, &(CONTEXT_DEMOD));
+                    sx1302_lora_modem_configure(CONTEXT_RF_CHAIN[0].freq_hz);
+                    sx1302_modem_enable();
+                    sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
+                    sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
+                } else if (recovery_level == 3) {
+                    /* L1c: full reinit + extended stabilisation — ~50ms */
+                    printf("INFO: [L1c] full reinit + extended stabilisation\n");
+                    fflush(stdout);
+                    sx1302_correlator_disable();
+                    wait_ms(5);
+                    sx1302_lora_correlator_configure(CONTEXT_IF_CHAIN, &(CONTEXT_DEMOD));
+                    sx1302_lora_modem_configure(CONTEXT_RF_CHAIN[0].freq_hz);
+                    sx1302_modem_enable();
+                    wait_ms(10);
+                    sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
+                    wait_ms(10);
+                    sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
+                    wait_ms(20);
+                }
+                lgw_forensic_last_agc = l1_now;
+                last_sx1302_rx = l1_now;  /* reset timer for next level */
+
+            } else if (stall_s >= STALL_TIMEOUT_S && recovery_level >= L1_MAX_ATTEMPTS) {
+                /* L2: all L1 tiers failed — request process exit */
+                l2_restart_count++;
+                printf("CRITICAL: [L2] all L1 tiers failed (stall %lds, stalls=%u, L2=%u, "
+                       "success: a=%u b=%u c=%u) — requesting restart\n",
+                       stall_s, stall_count_total, l2_restart_count,
+                       l1a_success, l1b_success, l1c_success);
+                fflush(stdout);
                 lgw_l2_restart_requested = true;
             }
         } else {

@@ -14,6 +14,26 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 */
 
 
+/*
+ * ----------------------------------------------------------------------
+ * pyMC_WM1303 — WM1303 Repeater adaptations
+ * ----------------------------------------------------------------------
+ * Copyright (c) 2026 HansvanMeer  (GitHub: @HansvanMeer)
+ *
+ * Licensed under the PolyForm Noncommercial License 1.0.0.
+ * See LICENSE and COMMERCIAL.md in the pyMC_WM1303 repository:
+ *   https://github.com/HansvanMeer/pyMC_WM1303
+ *
+ * Any portions of this file derived from Semtech's sx1302_hal remain
+ * under Semtech's Revised BSD License (where applicable, see header
+ * above). Modifications and original additions in this file are
+ * licensed under PolyForm Noncommercial 1.0.0.
+ *
+ * Commercial use is NOT permitted without a separate written agreement.
+ * See COMMERCIAL.md for commercial licensing inquiries.
+ * ----------------------------------------------------------------------
+ */
+
 #ifndef _LORAGW_SX1261_H
 #define _LORAGW_SX1261_H
 

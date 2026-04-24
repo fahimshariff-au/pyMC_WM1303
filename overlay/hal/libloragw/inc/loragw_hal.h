@@ -13,6 +13,26 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 */
 
 
+/*
+ * ----------------------------------------------------------------------
+ * pyMC_WM1303 — WM1303 Repeater adaptations
+ * ----------------------------------------------------------------------
+ * Copyright (c) 2026 HansvanMeer  (GitHub: @HansvanMeer)
+ *
+ * Licensed under the PolyForm Noncommercial License 1.0.0.
+ * See LICENSE and COMMERCIAL.md in the pyMC_WM1303 repository:
+ *   https://github.com/HansvanMeer/pyMC_WM1303
+ *
+ * Any portions of this file derived from Semtech's sx1302_hal remain
+ * under Semtech's Revised BSD License (where applicable, see header
+ * above). Modifications and original additions in this file are
+ * licensed under PolyForm Noncommercial 1.0.0.
+ *
+ * Commercial use is NOT permitted without a separate written agreement.
+ * See COMMERCIAL.md for commercial licensing inquiries.
+ * ----------------------------------------------------------------------
+ */
+
 #ifndef _LORAGW_HAL_H
 #define _LORAGW_HAL_H
 
@@ -21,6 +41,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 
 #include <stdint.h>     /* C99 types */
 #include <stdbool.h>    /* bool type */
+#include <sys/time.h>   /* struct timeval (forensic timestamps) */
 
 #include "loragw_com.h"
 
@@ -411,6 +432,12 @@ typedef enum lgw_spectral_scan_status_e {
 /* L1→L2 escalation: set true by lgw_receive() when L1 recovery is exhausted.
    Poll from pkt_fwd main loop and set quit_sig when true. */
 extern volatile bool lgw_l2_restart_requested;
+
+/* Pre-stall forensic timestamps: updated by pkt_fwd at TX, AGC reload,
+   and spectral scan events.  Read by lgw_receive() stall detector. */
+extern struct timeval lgw_forensic_last_tx;
+extern struct timeval lgw_forensic_last_agc;
+extern struct timeval lgw_forensic_last_spectral;
 
 /* -------------------------------------------------------------------------- */
 /* --- PUBLIC FUNCTIONS PROTOTYPES ------------------------------------------ */
