@@ -1270,7 +1270,7 @@ int sx1302_agc_reload(lgw_radio_type_t radio_type) {
     /* fw version: 10=SX1250, 6=SX125X */
     uint8_t fw_ver = (radio_type == LGW_RADIO_TYPE_SX1250) ? 10 : 6;
 
-    printf("INFO: [agc_reload] post-TX recovery starting...\n");
+    printf("INFO: [agc_reload] AGC MCU restart starting...\n");
 
     /* Step 1: take host FEM control, force PA=0 LNA=1 immediately */
     err |= lgw_reg_w(SX1302_REG_AGC_MCU_CTRL_FORCE_HOST_FE_CTRL, 1);

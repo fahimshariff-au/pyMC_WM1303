@@ -112,7 +112,7 @@ const char lgw_version_string[] = "Version: " LIBLORAGW_VERSION ";";
 
 /* WM1303: Configurable periodic AGC reload interval (seconds).
    Set by pkt_fwd from global_conf.json. 0 = disabled. */
-uint32_t agc_periodic_reload_interval_s = 300;
+uint32_t agc_periodic_reload_interval_s = 30;
 
 /* L1→L2 escalation flag: set by lgw_receive() when L1 recovery is exhausted.
    Polled by pkt_fwd main loop to trigger process exit + full hardware reset. */
@@ -1302,7 +1302,17 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
     _meas_time_start(&tm);
 
 
-    /* Periodic AGC reload — every 60s, decoupled from TX events.
+    /* Compute dynamic channel mask from config — same as sx1302_lora_correlator_configure() */
+    uint8_t recovery_ch_mask = 0x00;
+    uint8_t recovery_sf_mask = CONTEXT_DEMOD.multisf_datarate;
+    {
+        int _i;
+        for (_i = 0; _i < LGW_MULTI_NB; _i++) {
+            recovery_ch_mask |= (CONTEXT_IF_CHAIN[_i].enable << _i);
+        }
+    }
+
+    /* Periodic AGC reload — decoupled from TX events.
        Prevents potential AGC gain drift over time while avoiding the
        rapid-burst reload pattern that caused correlator state corruption.
        See investigation report (2026-04-22) for details. */
@@ -1313,15 +1323,19 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
         if (last_agc_reload.tv_sec == 0) {
             /* First call — initialise timer, no reload needed yet */
             last_agc_reload = now;
+            printf("INFO: [agc_periodic] timer initialised (interval=%us, ch_mask=0x%02X, sf_mask=0x%02X)\n", agc_periodic_reload_interval_s, recovery_ch_mask, recovery_sf_mask);
+            fflush(stdout);
         } else {
             long elapsed_s = now.tv_sec - last_agc_reload.tv_sec;
             if (agc_periodic_reload_interval_s > 0 && elapsed_s >= (long)agc_periodic_reload_interval_s) {
-                printf("INFO: [agc_periodic] %lds since last reload (interval=%us) — refreshing AGC\n", elapsed_s, agc_periodic_reload_interval_s);
+                printf("INFO: [agc_periodic] %lds since last reload (interval=%us) — refreshing AGC (ch_mask=0x%02X, sf_mask=0x%02X)\n", elapsed_s, agc_periodic_reload_interval_s, recovery_ch_mask, recovery_sf_mask);
+                fflush(stdout);
                 sx1302_correlator_disable();
                 sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
-                sx1302_correlator_reinit(0x01, 0xFF);
+                sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
                 last_agc_reload = now;
                 printf("INFO: [agc_periodic] done — next in %us\n", agc_periodic_reload_interval_s);
+                fflush(stdout);
             }
         }
     }
@@ -1366,20 +1380,23 @@ int lgw_receive(uint8_t max_pkt, struct lgw_pkt_rx_s *pkt_data) {
                 sx1302_correlator_disable();
                 wait_ms(1);
                 sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
-                sx1302_correlator_reinit(0x01, 0xFF);
+                sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
                 last_sx1302_rx = l1_now;  /* reset timer for next check */
                 printf("INFO: [L1 recovery] correlator reinit #%d complete\n", recovery_level);
 
             } else if (stall_s >= STALL_TIMEOUT_S && recovery_level == L1_MAX_ATTEMPTS) {
-                /* L1.5: deep modem reinit (ALL ~40+ registers) */
+                /* L1.5: deep modem reinit — restores ALL modem, correlator, and AGC registers */
                 recovery_level = L1_MAX_ATTEMPTS + 1;
-                printf("WARNING: [L1.5 recovery] L1 exhausted — attempting deep modem reinit (all registers)\n");
+                printf("WARNING: [L1.5 recovery] L1 exhausted — attempting deep modem reinit (ch_mask=0x%02X, sf_mask=0x%02X)\n", recovery_ch_mask, recovery_sf_mask);
                 sx1302_correlator_disable();
                 wait_ms(1);
+                /* Restore per-SF correlator parameters (ACC_PNR, MSP_PNR, etc.) */
+                sx1302_lora_correlator_configure(CONTEXT_IF_CHAIN, &(CONTEXT_DEMOD));
+                /* Restore modem registers (~40+ registers) */
                 sx1302_lora_modem_configure(CONTEXT_RF_CHAIN[0].freq_hz);
                 sx1302_modem_enable();
                 sx1302_agc_reload(CONTEXT_RF_CHAIN[0].type);
-                sx1302_correlator_reinit(0x01, 0xFF);
+                sx1302_correlator_reinit(recovery_ch_mask, recovery_sf_mask);
                 last_sx1302_rx = l1_now;  /* reset timer for L2 check */
                 printf("INFO: [L1.5 recovery] deep modem reinit complete\n");
 

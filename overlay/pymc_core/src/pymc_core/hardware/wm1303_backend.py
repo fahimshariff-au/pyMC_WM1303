@@ -2428,7 +2428,8 @@ class WM1303Backend:
         _stats_keywords = ('##### ', 'JSON up:', 'JSON down:', 'REPORT', 'report',
                            'rxnb', 'txnb', 'ackr', 'dwnb')
         _activity_keywords = ('TX ', 'ERROR', 'WARNING', 'rejec', 'too late',
-                              'collision', 'BEACON')
+                              'collision', 'BEACON', 'agc_periodic', 'agc_reload',
+                              'L1 recovery', 'L1.5', 'L2', 'correlator', 'stall')
         try:
             while self._proc and self._proc.poll() is None:
                 line = self._proc.stdout.readline()
