@@ -49,6 +49,15 @@ When Channel A was configured with SF10 (longer airtime ~567ms vs ~100ms at SF7)
 | `overlay/pymc_core/src/pymc_core/hardware/wm1303_backend.py` | +75 -7 | Layer 2 watchdog escalation (consecutive crash → deep_reset) |
 | `VERSION` | 2.3.0 → 2.3.1 | Version bump |
 
+## Known Issues
+
+### LBT (Listen Before Talk) Causes Operational Problems
+
+**LBT is currently unstable and should be disabled on all channels.** When LBT is enabled, it can cause TX failures, excessive retries, and degraded overall system performance. The SX1261-based LBT implementation has timing conflicts with the TX/RX pipeline that have not yet been resolved.
+
+**Workaround:** Disable LBT on all channels via the WM1303 Manager UI (Channels tab → set LBT to "off" for each channel). CAD (Channel Activity Detection) remains functional and is the recommended collision avoidance mechanism.
+
+
 ## Upgrade
 
 Use the one-liner bootstrap:

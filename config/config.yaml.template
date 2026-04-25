@@ -1,6 +1,6 @@
 bridge:
   bridge_rules: []
-  dedup_ttl_seconds: 15
+  dedup_ttl_seconds: 300
 delays:
   direct_tx_delay_factor: 0
   tx_delay_factor: 0
@@ -35,7 +35,7 @@ radio_type: wm1303
 repeater:
   advert_interval_seconds: 133200
   allow_discovery: true
-  cache_ttl: 30
+  cache_ttl: 300
   direct_tx_delay_factor: 0
   identity_key: !!binary |
     Y/ehW/dwHvmsBWfxjGWRD9gEevSiMESzPdA1jL8hnj0=

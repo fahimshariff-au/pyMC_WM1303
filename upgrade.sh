@@ -894,6 +894,10 @@ elif 'dedup_ttl' in br and 'dedup_ttl_seconds' in br:
 if 'dedup_ttl_seconds' not in br:
     br['dedup_ttl_seconds'] = 300
     changes.append('bridge.dedup_ttl_seconds=300')
+elif br['dedup_ttl_seconds'] < 300:
+    old_val = br['dedup_ttl_seconds']
+    br['dedup_ttl_seconds'] = 300
+    changes.append('bridge.dedup_ttl_seconds: %d->300 (enforced minimum)' % old_val)
 
 cfg['bridge'] = br
 
@@ -904,11 +908,19 @@ rep = cfg.get('repeater', {})
 if 'cache_ttl' not in rep:
     rep['cache_ttl'] = 300
     changes.append('repeater.cache_ttl=300')
+elif rep['cache_ttl'] < 300:
+    old_val = rep['cache_ttl']
+    rep['cache_ttl'] = 300
+    changes.append('repeater.cache_ttl: %d->300 (enforced minimum)' % old_val)
 
 # Ensure max_cache_size exists (default 1000 since v2.2.0)
 if 'max_cache_size' not in rep:
     rep['max_cache_size'] = 1000
     changes.append('repeater.max_cache_size=1000')
+elif rep['max_cache_size'] < 1000:
+    old_val = rep['max_cache_size']
+    rep['max_cache_size'] = 1000
+    changes.append('repeater.max_cache_size: %d->1000 (enforced minimum)' % old_val)
 
 # tx_delay_factor: set to 0 (v2.1.0: CAD handles collision avoidance)
 if rep.get('tx_delay_factor', 0) != 0:
