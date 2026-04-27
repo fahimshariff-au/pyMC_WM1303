@@ -698,6 +698,10 @@ class WM1303API:
         if resource == "packet_activity":
             return self._packet_activity(**params)
 
+        # -- crc_error_rate (per-channel CRC error rate tracking) --
+        if resource == "crc_error_rate":
+            return self._crc_error_rate(**params)
+
         # -- packet_metrics (per-packet RX/TX detail for spectrum-tab charts) --
         if resource == "packet_metrics":
             return self._packet_metrics(**params)
@@ -1186,6 +1190,12 @@ class WM1303API:
                 'noise_floor_lbt_min': ch_tx.get('noise_floor_lbt_min'),
                 'noise_floor_lbt_max': ch_tx.get('noise_floor_lbt_max'),
                 'noise_floor_lbt_samples': ch_tx.get('noise_floor_lbt_samples', 0),
+                # TX noisefloor (pre-CAD FSK-RX) rolling estimates
+                'tx_noisefloor_avg': ch_tx.get('tx_noisefloor_avg'),
+                'tx_noisefloor_min': ch_tx.get('tx_noisefloor_min'),
+                'tx_noisefloor_max': ch_tx.get('tx_noisefloor_max'),
+                'tx_noisefloor_last': ch_tx.get('tx_noisefloor_last'),
+                'tx_noisefloor_samples': ch_tx.get('tx_noisefloor_samples', 0),
                 # Queue health stats
                 'queue_pending': ch_tx.get('pending', 0),
                 'queue_size': ch_tx.get('queue_size', 15),
@@ -2174,7 +2184,7 @@ class WM1303API:
                     rows = conn.execute(
                         "SELECT timestamp, tx_count, lbt_blocked, lbt_passed, "
                         "lbt_last_rssi, lbt_threshold, noise_floor_dbm, "
-                        "avg_rssi, avg_snr, rx_count "
+                        "avg_rssi, avg_snr, rx_count, tx_noisefloor_dbm "
                         "FROM channel_stats_history "
                         "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
                         (ch_id, cutoff)
@@ -2210,10 +2220,14 @@ class WM1303API:
                             snr_vals = [r["avg_snr"] for r in bk_rows if r["avg_snr"] is not None]
                             avg_rssi = round(sum(rssi_vals)/len(rssi_vals), 1) if rssi_vals else None
                             avg_snr = round(sum(snr_vals)/len(snr_vals), 1) if snr_vals else None
+                            # TX noisefloor (pre-CAD FSK-RX measurement)
+                            tx_nf_vals = [r["tx_noisefloor_dbm"] for r in bk_rows if r["tx_noisefloor_dbm"] is not None]
+                            avg_tx_nf = round(sum(tx_nf_vals)/len(tx_nf_vals), 1) if tx_nf_vals else None
                             timeseries.append({
                                 "timestamp": bk_ts,
                                 "noise_floor_dbm": avg_nf,
                                 "lbt_last_rssi": lbt_last_rssi,
+                                "tx_noisefloor_dbm": avg_tx_nf,
                                 "avg_rssi": avg_rssi,
                                 "avg_snr": avg_snr,
                                 "tx_count_delta": tx_delta,
@@ -2996,6 +3010,99 @@ class WM1303API:
         except Exception as e:
             logger.error("packet_activity error: %s", e)
             return _j({"error": str(e), "hours": h, "channels": []})
+
+    def _crc_error_rate(self, **params):
+        """GET /api/wm1303/crc_error_rate - Per-channel CRC error rate from crc_error_rate table."""
+        import sqlite3 as _sq3
+        hours_str = params.get("hours", "1")
+        try:
+            h = min(int(hours_str), 168)
+        except (ValueError, TypeError):
+            h = 1
+        channel_id = params.get("channel_id", None)
+        # Bucket sizes: 1h->1min, 6h->5min, 24h->15min, 72h->1h, 168h->4h
+        if h <= 1:
+            bucket_s = 60
+        elif h <= 6:
+            bucket_s = 300
+        elif h <= 24:
+            bucket_s = 900
+        elif h <= 72:
+            bucket_s = 3600
+        else:
+            bucket_s = 14400
+        cutoff = time.time() - (h * 3600)
+        db_path = "/var/lib/pymc_repeater/repeater.db"
+        ui_chs = _load_ui().get("channels", [])
+        ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
+        ch_colors = ["#ef4444", "#f97316", "#eab308", "#a855f7",
+                     "#ec4899", "#f43f5e", "#fb7185", "#fbbf24"]
+        result_channels = []
+        try:
+            ch_id_map = _get_ui_channel_id_map()
+            with _sq3.connect(db_path) as conn:
+                conn.row_factory = _sq3.Row
+                for idx, ch_cfg in enumerate(ui_chs):
+                    ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
+                    if channel_id and ch_id != channel_id:
+                        continue
+                    letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
+                    rows = conn.execute(
+                        "SELECT timestamp, crc_error_count, crc_disabled_count FROM crc_error_rate "
+                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
+                        (ch_id, cutoff)
+                    ).fetchall()
+                    # Bucket the data
+                    buckets = {}
+                    for row in rows:
+                        bk = int(row["timestamp"] / bucket_s) * bucket_s
+                        if bk not in buckets:
+                            buckets[bk] = {"err": [], "dis": []}
+                        buckets[bk]["err"].append(row["crc_error_count"] or 0)
+                        buckets[bk]["dis"].append(row["crc_disabled_count"] or 0)
+                    timeseries = []
+                    for bk_ts in sorted(buckets.keys()):
+                        bk = buckets[bk_ts]
+                        timeseries.append({
+                            "t": bk_ts,
+                            "crc_error": sum(bk["err"]),
+                            "crc_disabled": sum(bk["dis"])
+                        })
+                    result_channels.append({
+                        "id": ch_id,
+                        "label": ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}")),
+                        "color": ch_colors[idx % len(ch_colors)],
+                        "data": timeseries
+                    })
+                # Also check for 'unknown' channel
+                unk_rows = conn.execute(
+                    "SELECT timestamp, crc_error_count, crc_disabled_count FROM crc_error_rate "
+                    "WHERE channel_id = 'unknown' AND timestamp > ? ORDER BY timestamp",
+                    (cutoff,)
+                ).fetchall()
+                if unk_rows:
+                    unk_buckets = {}
+                    for row in unk_rows:
+                        bk = int(row["timestamp"] / bucket_s) * bucket_s
+                        if bk not in unk_buckets:
+                            unk_buckets[bk] = {"err": [], "dis": []}
+                        unk_buckets[bk]["err"].append(row["crc_error_count"] or 0)
+                        unk_buckets[bk]["dis"].append(row["crc_disabled_count"] or 0)
+                    unk_ts = []
+                    for bk_ts in sorted(unk_buckets.keys()):
+                        bk = unk_buckets[bk_ts]
+                        unk_ts.append({"t": bk_ts, "crc_error": sum(bk["err"]), "crc_disabled": sum(bk["dis"])})
+                    result_channels.append({
+                        "id": "unknown",
+                        "label": "Unknown",
+                        "color": "#6b7280",
+                        "data": unk_ts
+                    })
+            return _j({"hours": h, "bucket_seconds": bucket_s, "channels": result_channels})
+        except Exception as e:
+            logger.error("crc_error_rate error: %s", e)
+            return _j({"error": str(e), "hours": h, "channels": []})
+
 
     def _packet_metrics(self, **params):
         """GET /api/wm1303/packet_metrics - Per-packet RX/TX metrics per channel for spectrum charts.
@@ -3804,6 +3911,65 @@ def _packet_activity_recorder():
 import threading as _thr_pkt
 _pkt_rec_thread = _thr_pkt.Thread(target=_packet_activity_recorder, daemon=True)
 _pkt_rec_thread.start()
+
+
+def _crc_error_rate_recorder():
+    """Periodically record per-channel CRC error/disabled counts to crc_error_rate table.
+    Reads live counters from WM1303 backend via get_and_reset_crc_rate_counters()."""
+    import sqlite3 as _sq3c
+    _db = "/var/lib/pymc_repeater/repeater.db"
+    # Ensure table exists on first run
+    try:
+        with _sq3c.connect(_db, timeout=10) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS crc_error_rate (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                channel_id TEXT NOT NULL,
+                crc_error_count INTEGER NOT NULL DEFAULT 0,
+                crc_disabled_count INTEGER NOT NULL DEFAULT 0)""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_crcrate_ts ON crc_error_rate(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_crcrate_ch_ts ON crc_error_rate(channel_id, timestamp)")
+            conn.commit()
+    except Exception as _init_e:
+        logger.debug("crc_error_rate_recorder init: %s", _init_e)
+    while True:
+        try:
+            time.sleep(60)
+            _bk = _get_backend()
+            if not _bk:
+                continue
+            try:
+                counters = _bk.get_and_reset_crc_rate_counters()
+            except Exception:
+                continue
+            if not counters:
+                continue
+            now = time.time()
+            inserts = []
+            for ch_id, counts in counters.items():
+                crc_err = counts.get("crc_error", 0)
+                crc_dis = counts.get("crc_disabled", 0)
+                inserts.append((now, ch_id, crc_err, crc_dis))
+            if inserts:
+                with _sq3c.connect(_db, timeout=10) as conn:
+                    conn.execute("PRAGMA busy_timeout=5000")
+                    conn.executemany(
+                        "INSERT INTO crc_error_rate (timestamp, channel_id, crc_error_count, crc_disabled_count) VALUES (?,?,?,?)",
+                        inserts
+                    )
+                    conn.commit()
+        except Exception as _e:
+            logger.debug("crc_error_rate_recorder: %s", _e)
+            try:
+                time.sleep(60)
+            except Exception:
+                break
+
+
+_crc_rec_thread = _thr_pkt.Thread(target=_crc_error_rate_recorder, daemon=True)
+_crc_rec_thread.start()
 
 
 # Auto-start spectrum collector

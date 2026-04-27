@@ -78,21 +78,14 @@ int lgw_lbt_stop(void);
 @param tx_ok pointer to return if the packet was allowed to be transmitted or not.
 @return 0 for success, -1 for failure
 */
+int lgw_lbt_tx_status(uint8_t rf_chain, bool * tx_ok);
+
 /**
-@brief Perform a real-time SX1261 RSSI check before TX (custom LBT).
-       This bypasses the broken AGC-based HAL LBT mechanism.
-@param freq_hz       TX frequency in Hz
-@param bandwidth     TX bandwidth (BW_125KHZ, BW_250KHZ, BW_62K5HZ)
-@param rssi_target   RSSI threshold in dBm. TX allowed if RSSI < threshold.
-@param rssi_offset   SX1261 RSSI offset from calibration
-@param rssi_measured pointer to store measured RSSI value (can be NULL)
-@param tx_ok         pointer to return whether TX is allowed
+@brief Get the last measured LBT RSSI value
+@param rssi pointer to store the RSSI value in dBm
 @return 0 for success, -1 for failure
 */
-int lgw_lbt_rssi_check(uint32_t freq_hz, uint8_t bandwidth, int8_t rssi_target,
-                       int8_t rssi_offset, int16_t *rssi_measured, bool *tx_ok);
-
-int lgw_lbt_tx_status(uint8_t rf_chain, bool * tx_ok);
+int lgw_lbt_get_last_rssi(int16_t *rssi);
 
 #endif
 

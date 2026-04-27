@@ -2,17 +2,18 @@
   "channels": [
     {
       "name": "local-test",
-      "frequency": 869100000,
+      "frequency": 869462000,
       "active": true,
       "preamble_length": 17,
       "friendly_name": "Channel A",
       "lbt_rssi_target": -80,
-      "tx_power": 14,
-      "lbt_enabled": false,
+      "tx_power": 27,
+      "lbt_enabled": true,
       "cad_enabled": false,
-      "spreading_factor": 7,
-      "bandwidth": 125000,
-      "coding_rate": "4/5"
+      "lbt_threshold": -80,
+      "spreading_factor": 10,
+      "coding_rate": "4/5",
+      "bandwidth": 125000
     }
   ],
   "bridge": {
@@ -22,34 +23,33 @@
         "from": "channel_e",
         "to": "repeater",
         "enabled": true,
-        "tx_delay_ms": 5
+        "tx_delay_ms": 0
       },
       {
         "name": "rep_to_channel_e",
         "from": "repeater",
         "to": "channel_e",
         "enabled": true,
-        "tx_delay_ms": 5
+        "tx_delay_ms": 0
       },
       {
         "name": "rep_to_cha",
         "from": "repeater",
-        "to": "channel_a",
+        "to": "local-test",
         "enabled": true,
-        "tx_delay_ms": 5
+        "tx_delay_ms": 0
       },
       {
         "name": "cha_to_rep",
-        "from": "channel_a",
+        "from": "local-test",
         "to": "repeater",
         "enabled": true,
-        "tx_delay_ms": 5
+        "tx_delay_ms": 0
       }
     ]
   },
   "channel_e": {
     "friendly_name": "EU-Narrow",
-    "name": "EU-Narrow",
     "boosted_rx": true,
     "preamble_length": 17,
     "cad_enabled": false,
@@ -59,10 +59,15 @@
     "bandwidth": 62500,
     "spreading_factor": 8,
     "coding_rate": "4/5",
-    "lbt_enabled": false,
-    "lbt_threshold": -80
+    "lbt_enabled": true,
+    "lbt_threshold": -80,
+    "name": "EU-Narrow",
+    "lbt_rssi_target": -80
   },
   "rf_center_freq_mhz": 869.525,
+  "hal_advanced": {
+    "agc_reload_interval_s": 30
+  },
   "adv_config": {
     "hal_advanced": {
       "agc_reload_interval_s": 300

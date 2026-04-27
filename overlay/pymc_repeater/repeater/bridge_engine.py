@@ -100,7 +100,7 @@ def emit_lbt_cad_trace_steps(pkt_hash8: str, channel_id: str,
 
     Steps use a unified multi-line detail layout matching tx_send style:
         "LBT PASS\\n  RSSI: -87 dBm\\n  Threshold: -80 dBm\\n  Retries: 0"
-        "CAD CLEAR\\n  RSSI: -128 dBm\\n  Reason: clear\\n  Retries: 0"
+        "CAD CLEAR\\n  TX Noisefloor: -128 dBm\\n  Reason: clear\\n  Retries: 0"
     Missing values are omitted (no 'None dBm' lines).
     """
     if not isinstance(tx_result, dict):
@@ -131,11 +131,11 @@ def emit_lbt_cad_trace_steps(pkt_hash8: str, channel_id: str,
             _cad_detected = bool(tx_result.get('cad_detected', False))
             _cad_retries = int(tx_result.get('cad_retries', 0) or 0)
             _cad_reason = (tx_result.get('cad_reason') or '').strip()
-            _cad_rssi = tx_result.get('cad_rssi_dbm')
+            _tx_nf = tx_result.get('tx_noisefloor_dbm')
             _cad_header = 'CAD DETECTED' if _cad_detected else 'CAD CLEAR'
             _parts = [_cad_header]
-            if _cad_rssi is not None:
-                _parts.append('  RSSI: %s dBm' % _cad_rssi)
+            if _tx_nf is not None:
+                _parts.append('  TX Noisefloor: %s dBm' % _tx_nf)
             if _cad_reason:
                 _parts.append('  Reason: %s' % _cad_reason)
             _parts.append('  Retries: %d' % _cad_retries)
@@ -937,13 +937,19 @@ class BridgeEngine:
                     logger.info('[HEXDUMP] dir=TX ch=%s sz=%d hdr=%s hex=%s',
                                 tcid, len(data), _mc_hdr(data), _hexdump(data))
                     if kind == 'radio':
-                        tx_result = await dispatcher.send(data)
-                        # WM1303 v2.1.6: emit LBT/CAD trace steps chronologically
-                        # (they happen BEFORE tx_send on the air). Shared helper
-                        # is also used by channel_e_bridge so every HAL-TX path
-                        # gets consistent visibility.
-                        emit_lbt_cad_trace_steps(pkt_hash8, tcid, tx_result,
-                                                  pkt_type_name=pkt_type_name)
+                        # Pass pkt_hash8 through to backend so it can emit
+                        # chronologically-correct TX-phase trace events
+                        # (tx_noisefloor, cad_start, lbt_check, cad_check,
+                        # rf_tx_start, rf_tx_end, sx1261_rx_restart, tx_ack,
+                        # rf_guard). The backend knows the precise HAL
+                        # timing; emitting post-TX from here would place
+                        # CAD events too late in the timeline.
+                        tx_result = await dispatcher.send(data, trace_hash=pkt_hash8)
+                        # Legacy call removed: backend now emits lbt_check
+                        # and cad_check at correct timestamps (pre-TX,
+                        # backdated from ACK moment). Calling
+                        # emit_lbt_cad_trace_steps here would produce
+                        # duplicate steps at wrong times.
                         _trace(pkt_hash8, 'tx_send', channel=tcid, pkt_type=pkt_type_name, detail=self._format_tx_result(tx_result, self._dn(tcid), rule_display))
                         logger.info('BridgeEngine: TX result on %s (rule=%s): %s',
                                     tcid, rule_id, tx_result)

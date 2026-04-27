@@ -363,6 +363,7 @@ struct lgw_conf_chan_lbt_s{
     uint8_t             bandwidth;         /*!> LBT channel bandwidth */
     lgw_lbt_scan_time_t scan_time_us;      /*!> LBT channel carrier sense time */
     uint16_t            transmit_time_ms;  /*!> LBT channel transmission duration when allowed */
+    int8_t              rssi_target_dbm;   /*!> Per-channel RSSI threshold (0 = use global rssi_target) */
 };
 
 /**

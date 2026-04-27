@@ -23,11 +23,37 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger("TXQueue")
 
+# ---------------------------------------------------------------------------
+# Packet-trace callback hook (layering: pymc_core must NOT import
+# pymc_repeater.web.packet_trace directly). The repeater registers a callback
+# at startup via set_trace_callback(). Safe no-op when unset.
+# ---------------------------------------------------------------------------
+_trace_callback = None  # Optional[Callable[..., None]]
+
+
+def set_trace_callback(fn) -> None:
+    """Register a packet-trace callback for TX queue events (rf_guard)."""
+    global _trace_callback
+    _trace_callback = fn
+
+
+def _trace(pkt_hash, step_name, **kwargs) -> None:
+    cb = _trace_callback
+    if cb is None or not pkt_hash:
+        return
+    try:
+        cb(pkt_hash, step_name, **kwargs)
+    except Exception as _e:
+        logger.debug("TXQueue: _trace callback failed: %s", _e)
+
 # Maximum channels supported
 MAX_CHANNELS = 4
 
 # LBT RSSI rolling buffer size
 LBT_RSSI_BUFFER_SIZE = 20
+
+# TX noisefloor (pre-CAD FSK-RX) rolling buffer size
+TX_NF_BUFFER_SIZE = 20
 
 
 def _bw_hz_to_str(bw_hz: int) -> str:
@@ -155,6 +181,12 @@ class ChannelTXQueue:
             "noise_floor_lbt_min": None,
             "noise_floor_lbt_max": None,
             "noise_floor_lbt_samples": 0,
+            # TX noisefloor (pre-CAD FSK-RX) stats (rolling buffer)
+            "tx_noisefloor_avg": None,
+            "tx_noisefloor_min": None,
+            "tx_noisefloor_max": None,
+            "tx_noisefloor_last": None,
+            "tx_noisefloor_samples": 0,
         }
         self._tx_times: list[float] = []
         self._send_times: list[float] = []
@@ -164,7 +196,11 @@ class ChannelTXQueue:
         # LBT RSSI rolling buffer for noise floor estimation
         self._lbt_rssi_buffer: deque = deque(maxlen=LBT_RSSI_BUFFER_SIZE)
 
-    async def enqueue(self, payload: bytes, tx_power: int = None) -> dict:
+        # TX noisefloor (pre-CAD FSK-RX) rolling buffer
+        self._tx_nf_buffer: deque = deque(maxlen=TX_NF_BUFFER_SIZE)
+
+    async def enqueue(self, payload: bytes, tx_power: int = None,
+                      trace_hash: str = None) -> dict:
         """Enqueue a TX request and wait for the GlobalTXScheduler to send it.
 
         Overflow policy: when full, drop the OLDEST packet to make room.
@@ -182,6 +218,7 @@ class ChannelTXQueue:
             "tx_power": tx_power,
             "future": future,
             "enqueue_time": time.time(),
+            "trace_hash": trace_hash,
         }
         try:
             self.queue.put_nowait(request)
@@ -306,7 +343,7 @@ class ChannelTXQueue:
         Called after every LBT check (pass or block) to build a
         noise floor estimate from real pre-TX RSSI measurements.
         """
-        if rssi is None:
+        if rssi is None or rssi <= -126:  # filter HAL sentinel (-127)
             return
         self._lbt_rssi_buffer.append(rssi)
         n = len(self._lbt_rssi_buffer)
@@ -317,6 +354,24 @@ class ChannelTXQueue:
             self.stats["noise_floor_lbt_avg"] = round(sum(vals) / n, 1)
             self.stats["noise_floor_lbt_min"] = round(min(vals), 1)
             self.stats["noise_floor_lbt_max"] = round(max(vals), 1)
+
+    def record_tx_noisefloor(self, rssi: float) -> None:
+        """Record a TX noisefloor measurement (pre-CAD FSK-RX) in the rolling buffer.
+
+        Called after every TX with CAD enabled. The value is the noise floor
+        measured on the TX frequency just before the CAD preamble scan.
+        """
+        if rssi is None or rssi <= -127:  # filter sentinel values
+            return
+        self._tx_nf_buffer.append(rssi)
+        n = len(self._tx_nf_buffer)
+        self.stats["tx_noisefloor_last"] = round(rssi, 1)
+        self.stats["tx_noisefloor_samples"] = n
+        if n > 0:
+            vals = list(self._tx_nf_buffer)
+            self.stats["tx_noisefloor_avg"] = round(sum(vals) / n, 1)
+            self.stats["tx_noisefloor_min"] = round(min(vals), 1)
+            self.stats["tx_noisefloor_max"] = round(max(vals), 1)
 
     def get_status(self) -> dict:
         """Return queue status and stats."""
@@ -367,12 +422,12 @@ class TXQueueManager:
                    channel_id, freq_hz, sf, bw_khz, cr, tx_power, 15, ttl_seconds)
 
     async def enqueue(self, channel_id: str, payload: bytes,
-                      tx_power: int = None) -> dict:
+                      tx_power: int = None, trace_hash: str = None) -> dict:
         """Enqueue a TX packet to the appropriate channel queue."""
         queue = self.queues.get(channel_id)
         if not queue:
             return {"ok": False, "error": f"unknown channel: {channel_id}"}
-        return await queue.enqueue(payload, tx_power)
+        return await queue.enqueue(payload, tx_power, trace_hash=trace_hash)
 
     def stop_all(self) -> None:
         """Stop all TX queue processing (no-op since queues are passive FIFOs)."""
@@ -404,6 +459,48 @@ class TXQueueManager:
             q.stats["cad_hw_clear"] = q.stats.get("cad_hw_clear", 0) + 1
         q.stats["cad_last_result"] = cad_result.get("reason", "hw")
 
+    def record_lbt_result(self, channel_id: str, lbt_result: dict) -> None:
+        """Increment LBT counters from a post-TX_ACK LBT result (C-level).
+
+        The HAL C code performs LBT (Listen-Before-Talk) before every TX when
+        enabled, and reports the outcome in the post-TX TX_ACK packet. This
+        method wires those results into the per-channel queue stats so
+        get_channel_stats()/channel_stats_history show real LBT activity
+        even when the Python pre-TX LBT check is disabled.
+
+        Args:
+            channel_id: per-channel queue identifier.
+            lbt_result: dict with keys 'enabled' (bool), 'pass' (bool),
+                optional 'rssi_dbm' (int), 'threshold_dbm' (int).
+        """
+        if not lbt_result:
+            return
+        q = self.queues.get(channel_id)
+        if q is None:
+            return
+        if not lbt_result.get("enabled"):
+            # LBT was disabled for this channel — count as skipped so the
+            # UI can see that TX went through without LBT gating.
+            q.stats["lbt_skipped"] = q.stats.get("lbt_skipped", 0) + 1
+            return
+        # LBT was enabled — record pass/block
+        _rssi = lbt_result.get("rssi_dbm")
+        _thr = lbt_result.get("threshold_dbm")
+        if _rssi is not None:
+            q.stats["lbt_last_rssi"] = _rssi
+            # Also feed the rolling RSSI buffer for noise-floor estimation
+            try:
+                q.record_lbt_rssi(float(_rssi))
+            except Exception:
+                pass
+        if _thr is not None:
+            q.stats["lbt_last_threshold"] = _thr
+        if lbt_result.get("pass", True):
+            q.stats["lbt_passed"] = q.stats.get("lbt_passed", 0) + 1
+        else:
+            q.stats["lbt_blocked"] = q.stats.get("lbt_blocked", 0) + 1
+            q.stats["lbt_last_blocked_at"] = time.time()
+
     def get_status(self) -> dict:
         """Return status of all TX queues."""
         return {
@@ -419,19 +516,15 @@ class GlobalTXScheduler:
     preventing collisions. No burst cycle, no collect window.
     Packets are sent within milliseconds of being enqueued.
 
-    LBT (Listen-Before-Talk) is non-blocking: when a channel is LBT-blocked,
-    it is skipped and other channels can continue transmitting. The blocked
-    channel is retried on the next round-robin pass after a delay.
+    LBT (Listen-Before-Talk) is handled entirely inside the HAL
+    (lgw_send → lgw_lbt_start/tx_status, per-channel rssi_target_dbm).
+    The Python layer no longer runs a pre-TX check or a retry queue.
+    If HAL LBT blocks a TX, the failure is reported via the post-TX
+    TX_ACK and the caller's future resolves with result="blocked".
     """
-
-    # LBT retry delays (seconds): attempt 0 is immediate, then 0.5s, 1.0s, 1.5s
-    LBT_RETRY_DELAYS = [0, 0.5, 1.0, 1.5]
-    # After all retries exhausted, wait this long before force-sending
-    LBT_FORCE_DELAY = 2.0
 
     def __init__(self, send_func: Callable, queues: dict[str, ChannelTXQueue],
                  post_tx_callback: Callable = None,
-                 lbt_check: Callable = None,
                  tx_hold_getter: Callable = None):
         """
         Args:
@@ -446,7 +539,6 @@ class GlobalTXScheduler:
         self._send_func = send_func
         self._queues = queues
         self._post_tx_callback = post_tx_callback
-        self._lbt_check = lbt_check
         self._tx_hold_getter = tx_hold_getter
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -457,17 +549,6 @@ class GlobalTXScheduler:
         # With mandatory CAD before every TX, this delay is no longer needed
         # for collision avoidance. Default: 0 (disabled).
         self._tx_delay_factor: float = 0.0
-
-        # Per-channel LBT blocked state for non-blocking retry.
-        # Key: channel_id, Value: dict with:
-        #   request: the original dequeued request dict
-        #   txpk: pre-built txpk dict
-        #   queue_wait_ms: queue wait time measured at first dequeue
-        #   attempt: current retry attempt index (0-based into LBT_RETRY_DELAYS)
-        #   retry_after: monotonic timestamp when this channel can be retried
-        #   force_send: bool, True if all retries exhausted and waiting for force delay
-        #   last_lbt_result: last LBT check result for logging
-        self._blocked: dict[str, dict] = {}
 
     async def start(self):
         """Start the scheduler loop."""
@@ -490,31 +571,6 @@ class GlobalTXScheduler:
             self._task = None
         logger.info("GlobalTXScheduler: stopped (total_scheduled=%d)",
                    self._packets_scheduled)
-
-    def _record_lbt_cad_stats(self, queue: ChannelTXQueue, lbt_result: dict,
-                               passed: bool) -> None:
-        """Record LBT and CAD statistics from an LBT check result."""
-        # Record LBT RSSI in rolling buffer
-        _lbt_rssi = lbt_result.get("rssi")
-        if _lbt_rssi is not None:
-            queue.record_lbt_rssi(_lbt_rssi)
-
-        if passed:
-            queue.stats["lbt_passed"] += 1
-        else:
-            queue.stats["lbt_blocked"] += 1
-            queue.stats["lbt_last_blocked_at"] = time.time()
-
-        queue.stats["lbt_last_threshold"] = lbt_result.get("threshold")
-
-        # Track CAD stats from LBT result
-        _cad = lbt_result.get('cad_result')
-        if _cad is not None:
-            if _cad.get('detected', False):
-                queue.stats["cad_detected"] += 1
-            else:
-                queue.stats["cad_clear"] += 1
-            queue.stats["cad_last_result"] = _cad.get('reason', 'unknown')
 
     async def _do_send(self, channel_id: str, queue: ChannelTXQueue,
                        request: dict, txpk: dict, queue_wait_ms: float) -> None:
@@ -550,7 +606,8 @@ class GlobalTXScheduler:
 
         # Send via the backend's PULL_RESP sender
         try:
-            result = await self._send_func(txpk, channel_id)
+            _trace_hash = request.get("trace_hash")
+            result = await self._send_func(txpk, channel_id, trace_hash=_trace_hash)
         except Exception as e:
             logger.error("GlobalTXScheduler: send error on %s: %s",
                         channel_id, e, exc_info=True)
@@ -612,6 +669,41 @@ class GlobalTXScheduler:
                           channel_id, result.get('error', _tx_result or 'unknown'),
                           send_ms, queue_wait_ms, _retry_count)
 
+        # --- HAL LBT stats update (from post-TX TX_ACK) ---
+        # The backend's _send_pull_resp merges post-TX ACK fields into `result`.
+        # Here we translate them into per-channel queue stats so that the
+        # existing UI / metrics DB / debug_collector keep receiving numbers.
+        try:
+            if isinstance(result, dict):
+                _lbt_enabled = bool(result.get('lbt_enabled', False))
+                _lbt_pass = result.get('lbt_pass', None)
+                _lbt_rssi = result.get('lbt_rssi_dbm', None)
+                _lbt_thr = result.get('lbt_threshold_dbm', None)
+                if _lbt_enabled:
+                    if _lbt_pass is True:
+                        queue.stats['lbt_passed'] = queue.stats.get('lbt_passed', 0) + 1
+                    elif _lbt_pass is False:
+                        queue.stats['lbt_blocked'] = queue.stats.get('lbt_blocked', 0) + 1
+                        queue.stats['lbt_last_blocked_at'] = time.time()
+                else:
+                    queue.stats['lbt_skipped'] = queue.stats.get('lbt_skipped', 0) + 1
+                if _lbt_thr is not None:
+                    queue.stats['lbt_last_threshold'] = _lbt_thr
+                # lbt_rssi_dbm is a sentinel (-127) until HAL exposes it;
+                # only record if it looks like a real measurement.
+                if _lbt_rssi is not None and _lbt_rssi > -127:
+                    queue.record_lbt_rssi(_lbt_rssi)
+        except Exception as _lbt_stat_err:
+            logger.debug("GlobalTXScheduler: HAL LBT stats update error: %s", _lbt_stat_err)
+
+        # --- TX noisefloor stats update (from post-TX TX_ACK CAD section) ---
+        try:
+            if isinstance(result, dict):
+                _tx_nf = result.get('tx_noisefloor_dbm', None)
+                if _tx_nf is not None and _tx_nf > -127:
+                    queue.record_tx_noisefloor(float(_tx_nf))
+        except Exception as _nf_stat_err:
+            logger.debug("GlobalTXScheduler: TX noisefloor stats update error: %s", _nf_stat_err)
         # Resolve the caller's future
         future = request.get("future")
         if future and not future.done():
@@ -623,21 +715,30 @@ class GlobalTXScheduler:
         # calling lgw_send() while a previous TX is still in progress will
         # OVERWRITE the TX buffer, silently killing the first packet.
         #
-        # ACK-based precision guard:
-        # When _send_func() receives a post-TX ACK from the C code, it means
-        # CAD/LBT are done and lgw_send() has loaded the TX buffer — the RF
-        # transmission is starting NOW. The guard then only needs to cover
-        # the actual airtime + a small safety margin.
-        # When no ACK is received (timeout/fallback), _send_func already set
-        # a conservative _last_tx_end; we add a minimal sleep here.
+        # Timestamp-based precision guard:
+        # The backend sets _last_tx_end (monotonic timestamp) when it knows
+        # precisely when the RF transmission will finish.  We use that to
+        # compute exactly how long we still need to wait, avoiding redundant
+        # delays after the post-TX ACK (which already confirms TX started).
         _ack_received = result.get('ack_received', False) if isinstance(result, dict) else False
-        if _ack_received:
-            # Precise: ACK confirmed TX started — guard = airtime + margin
-            _rf_guard_margin_ms = 100.0
-            _shared_rf_guard_ms = airtime_est_ms + _rf_guard_margin_ms
-            logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
-                        "(precise: airtime=%.1fms + %.0fms margin)",
-                        channel_id, _shared_rf_guard_ms, airtime_est_ms, _rf_guard_margin_ms)
+        _last_tx_end = result.get('last_tx_end', 0) if isinstance(result, dict) else 0
+        if _ack_received and _last_tx_end > 0:
+            # Precise: use timestamp from backend
+            _now = time.monotonic()
+            _remaining_s = _last_tx_end - _now
+            _margin_ms = 50.0
+            if _remaining_s > 0:
+                _shared_rf_guard_ms = (_remaining_s * 1000.0) + _margin_ms
+                logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
+                            "(precise: remaining=%.1fms + %.0fms margin)",
+                            channel_id, _shared_rf_guard_ms,
+                            _remaining_s * 1000.0, _margin_ms)
+            else:
+                # TX already finished by the time we get here
+                _shared_rf_guard_ms = _margin_ms
+                logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
+                            "(TX already complete, margin only)",
+                            channel_id, _shared_rf_guard_ms)
         else:
             # Conservative: no ACK — use minimal sleep, _last_tx_end in
             # _send_pull_resp already includes airtime + 2s fallback.
@@ -671,112 +772,11 @@ class GlobalTXScheduler:
             rotated = queue_list[start:] + queue_list[:start]
             for channel_id, queue in rotated:
 
-                # --- Check for a previously LBT-blocked request first ---
-                blocked = self._blocked.get(channel_id)
-                if blocked:
-                    now_mono = time.monotonic()
-                    if now_mono < blocked["retry_after"]:
-                        # Not yet time to retry this channel - skip it
-                        continue
-
-                    request = blocked["request"]
-                    txpk = blocked["txpk"]
-                    queue_wait_ms = blocked["queue_wait_ms"]
-
-                    # Check if the caller already timed out while we were waiting
-                    _future = request.get("future")
-                    if _future and _future.done():
-                        _stale_age = time.time() - request["enqueue_time"]
-                        queue.stats["dropped_stale"] += 1
-                        logger.info("GlobalTXScheduler: dropping stale blocked packet on %s "
-                                   "(age=%.1fs, future already resolved)",
-                                   channel_id, _stale_age)
-                        del self._blocked[channel_id]
-                        continue
-
-                    # TTL re-check
-                    age = time.time() - request["enqueue_time"]
-                    if age > queue.ttl_seconds:
-                        logger.warning("GlobalTXScheduler: blocked packet expired on %s "
-                                      "(age=%.1fs, TTL=%.0fs)",
-                                      channel_id, age, queue.ttl_seconds)
-                        queue.stats["dropped_ttl"] += 1
-                        future = request.get("future")
-                        if future and not future.done():
-                            future.set_result({"ok": False, "error": "ttl_expired",
-                                               "age": round(age, 1)})
-                        del self._blocked[channel_id]
-                        continue
-
-                    if blocked["force_send"]:
-                        # All retries exhausted, force delay has elapsed -> FORCE SEND
-                        queue.stats["lbt_force_sent"] += 1
-                        last_lbt = blocked.get("last_lbt_result", {})
-                        logger.warning("GlobalTXScheduler: FORCE SENDING packet on %s "
-                                      "despite pre-TX block (rssi=%.1f, threshold=%.1f)",
-                                      channel_id,
-                                      last_lbt.get("rssi", 0),
-                                      last_lbt.get("threshold", 0))
-                        del self._blocked[channel_id]
-                        await self._do_send(channel_id, queue, request, txpk, queue_wait_ms)
-                        sent_any = True
-                        continue
-
-                    # Retry pre-TX check
-                    attempt = blocked["attempt"]
-                    lbt_result = self._lbt_check(channel_id, queue.freq_hz, queue.sf)
-
-                    # Record LBT RSSI
-                    _lbt_rssi = lbt_result.get("rssi")
-                    if _lbt_rssi is not None:
-                        queue.record_lbt_rssi(_lbt_rssi)
-
-                    if lbt_result.get("allow", True):
-                        # Pre-TX check passed on retry!
-                        self._record_lbt_cad_stats(queue, lbt_result, passed=True)
-                        _reason = lbt_result.get("reason", "clear")
-                        logger.info("GlobalTXScheduler: pre-TX PASSED on %s "
-                                   "after %d attempts (reason=%s, rssi=%s, threshold=%s)",
-                                   channel_id, attempt + 1, _reason,
-                                   lbt_result.get("rssi", "n/a"),
-                                   lbt_result.get("threshold", "n/a"))
-                        del self._blocked[channel_id]
-                        await self._do_send(channel_id, queue, request, txpk, queue_wait_ms)
-                        sent_any = True
-                        continue
-
-                    # Still blocked - advance to next retry or force-send
-                    next_attempt = attempt + 1
-                    if next_attempt < len(self.LBT_RETRY_DELAYS):
-                        # Schedule next retry
-                        delay = self.LBT_RETRY_DELAYS[next_attempt]
-                        blocked["attempt"] = next_attempt
-                        blocked["retry_after"] = time.monotonic() + delay
-                        blocked["last_lbt_result"] = lbt_result
-                        logger.info("GlobalTXScheduler: pre-TX retry %d/%d on %s, "
-                                   "will retry in %.1fs (reason=%s, rssi=%s, threshold=%s)",
-                                   next_attempt + 1, len(self.LBT_RETRY_DELAYS),
-                                   channel_id, delay,
-                                   lbt_result.get("reason", "unknown"),
-                                   lbt_result.get("rssi", "n/a"),
-                                   lbt_result.get("threshold", "n/a"))
-                    else:
-                        # All retries exhausted - schedule force-send after delay
-                        self._record_lbt_cad_stats(queue, lbt_result, passed=False)
-                        blocked["force_send"] = True
-                        blocked["retry_after"] = time.monotonic() + self.LBT_FORCE_DELAY
-                        blocked["last_lbt_result"] = lbt_result
-                        logger.warning("GlobalTXScheduler: pre-TX BLOCKED on %s after %d "
-                                      "attempts - will FORCE SEND in %.1fs "
-                                      "(reason=%s, rssi=%s, threshold=%s, freq=%.3fMHz)",
-                                      channel_id, len(self.LBT_RETRY_DELAYS),
-                                      self.LBT_FORCE_DELAY,
-                                      lbt_result.get("reason", "unknown"),
-                                      lbt_result.get("rssi", "n/a"),
-                                      lbt_result.get("threshold", "n/a"),
-                                      queue.freq_hz / 1e6)
-                    # Skip this channel for now, move to next
-                    continue
+                # Blocked-request retry state machine was removed together
+                # with the Python LBT pre-filter. HAL LBT (inside lgw_send)
+                # handles any RSSI-based blocking; there is no retry queue
+                # at the Python layer anymore — failures surface via the
+                # post-TX TX_ACK.
 
                 # --- No blocked request: try to dequeue a new packet ---
                 try:
@@ -816,51 +816,13 @@ class GlobalTXScheduler:
                 # Measure queue wait BEFORE calling send_func
                 queue_wait_ms = (time.time() - request["enqueue_time"]) * 1000
 
-                # --- Pre-TX check (CAD and/or LBT, independently configurable) ---
-                if self._lbt_check:
-                    lbt_result = self._lbt_check(channel_id, queue.freq_hz, queue.sf)
-                    _cad_on = lbt_result.get("cad_enabled", False)
-                    _lbt_on = lbt_result.get("lbt_enabled", False)
-                    if not _cad_on and not _lbt_on:
-                        # Both checks disabled on this channel - send immediately
-                        queue.stats["lbt_skipped"] += 1
-                    else:
-                        # At least one check is active
-                        # Record RSSI in rolling buffer (if available)
-                        _lbt_rssi = lbt_result.get("rssi")
-                        if _lbt_rssi is not None:
-                            queue.record_lbt_rssi(_lbt_rssi)
-
-                        if lbt_result.get("allow", True):
-                            # Pre-TX check passed
-                            self._record_lbt_cad_stats(queue, lbt_result, passed=True)
-                        else:
-                            # Blocked (by CAD or LBT) - store as blocked
-                            # and skip to next channel (non-blocking)
-                            next_attempt = 1
-                            if next_attempt < len(self.LBT_RETRY_DELAYS):
-                                delay = self.LBT_RETRY_DELAYS[next_attempt]
-                            else:
-                                delay = self.LBT_FORCE_DELAY
-                            self._blocked[channel_id] = {
-                                "request": request,
-                                "txpk": txpk,
-                                "queue_wait_ms": queue_wait_ms,
-                                "attempt": next_attempt,
-                                "retry_after": time.monotonic() + delay,
-                                "force_send": next_attempt >= len(self.LBT_RETRY_DELAYS),
-                                "last_lbt_result": lbt_result,
-                            }
-                            _reason = lbt_result.get("reason", "unknown")
-                            logger.info("GlobalTXScheduler: pre-TX blocked on %s "
-                                       "(reason=%s, attempt 1/%d, retry in %.1fs, "
-                                       "rssi=%s, threshold=%s)",
-                                       channel_id, _reason,
-                                       len(self.LBT_RETRY_DELAYS), delay,
-                                       lbt_result.get("rssi", "n/a"),
-                                       lbt_result.get("threshold", "n/a"))
-                            continue  # Non-blocking: move to next channel
-
+                # --- Pre-TX check removed ---
+                # Custom LBT and its Python pre-filter have been replaced by
+                # HAL LBT inside lgw_send() (per-channel rssi_target_dbm).
+                # HW-CAD still runs unconditionally in the HAL C code. We
+                # dequeue → _do_send directly; any HAL LBT block is reported
+                # via the post-TX TX_ACK and resolves the request future with
+                # result="blocked".
                 # --- Send the packet ---
                 await self._do_send(channel_id, queue, request, txpk, queue_wait_ms)
                 sent_any = True
@@ -881,7 +843,6 @@ class GlobalTXScheduler:
             "packets_scheduled": self._packets_scheduled,
             "round_index": self._round_index,
             "queues": list(self._queues.keys()),
-            "lbt_blocked_channels": list(self._blocked.keys()),
         }
 # Legacy TXQueue compatibility (deprecated)
 # ======================================================================

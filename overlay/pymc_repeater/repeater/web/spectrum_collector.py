@@ -109,25 +109,33 @@ class SpectrumCollector:
         while self._running:
             try:
                 if os.path.exists(JSON_PATH):
-                    with open(JSON_PATH) as f:
-                        data = json.load(f)
-                    ts = float(data.get('timestamp', time.time()))
-                    if ts > last_ts:
-                        channels = data.get('channels') or {}
-                        stored = 0
-                        for freq_str, ch in channels.items():
-                            try:
-                                freq_hz = int(freq_str)
-                                rssi = ch.get('rssi_avg')
-                                if rssi is None:
-                                    continue
-                                self._store_spectrum(ts, freq_hz / 1e6, float(rssi))
-                                stored += 1
-                            except Exception as e:
-                                logger.debug(f'Skipping channel {freq_str}: {e}')
-                        if stored:
-                            logger.debug('SpectrumCollector stored %d channels @ ts=%s', stored, ts)
-                        last_ts = ts
+                    size = os.path.getsize(JSON_PATH)
+                    if size == 0:
+                        # Empty file — sweep likely disabled, skip silently
+                        pass
+                    else:
+                        with open(JSON_PATH) as f:
+                            data = json.load(f)
+                        ts = float(data.get('timestamp', time.time()))
+                        if ts > last_ts:
+                            channels = data.get('channels') or {}
+                            stored = 0
+                            for freq_str, ch in channels.items():
+                                try:
+                                    freq_hz = int(freq_str)
+                                    rssi = ch.get('rssi_avg')
+                                    if rssi is None:
+                                        continue
+                                    self._store_spectrum(ts, freq_hz / 1e6, float(rssi))
+                                    stored += 1
+                                except Exception as e:
+                                    logger.debug(f'Skipping channel {freq_str}: {e}')
+                            if stored:
+                                logger.debug('SpectrumCollector stored %d channels @ ts=%s', stored, ts)
+                            last_ts = ts
+            except json.JSONDecodeError:
+                # Malformed JSON (truncated write, etc.) — skip silently
+                logger.debug('Spectrum poll: JSON file empty or malformed, skipping')
             except Exception as e:
                 logger.warning(f'Spectrum poll error: {e}')
             # Sleep in 5s chunks for clean shutdown

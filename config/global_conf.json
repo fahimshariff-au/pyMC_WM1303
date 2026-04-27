@@ -190,17 +190,32 @@
         "boosted": true
       },
       "spectral_scan": {
-        "enable": true,
+        "enable": false,
         "freq_start": 868600000,
         "nb_chan": 9,
         "nb_scan": 100,
         "pace_s": 300
       },
       "lbt": {
-        "enable": false,
+        "enable": true,
         "rssi_target": -80,
-        "nb_channel": 0,
-        "channels": []
+        "nb_channel": 2,
+        "channels": [
+          {
+            "freq_hz": 869462000,
+            "bandwidth": 125000,
+            "scan_time_us": 128,
+            "transmit_time_ms": 4000,
+            "rssi_target": -80
+          },
+          {
+            "freq_hz": 869618000,
+            "bandwidth": 62500,
+            "scan_time_us": 128,
+            "transmit_time_ms": 4000,
+            "rssi_target": -80
+          }
+        ]
       },
       "custom_lbt": {
         "enable": false,

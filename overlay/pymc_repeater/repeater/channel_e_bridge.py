@@ -21,7 +21,7 @@ import logging
 import socket
 import hashlib
 from pathlib import Path
-from repeater.bridge_engine import _stable_hash, emit_lbt_cad_trace_steps
+from repeater.bridge_engine import _stable_hash
 from repeater.web.packet_trace import trace_event as _trace
 
 logger = logging.getLogger(__name__)
@@ -63,11 +63,14 @@ class ChannelEBridge:
         Uses the SX1302/SX1250/SKY66420 TX path with parameters from
         the channel_e TX queue (configured from wm1303_ui.json).
 
-        Emits a `tx_send` packet-trace step on completion so channel_e
-        TX appears in the Tracing UI the same way as other radio channels.
-        Also emits `lbt_check` / `cad_check` steps (via the shared helper)
-        so every HAL-TX path — including channel_e — has uniform CAD/LBT
-        visibility in the Tracing tab.
+        Channel E TX routes through the SAME TXQueueManager /
+        GlobalTXScheduler / _send_pull_resp path as all other channels,
+        so by passing `trace_hash=pkt_hash8` into `queue.enqueue()`
+        the backend emits the full set of enriched trace events
+        (tx_noisefloor, cad_start, lbt_check, cad_check, rf_tx_start,
+        rf_tx_end, sx1261_rx_restart, tx_ack) automatically and with
+        correct chronological timing. This makes channel_e traces
+        visually identical to other channels in the Tracing UI.
         """
         pkt_hash8 = _stable_hash(data)[:8]
         # Friendly channel display name (e.g. "EU-Narrow") — never show raw id.
@@ -87,7 +90,7 @@ class ChannelEBridge:
             if hasattr(self.backend, '_tx_queue_manager') and self.backend._tx_queue_manager:
                 queue = self.backend._tx_queue_manager.queues.get(CHANNEL_E_TX_CHANNEL)
                 if queue:
-                    result = await queue.enqueue(data)
+                    result = await queue.enqueue(data, trace_hash=pkt_hash8)
                     if result.get('ok'):
                         self.tx_packets += 1
                         logger.info(
@@ -97,10 +100,10 @@ class ChannelEBridge:
                             result.get('send_ms', 0),
                             result.get('airtime_ms', 0)
                         )
-                        # Emit lbt_check + cad_check BEFORE tx_send so they
-                        # appear in chronological order in the trace.
-                        emit_lbt_cad_trace_steps(pkt_hash8, CHANNEL_E_TX_CHANNEL,
-                                                  result)
+                        # lbt_check + cad_check + rf_tx_start/end +
+                        # sx1261_rx_restart + tx_ack are emitted
+                        # automatically inside _emit_tx_phase_trace
+                        # (backend) before we reach this code path.
                         # Rich multi-line tx_send detail (Frequency / Datarate /
                         # Airtime / Queue wait / Send) via shared formatter.
                         try:
@@ -141,10 +144,10 @@ class ChannelEBridge:
                             'Channel E TX FAIL: %s (%d bytes)',
                             result.get('error', 'unknown'), len(data)
                         )
-                        # Still emit CAD/LBT for failed TX (may contain useful
-                        # diagnostic info like LBT BLOCKED).
-                        emit_lbt_cad_trace_steps(pkt_hash8, CHANNEL_E_TX_CHANNEL,
-                                                  result)
+                        # Enriched trace events (if any) were already
+                        # emitted by _emit_tx_phase_trace inside the
+                        # backend for TXs that reached the HAL stage.
+                        # Here we just record the final tx_send error.
                         _trace(pkt_hash8, 'tx_send', channel=CHANNEL_E_TX_CHANNEL,
                                detail='TX FAILED on %s: %s' % (_friendly, result.get('error', 'unknown')),
                                status='error')
@@ -157,14 +160,13 @@ class ChannelEBridge:
             # Fallback: try backend.send() directly with UI-configured tx_power
             _ui = _load_channel_e_ui()
             _tx_power = int(_ui.get('tx_power', 27))
-            meta = await self.backend.send(CHANNEL_E_TX_CHANNEL, data, tx_power=_tx_power)
+            meta = await self.backend.send(CHANNEL_E_TX_CHANNEL, data, tx_power=_tx_power, trace_hash=pkt_hash8)
             self.tx_packets += 1
             logger.info('Channel E TX: sent %d bytes via backend.send() (tx_power=%d)',
                        len(data), _tx_power)
-            # backend.send() return shape may also contain cad_/lbt_ keys —
-            # route through the shared helper for consistency.
-            if isinstance(meta, dict):
-                emit_lbt_cad_trace_steps(pkt_hash8, CHANNEL_E_TX_CHANNEL, meta)
+            # backend.send() emits enriched events itself (via
+            # _emit_tx_phase_trace) when trace_hash is provided, so we
+            # only need to append the final tx_send summary here.
             _trace(pkt_hash8, 'tx_send', channel=CHANNEL_E_TX_CHANNEL,
                    detail='TX on %s via backend.send() (tx_power=%d dBm, %d bytes)' % (_friendly, _tx_power, len(data)),
                    status='ok')

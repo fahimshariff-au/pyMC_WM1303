@@ -34,6 +34,47 @@ from pymc_core.hardware.tx_queue import ChannelTXQueue, TXQueueManager, GlobalTX
 
 logger = logging.getLogger('WM1303Backend')
 
+# ---------------------------------------------------------------------------
+# Packet-trace callback hook (layering: pymc_core must NOT import
+# pymc_repeater.web.packet_trace directly). The repeater registers a callback
+# at startup via set_trace_callback(). When no callback is registered (e.g.
+# standalone pymc_core use), _trace() is a safe no-op.
+#
+# Empirical HAL-internal latencies used to backdate TX-phase trace events
+# relative to the post-TX TX_ACK arrival moment. Values are typical for the
+# WM1303 + lora_pkt_fwd stack on Raspberry Pi; they may vary by a few ms but
+# are stable enough for chronological trace visualization.
+# ---------------------------------------------------------------------------
+_trace_callback = None  # Optional[Callable[..., None]]
+
+# Typical latencies (ms) relative to PULL_RESP sendto completion:
+_PRE_NOISEFLOOR_MS = 16   # pull_resp_sent -> [CAD] TX noisefloor FSK read
+_PRE_RF_TX_MS      = 88   # pull_resp_sent -> [imme] direct TX sent (rf_tx_start)
+_POST_RF_RESTART_MS = 209  # rf_tx_end -> SX1261 'Deferred LoRa RX restart after TX inhibit cleared'
+_ACK_ROUNDTRIP_MS   = 42   # sx1261_rx_restart -> post-TX TX_ACK UDP arrival
+
+
+def set_trace_callback(fn) -> None:
+    """Register a packet-trace callback. Called by repeater at startup.
+
+    The callback receives the same args as packet_trace.trace_event:
+      (pkt_hash: str, step_name: str, channel='', pkt_type='',
+       detail='', status='ok', ts_offset_ms=0)
+    """
+    global _trace_callback
+    _trace_callback = fn
+
+
+def _trace(pkt_hash, step_name, **kwargs) -> None:
+    """Safe no-op wrapper around the registered trace callback."""
+    cb = _trace_callback
+    if cb is None or not pkt_hash:
+        return
+    try:
+        cb(pkt_hash, step_name, **kwargs)
+    except Exception as _e:
+        logger.debug('WM1303Backend: _trace callback failed: %s', _e)
+
 # Semtech UDP packet forwarder protocol identifiers
 PKT_PUSH_DATA = 0x00
 PKT_PUSH_ACK  = 0x01
@@ -227,72 +268,113 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 ch_name, f, delta, center, max_if_offset, bw)
             ch['active'] = False  # force-disable to prevent HAL rejection
 
-    # --- HAL-level LBT: DISABLED ---
-    # The AGC firmware does NOT properly support the LBT tx_status handshake.
-    # When HAL LBT is enabled, lgw_lbt_tx_status() waits up to 500ms for the
-    # AGC to signal TX-start, but the AGC never sets the status bit. This causes
-    # EVERY lgw_send() call to timeout and abort with "TIMEOUT on TX start".
-    # Result: ZERO packets transmitted.
+    # --- HAL-level LBT: DYNAMICALLY GENERATED from UI config ---
+    # HAL LBT (AGC-based sx1261_lbt_start) is the PRIMARY LBT mechanism.
+    # Per-channel enable/disable and threshold come from wm1303_ui.json.
+    # AGC handshake verified working on WM1303 (test on pi03, 2026-04-25).
     #
-    # Instead of HAL LBT, we use a custom real-time SX1261 RSSI check in the
-    # pkt_fwd JIT thread (see lora_pkt_fwd.c). This performs a direct SX1261
-    # RSSI measurement before each TX without relying on the broken AGC handshake.
+    # IMPORTANT: When HAL LBT is enabled (lbt.enable=true), the HAL runs LBT
+    # on EVERY TX. Any TX frequency NOT listed in lbt.channels[] is rejected
+    # with "Cannot start LBT - wrong channel". Therefore we must include ALL
+    # active TX frequencies in lbt.channels[]. Channels where the user did
+    # NOT enable LBT get a permit-all threshold (+127 dBm, unreachable in
+    # practice → LBT always passes, effectively equivalent to no LBT).
+    # Channels where the user DID enable LBT get the user-configured threshold.
     #
-    # The Python software LBT (_lbt_check) is KEPT as a pre-filter — it checks
-    # cached spectral data before the packet even reaches pkt_fwd.
-    _lbt_enabled = False
-    _lbt_rssi_target = -80
+    # Decision: HAL LBT is only enabled if AT LEAST ONE channel has
+    # lbt_enabled=true. If no channels want LBT, lbt.enable is false and
+    # the HAL skips LBT entirely (fastest path).
+    #
+    # The Python software pre-filter was removed; HAL LBT is now the sole
+    # RSSI-based TX gate (per-channel rssi_target_dbm, inside lgw_send).
     _lbt_channels = []
+    _lbt_seen = set()  # deduplicate by (freq, bw)
+    _lbt_thresholds = []  # collect user-enabled thresholds for global fallback
+    _lbt_any_enabled = False  # true if at least one channel has lbt_enabled=true
 
-    # --- LBT channel generation (kept for reference, not used with HAL LBT disabled) ---
-    # _lbt_seen = set()  # deduplicate by (frequency, bandwidth) tuple
-    #
-    # # Add LBT channels from ALL active UI channels
-    # for ch in (all_ui_channels or []):
-    #     if not ch.get('active', False):
-    #         continue
-    #     ch_freq = int(ch.get('frequency', 0))
-    #     ch_bw = int(ch.get('bandwidth', 125000))
-    #     # Supported LBT bandwidths: 62500, 125000, 250000
-    #     if ch_bw not in (62500, 125000, 250000):
-    #         ch_bw = 125000  # fallback for unsupported bandwidths
-    #     lbt_key = (ch_freq, ch_bw)
-    #     if ch_freq and lbt_key not in _lbt_seen:
-    #         _lbt_channels.append({
-    #             'freq_hz': ch_freq,
-    #             'bandwidth': ch_bw,
-    #             'scan_time_us': 5000,
-    #             'transmit_time_ms': 10000,
-    #         })
-    #         _lbt_seen.add(lbt_key)
-    #
-    # # Add Channel E frequency for LBT coverage (if not already present).
-    # _che_freq_for_lbt = 869618000  # default, updated below from UI config
-    # _che_bw_for_lbt = 62500        # Channel E native bandwidth
-    # try:
-    #     _che_lbt_path = Path('/etc/pymc_repeater/wm1303_ui.json')
-    #     if _che_lbt_path.exists():
-    #         _che_lbt_d = json.loads(_che_lbt_path.read_text()).get('channel_e', {})
-    #         if _che_lbt_d:
-    #             _che_freq_for_lbt = int(_che_lbt_d.get('frequency', 869618000))
-    #             _che_bw_for_lbt = int(_che_lbt_d.get('bandwidth', 62500))
-    #             if _che_bw_for_lbt not in (62500, 125000, 250000):
-    #                 _che_bw_for_lbt = 62500
-    # except Exception:
-    #     pass
-    # _che_lbt_key = (_che_freq_for_lbt, _che_bw_for_lbt)
-    # if _che_freq_for_lbt and _che_lbt_key not in _lbt_seen:
-    #     _lbt_channels.append({
-    #         'freq_hz': _che_freq_for_lbt,
-    #         'bandwidth': _che_bw_for_lbt,
-    #         'scan_time_us': 5000,
-    #         'transmit_time_ms': 10000,
-    #     })
-    #     _lbt_seen.add(_che_lbt_key)
+    # Add LBT entries for ALL active UI channels (lbt_enabled drives threshold)
+    for ch in (all_ui_channels or []):
+        if not ch.get('active', False):
+            continue
+        ch_freq = int(ch.get('frequency', 0))
+        if not ch_freq:
+            continue
+        ch_bw = int(ch.get('bandwidth', 125000))
+        # HAL supports 62500, 125000, 250000
+        if ch_bw not in (62500, 125000, 250000):
+            logger.warning('LBT: channel %s unsupported BW %d, using 125000',
+                          ch.get('name', '?'), ch_bw)
+            ch_bw = 125000
+        ch_lbt_on = bool(ch.get('lbt_enabled', False))
+        if ch_lbt_on:
+            ch_threshold = int(ch.get('lbt_threshold', ch.get('lbt_rssi_target', -80)))
+            _lbt_thresholds.append(ch_threshold)
+            _lbt_any_enabled = True
+        else:
+            ch_threshold = 127  # permit-all (unreachable RSSI)
+        lbt_key = (ch_freq, ch_bw)
+        if lbt_key not in _lbt_seen:
+            _lbt_channels.append({
+                'freq_hz': ch_freq,
+                'bandwidth': ch_bw,
+                'scan_time_us': 128,       # minimal RX disruption
+                'transmit_time_ms': 4000,  # must be > 1.5ms + longest airtime
+                'rssi_target': ch_threshold,
+            })
+            _lbt_seen.add(lbt_key)
 
-    logger.info('_generate_bridge_conf: HAL LBT DISABLED '
-                '(AGC firmware does not support LBT tx_status handshake, '
-                'using custom SX1261 RSSI check in pkt_fwd instead)')
+    # Channel E: always add if channel_e config present (even if lbt_enabled=false,
+    # we need the freq in the LBT list to avoid "wrong channel" errors during TX)
+    try:
+        _che_ui_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+        if _che_ui_path.exists():
+            _che_d = json.loads(_che_ui_path.read_text()).get('channel_e', {})
+            if _che_d:
+                _che_freq = int(_che_d.get('frequency', 869618000))
+                _che_bw = int(_che_d.get('bandwidth', 62500))
+                if _che_bw not in (62500, 125000, 250000):
+                    _che_bw = 62500
+                _che_lbt_on = bool(_che_d.get('lbt_enabled', False))
+                if _che_lbt_on:
+                    _che_threshold = int(_che_d.get('lbt_threshold',
+                                                   _che_d.get('lbt_rssi_target', -80)))
+                    _lbt_thresholds.append(_che_threshold)
+                    _lbt_any_enabled = True
+                else:
+                    _che_threshold = 127  # permit-all
+                _che_key = (_che_freq, _che_bw)
+                if _che_key not in _lbt_seen:
+                    _lbt_channels.append({
+                        'freq_hz': _che_freq,
+                        'bandwidth': _che_bw,
+                        'scan_time_us': 128,
+                        'transmit_time_ms': 4000,
+                        'rssi_target': _che_threshold,
+                    })
+                    _lbt_seen.add(_che_key)
+    except Exception as ex:
+        logger.warning('LBT: could not read channel_e config: %s', ex)
+
+    # HAL LBT enabled only if at least one channel has user-requested LBT
+    _lbt_enabled = _lbt_any_enabled
+    # Global fallback threshold: min of user-enabled (most restrictive), or -80
+    _lbt_rssi_target = min(_lbt_thresholds) if _lbt_thresholds else -80
+
+    if _lbt_enabled:
+        logger.info('_generate_bridge_conf: HAL LBT ENABLED with %d channels '
+                   '(thresholds: %s, global fallback: %d dBm; '
+                   'permit-all=127 dBm for channels without lbt_enabled)',
+                   len(_lbt_channels),
+                   [(c['freq_hz'], c['rssi_target']) for c in _lbt_channels],
+                   _lbt_rssi_target)
+    else:
+        # Clear list so lbt.nb_channel is 0 and HAL does not run LBT
+        _lbt_channels = []
+        logger.info('_generate_bridge_conf: HAL LBT DISABLED '
+                   '(no channels with lbt_enabled=true)')
+    # TODO: wire HAL-LBT results into TX_ACK extras. Currently the lbt[...]
+    # fields shown in tx_ack extras are sourced from the custom_lbt path only,
+    # so with HAL LBT active they show en=False pass=True. Needs a follow-up.
 
     # --- SX1261: compute spectral_scan dynamically from channel config ---
     # Cover the full RF RX bandwidth: center ± 800kHz
@@ -300,15 +382,28 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
     _scan_start = ((center - 800000) // 200000) * 200000
     _scan_stop = ((center + 800000 + 199999) // 200000) * 200000
     _nb_chan = int((_scan_stop - _scan_start) // 200000)
+    # Spectral scan is DISABLED by default (v2.3.2+).
+    # Rationale: all operational noise-floor data is already available from:
+    #   (a) HAL LBT real-time RSSI reads per TX (primary per-channel measurement)
+    #   (b) RX-derived noise floor: rssi - snr from received packets
+    #   (c) LBT RSSI samples aggregated into per-channel rolling buffers
+    # The sweep added SX1261 state-machine complexity (mode switches between RX,
+    # scan, LBT) and hardware-level reliability issues (register 0x0401 accumulator
+    # corruption, sweep-thread stalls) without providing data that other sources
+    # don't already cover. Disabling the sweep gives the SX1261 a simpler, more
+    # stable role: Channel E RX + per-TX LBT only. See release notes v2.3.2 and
+    # TODO item for future complete removal (Option B).
+    # Values kept non-zero so manual re-enable via bridge_conf.json still works.
     _spectral_scan_conf = {
-        'enable': True,
+        'enable': False,
         'freq_start': _scan_start,
         'nb_chan': _nb_chan,  # typically 8-9 channels for 1.6MHz BW
-        'nb_scan': 100,  # reduced from 2000 for faster scans
-        'pace_s': 300,  # 5 minutes between sweeps (reduced SPI load)
+        'nb_scan': 100,
+        'pace_s': 300,
     }
-    logger.info('_generate_bridge_conf: spectral_scan enabled '
-                '(freq_start=%d, nb_chan=%d, freq_stop=%d, center=%d)',
+    logger.info('_generate_bridge_conf: spectral_scan DISABLED by default '
+                '(v2.3.2+; values retained for manual re-enable: '
+                'freq_start=%d, nb_chan=%d, freq_stop=%d, center=%d)',
                 _scan_start, _nb_chan, _scan_stop, center)
 
     # Build chan_multiSF_0 through chan_multiSF_7 with FIXED IF chain mapping
@@ -438,14 +533,14 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                     'channels': _lbt_channels,
                 },
                 'custom_lbt': (lambda _clbt_channels: {
-                    'enable': any(ch.get('lbt_enabled', False) for ch in _clbt_channels),
+                    'enable': False,  # Custom LBT disabled - HAL LBT is primary now
                     'cad_enable': True,  # CAD is MANDATORY before every TX — always enabled
                     'rssi_target': _lbt_rssi_target,
                     'channels': _clbt_channels,
                 })([
                     {
                         'freq_hz': int(ch.get('frequency', 0)),
-                        'lbt_enabled': bool(ch.get('lbt_enabled', False)),
+                        'lbt_enabled': False,  # Force off - HAL LBT replaces custom LBT
                         'cad_enabled': bool(ch.get('cad_enabled', False)),
                     }
                     for ch in (all_ui_channels or [])
@@ -453,7 +548,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 ] + ([
                     {
                         'freq_hz': int(_che_lora_rx.get('freq_hz', 0)),
-                        'lbt_enabled': bool(_che_d.get('lbt_enabled', False)),
+                        'lbt_enabled': False,  # Force off - HAL LBT replaces custom LBT
                         'cad_enabled': bool(_che_d.get('cad_enabled', False)),
                     }
                 ] if _che_lora_rx.get('enable', True) and int(_che_lora_rx.get('freq_hz', 0)) > 0 else [])),
@@ -684,6 +779,11 @@ class WM1303Backend:
         self._hourly_timer: threading.Timer | None = None
         self._hourly_lock = threading.Lock()
 
+        # Per-channel CRC error rate counters (read+reset by external recorder every 60s)
+        self._crc_rate_lock = threading.Lock()
+        self._crc_rate_counters: dict[str, dict[str, int]] = {}  # {channel_id: {"crc_error": N, "crc_disabled": N}}
+
+
 
     def _start_hourly_timer(self) -> None:
         """Start the recurring hourly summary timer."""
@@ -745,6 +845,19 @@ class WM1303Backend:
         self._start_hourly_timer()
 
 
+
+    def get_and_reset_crc_rate_counters(self) -> dict:
+        """Return per-channel CRC error/disabled counts and reset to zero.
+
+        Called by the external crc_error_rate recorder every 60 seconds.
+        Returns dict: {channel_id: {"crc_error": N, "crc_disabled": N}}
+        """
+        with self._crc_rate_lock:
+            snapshot = {}
+            for ch_id, counts in self._crc_rate_counters.items():
+                snapshot[ch_id] = dict(counts)
+            self._crc_rate_counters.clear()
+        return snapshot
 
     def register_virtual_radio(self, radio) -> None:
         self.virtual_radios[radio.channel_id] = radio
@@ -1255,7 +1368,12 @@ class WM1303Backend:
             for freq_hz_str, stats in channels.items():
                 try:
                     freq_mhz = int(freq_hz_str) / 1e6
+                    samples = stats.get('samples', 0)
                     rssi_avg = stats.get('rssi_avg', -120.0)
+                    # Skip entries with no samples (sweep disabled/stale) or
+                    # sentinel values (SX1261 returns -127 when not scanning)
+                    if samples == 0 or rssi_avg <= -126.0:
+                        continue
                     result[freq_mhz] = rssi_avg
                 except (ValueError, TypeError):
                     continue
@@ -1455,7 +1573,7 @@ class WM1303Backend:
 
         # Read spectral scan data
         # Read spectral scan data (use long max_age for noise floor, fallback to DB)
-        scan_data = self._read_spectral_scan(max_age=86400.0)
+        scan_data = self._read_spectral_scan(max_age=300.0)  # 5 min max — stale data from before restart is discarded
         if not scan_data:
             scan_data = self._read_spectrum_from_db(max_age=86400.0)
         if not scan_data:
@@ -1811,256 +1929,12 @@ class WM1303Backend:
         """
         return True
 
-    def _cad_check(self, channel_id: str, freq_hz: int, rssi: float, sf: int = 0) -> dict:
-        """Channel Activity Detection — prefers hardware CAD from SX1261.
-
-        Priority:
-          1. Hardware CAD results (from pkt_fwd spectral scan thread)
-          2. Software pattern analysis fallback (spectral scan RSSI)
-
-        Returns dict with: detected (bool), confidence (float 0-1), reason (str)
-        """
-        # --- Try hardware CAD first ---
-        hw_cad = self._read_hardware_cad_results(max_age=30.0)
-        if hw_cad:
-            # Match by channel_id (exact name match) or by frequency+SF
-            ch_result = hw_cad.get(channel_id)
-            if not ch_result:
-                # Fallback: match by frequency+SF (TX queue uses channel_a/b/c,
-                # but CAD config uses UI channel names like brsf8/sf7/sf8)
-                for _cad_id, _cad_r in hw_cad.items():
-                    if _cad_r.get('freq_hz') == freq_hz:
-                        if sf and _cad_r.get('sf') == sf:
-                            ch_result = _cad_r
-                            break
-                        elif not sf:
-                            # No SF provided, match by freq only (first match)
-                            ch_result = _cad_r
-                            break
-            if ch_result and ch_result.get('status', 2) == 0:  # status 0 = valid
-                detected = ch_result.get('detected', False)
-                hw_rssi = ch_result.get('rssi', -128)
-                return {
-                    'detected': detected,
-                    'confidence': 0.95 if detected else 0.05,
-                    'reason': 'hw_cad_detected' if detected else 'hw_cad_clear',
-                    'source': 'hardware_sx1261',
-                    'hw_rssi': hw_rssi,
-                    'hw_status': 0,
-                }
-            elif ch_result and ch_result.get('status') == 1:  # timeout
-                logger.debug('WM1303Backend: HW CAD timeout on %s, falling back to software',
-                            channel_id)
-            # status 2 = skipped (TX busy) — fall through to software
-
-        # --- Software CAD fallback (spectral pattern analysis) ---
-        scan_data = self._read_spectral_scan()
-        if not scan_data:
-            return {'detected': False, 'confidence': 0, 'reason': 'no_scan_data', 'source': 'none'}
-
-        freq_mhz = freq_hz / 1e6
-        nearby = []
-        for scan_freq, scan_rssi in scan_data.items():
-            if abs(scan_freq - freq_mhz) <= 0.5:
-                nearby.append((scan_freq, scan_rssi))
-
-        if len(nearby) < 2:
-            return {'detected': False, 'confidence': 0, 'reason': 'insufficient_scan_points',
-                    'source': 'software'}
-
-        rssi_values = [r for _, r in nearby]
-        max_rssi = max(rssi_values)
-        min_rssi = min(rssi_values)
-        mean_rssi = sum(rssi_values) / len(rssi_values)
-        spread = max_rssi - min_rssi
-
-        with self._nf_lock:
-            _ui_name = self._freq_to_ui_name.get(int(freq_hz), '')
-            nf = self._channel_noise_floors.get(_ui_name, -120.0)
-
-        above_noise = max_rssi - nf
-        concentration = max_rssi - mean_rssi
-
-        detected = False
-        confidence = 0.0
-
-        if above_noise > 10 and concentration > 3:
-            detected = True
-            confidence = min(1.0, (above_noise - 10) / 20.0 * 0.5 + (concentration - 3) / 10.0 * 0.5)
-        elif above_noise > 6 and concentration > 5:
-            detected = True
-            confidence = min(0.7, concentration / 15.0)
-
-        return {
-            'detected': detected,
-            'confidence': round(confidence, 2),
-            'reason': 'sw_cad_detected' if detected else 'sw_cad_clear',
-            'source': 'software_pattern',
-            'max_rssi': round(max_rssi, 1),
-            'mean_rssi': round(mean_rssi, 1),
-            'spread': round(spread, 1),
-            'above_noise': round(above_noise, 1),
-            'concentration': round(concentration, 1),
-            'scan_points': len(nearby),
-        }
-
-
-    def _pre_tx_check(self, channel_id: str, freq_hz: int, sf: int = 0) -> dict:
-        """Pre-TX channel assessment — CAD and LBT are independent checks.
-
-        Order:  ① CAD (if enabled)  →  ② LBT / RSSI (if enabled)  →  ③ Allow TX
-
-        CAD and LBT are independently configurable per channel.
-        Either can block TX on its own.  Both disabled = immediate allow.
-
-        Data sources (tried in order for RSSI):
-          1. Spectral scan JSON file (max_age 120 s)
-          2. Spectrum history DB      (max_age 300 s)
-          3. Per-channel noise floor cache
-        """
-        cad_enabled = self._get_channel_cad_config(channel_id)
-        lbt_cfg = self._get_channel_lbt_config(channel_id)
-        lbt_enabled = lbt_cfg.get('lbt_enabled', False)
-
-        # Neither enabled → skip all checks
-        if not cad_enabled and not lbt_enabled:
-            logger.info('_pre_tx_check(%s): BOTH DISABLED (cad=%s, lbt=%s)',
-                         channel_id, cad_enabled, lbt_enabled)
-            return {'allow': True, 'cad_enabled': False, 'lbt_enabled': False,
-                    'reason': 'checks_disabled'}
-
-        logger.info('_pre_tx_check(%s): cad=%s lbt=%s freq=%.3fMHz sf=%d',
-                    channel_id, cad_enabled, lbt_enabled, freq_hz/1e6, sf)
-
-        freq_mhz = freq_hz / 1e6
-
-        # --- Gather noise floor ---
-        with self._nf_lock:
-            _ui_name = self._freq_to_ui_name.get(int(freq_hz), '')
-            ch_nf = self._channel_noise_floors.get(_ui_name)
-
-        # --- ① CAD check (if enabled) — always runs first ---
-        cad_result = None
-        if cad_enabled:
-            cad_result = self._cad_check(channel_id, freq_hz,
-                                          rssi=ch_nf or -120.0, sf=sf)
-            if cad_result.get('detected', False):
-                self._store_cad_event(channel_id, 'detected',
-                                     ch_nf, 'pre_tx_cad')
-                return {
-                    'allow': False,
-                    'cad_enabled': True,
-                    'lbt_enabled': lbt_enabled,
-                    'rssi': ch_nf,
-                    'threshold': lbt_cfg.get('lbt_rssi_target', -80),
-                    'noise_floor': ch_nf,
-                    'freq_mhz': freq_mhz,
-                    'reason': 'cad_signal_detected',
-                    'cad_result': cad_result,
-                }
-            else:
-                self._store_cad_event(channel_id, 'clear',
-                                     ch_nf, 'pre_tx_cad')
-
-        # --- ② LBT / RSSI check (if enabled) ---
-        if not lbt_enabled:
-            # CAD passed (or was the only check), LBT disabled → allow
-            return {
-                'allow': True,
-                'cad_enabled': cad_enabled,
-                'lbt_enabled': False,
-                'rssi': ch_nf,
-                'noise_floor': ch_nf,
-                'freq_mhz': freq_mhz,
-                'reason': 'cad_clear_lbt_disabled',
-                'cad_result': cad_result,
-            }
-
-        # LBT is enabled — need RSSI data
-        threshold = lbt_cfg.get('lbt_rssi_target', -80)
-        if ch_nf is not None:
-            adaptive_threshold = min(threshold, ch_nf + 10.0)
-        else:
-            adaptive_threshold = threshold
-
-        # Try spectral scan data
-        scan_data = self._read_spectral_scan(max_age=120.0)
-        if not scan_data:
-            scan_data = self._read_spectrum_from_db(max_age=300.0)
-
-        rssi = None
-        best_freq = None
-        if scan_data:
-            best_dist = float('inf')
-            for scan_freq in scan_data:
-                dist = abs(scan_freq - freq_mhz)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_freq = scan_freq
-            if best_freq is not None and best_dist <= 0.5:
-                rssi = scan_data[best_freq]
-
-        # Fallback: noise floor as RSSI estimate
-        if rssi is None and ch_nf is not None:
-            rssi = ch_nf
-            return {
-                'allow': True,
-                'cad_enabled': cad_enabled,
-                'lbt_enabled': True,
-                'rssi': rssi,
-                'threshold': adaptive_threshold,
-                'noise_floor': ch_nf,
-                'freq_mhz': freq_mhz,
-                'reason': 'noise_floor_estimate',
-                'cad_result': cad_result,
-            }
-
-        # No data at all
-        if rssi is None:
-            return {
-                'allow': True,
-                'cad_enabled': cad_enabled,
-                'lbt_enabled': True,
-                'rssi': None,
-                'threshold': adaptive_threshold,
-                'noise_floor': ch_nf,
-                'reason': 'no_scan_data',
-                'cad_result': cad_result,
-            }
-
-        # RSSI above threshold → block
-        if rssi > adaptive_threshold:
-            self._store_cad_event(channel_id, 'detected', rssi, 'rssi_block')
-            return {
-                'allow': False,
-                'cad_enabled': cad_enabled,
-                'lbt_enabled': True,
-                'rssi': rssi,
-                'threshold': adaptive_threshold,
-                'noise_floor': ch_nf,
-                'freq_mhz': best_freq,
-                'reason': 'channel_busy',
-                'cad_result': cad_result or {
-                    'detected': False,
-                    'reason': 'skipped_rssi_blocked',
-                    'source': 'none'},
-            }
-
-        # Both checks passed
-        return {
-            'allow': True,
-            'cad_enabled': cad_enabled,
-            'lbt_enabled': True,
-            'rssi': rssi,
-            'threshold': adaptive_threshold,
-            'noise_floor': ch_nf,
-            'freq_mhz': best_freq,
-            'reason': 'clear',
-            'cad_result': cad_result,
-        }
-
-    # Backward-compatible alias
-    _lbt_check = _pre_tx_check
+    # --- Removed: _cad_check, _pre_tx_check, _lbt_check alias ---
+    # The Python pre-TX CAD/LBT filter was eliminated together with the
+    # custom LBT code in pkt_fwd. HAL LBT (per-channel rssi_target_dbm,
+    # handled inside lgw_send) is now the sole RSSI gate; HW-CAD still
+    # runs unconditionally in the HAL C code. _store_cad_event remains
+    # below for post-TX CAD event logging from TX_ACK parsing.
 
     def _store_cad_event(self, channel_id: str, result: str,
                          rssi: float = None, context: str = 'lbt_check') -> None:
@@ -2083,7 +1957,8 @@ class WM1303Backend:
                 send_func=self._send_for_scheduler,
                 queues=self._tx_queue_manager.queues,
                 post_tx_callback=self._update_tx_stats,
-                lbt_check=None,  # Pre-TX check removed: C-level CAD+LBT in lora_pkt_fwd handles this
+                # Pre-TX check removed: HAL LBT inside lgw_send() handles
+                # RSSI-based blocking; HW-CAD still runs unconditionally.
                 tx_hold_getter=lambda: self._tx_hold_until,
             )
             await self._global_tx_scheduler.start()
@@ -2443,6 +2318,140 @@ class WM1303Backend:
                         trigger_reason, e)
 
 
+    # ------------------------------------------------------------------
+    # SX1261 health events (parsed from pkt_fwd stdout, stored in sqlite)
+    # ------------------------------------------------------------------
+
+    # Compiled regexes (class-level — compiled once on first use)
+    _RE_CAD_TIMEOUT = re.compile(
+        r'CAD timeout after\s+(?P<dur>\d+)\s*ms.*?freq=(?P<freq>\d+).*?SF(?P<sf>\d+)',
+        re.IGNORECASE,
+    )
+    _RE_CAD_FORCE = re.compile(
+        r'CAD still active after\s+(?P<retries>\d+)\s+retries.*?FORCING\s+TX',
+        re.IGNORECASE,
+    )
+    _RE_LBT_BUSY = re.compile(
+        r'LBT RSSI[^A-Za-z]*BUSY.*?freq=(?P<freq>\d+)[^0-9-]*.*?RSSI=(?P<rssi>-?\d+).*?'
+        r'(?:thr(?:eshold)?(?:_dbm)?\s*[:=]\s*)(?P<thr>-?\d+)',
+        re.IGNORECASE,
+    )
+    # Fallback LBT regex: HAL variant 'Custom LBT RSSI check BUSY on rf_chain N (freq=X Hz, RSSI=Y dBm, threshold=Z dBm)'
+    _RE_LBT_BUSY_ALT = re.compile(
+        r'Custom LBT RSSI check BUSY.*?freq=(?P<freq>\d+).*?RSSI=(?P<rssi>-?\d+).*?threshold=(?P<thr>-?\d+)',
+        re.IGNORECASE,
+    )
+
+    def _record_sx1261_health_event(
+        self,
+        event_type: str,
+        freq_hz: int | None = None,
+        rssi_dbm: float | None = None,
+        threshold_dbm: float | None = None,
+        sf: int | None = None,
+        duration_ms: float | None = None,
+        details: str | None = None,
+    ) -> None:
+        """Insert a single row into the sx1261_health_events table.
+
+        Best-effort: never raises. Used by the pkt_fwd stdout parser.
+        """
+        try:
+            _db = '/var/lib/pymc_repeater/repeater.db'
+            with sqlite3.connect(_db, timeout=2.0) as conn:
+                conn.execute(
+                    "INSERT INTO sx1261_health_events "
+                    "(timestamp, event_type, freq_hz, rssi_dbm, threshold_dbm, sf, duration_ms, details) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (time.time(), event_type, freq_hz, rssi_dbm, threshold_dbm,
+                     sf, duration_ms, details),
+                )
+                conn.commit()
+        except Exception as _e:
+            logger.debug('WM1303Backend: _record_sx1261_health_event failed: %s', _e)
+
+    def _parse_pkt_fwd_health(self, line_str: str) -> None:
+        """Scan a pkt_fwd stdout line for SX1261 health events and persist them.
+
+        Event types recognised:
+          - spectral_scan_timeout
+          - spectral_scan_status_unexpected
+          - sx1261_recovery
+          - cad_timeout
+          - cad_force_tx
+          - lbt_rssi_busy
+        """
+        try:
+            # Cheap pre-filter: most lines won't match any event
+            _lower = line_str.lower()
+            if not any(k in _lower for k in (
+                'spectral scan', 'sx1261 recovery', 'cad timeout',
+                'cad still active', 'lbt rssi',
+            )):
+                return
+
+            # 1) spectral_scan_timeout
+            if 'timeout on spectral scan' in _lower:
+                self._record_sx1261_health_event(
+                    'spectral_scan_timeout', details=line_str[:500])
+                return
+
+            # 2) spectral_scan_status_unexpected
+            if 'spectral scan status unexpected' in _lower:
+                self._record_sx1261_health_event(
+                    'spectral_scan_status_unexpected', details=line_str[:500])
+                return
+
+            # 3) sx1261_recovery (full or partial)
+            if 'performing full sx1261 recovery' in _lower or \
+               'performing sx1261 recovery' in _lower:
+                self._record_sx1261_health_event(
+                    'sx1261_recovery',
+                    details=('full' if 'full' in _lower else 'partial'))
+                return
+
+            # 4) cad_timeout
+            _m = self._RE_CAD_TIMEOUT.search(line_str)
+            if _m:
+                self._record_sx1261_health_event(
+                    'cad_timeout',
+                    freq_hz=int(_m.group('freq')),
+                    sf=int(_m.group('sf')),
+                    duration_ms=float(_m.group('dur')),
+                    details=line_str[:500],
+                )
+                return
+
+            # 5) cad_force_tx
+            _m = self._RE_CAD_FORCE.search(line_str)
+            if _m:
+                self._record_sx1261_health_event(
+                    'cad_force_tx',
+                    duration_ms=None,
+                    details=f"retries={_m.group('retries')}; " + line_str[:400],
+                )
+                return
+
+            # 6) lbt_rssi_busy (two variants)
+            if 'lbt rssi' in _lower and 'busy' in _lower:
+                _m = (self._RE_LBT_BUSY.search(line_str) or
+                      self._RE_LBT_BUSY_ALT.search(line_str))
+                if _m:
+                    self._record_sx1261_health_event(
+                        'lbt_rssi_busy',
+                        freq_hz=int(_m.group('freq')),
+                        rssi_dbm=float(_m.group('rssi')),
+                        threshold_dbm=float(_m.group('thr')),
+                        details=line_str[:500],
+                    )
+                else:
+                    # Log the raw line if we couldn't parse numbers
+                    self._record_sx1261_health_event(
+                        'lbt_rssi_busy', details=line_str[:500])
+                return
+        except Exception as _e:
+            logger.debug('WM1303Backend: _parse_pkt_fwd_health error: %s', _e)
+
     def _pktfwd_stdout_reader(self) -> None:
         """Drain lora_pkt_fwd stdout to prevent pipe buffer blocking.
 
@@ -2464,6 +2473,9 @@ class WM1303Backend:
                 if line:
                     line_str = line.strip() if isinstance(line, str) else line.decode(errors='replace').strip()
                     if line_str:
+                        # Scan for SX1261 health events and persist to sqlite
+                        # (spectral_scan_timeout, cad_timeout, lbt_rssi_busy, ...)
+                        self._parse_pkt_fwd_health(line_str)
                         # Priority 1: Lines starting with '# ' are stats summary
                         # lines (e.g. '# TX errors: 0', '# BEACON queued: 0').
                         # These must be throttled BEFORE checking activity keywords
@@ -2642,7 +2654,7 @@ class WM1303Backend:
                             'cad_enabled': bool(cad.get('enabled', False)),
                             'cad_detected': bool(cad.get('detected', False)),
                             'cad_retries': int(cad.get('retries', 0)),
-                            'cad_rssi_dbm': int(cad.get('rssi_dbm', 0)) if cad.get('rssi_dbm') is not None else None,
+                            'tx_noisefloor_dbm': int(cad.get('tx_noisefloor_dbm', 0)) if cad.get('tx_noisefloor_dbm') is not None else None,
                             'cad_reason': cad.get('reason', ''),
                             'lbt_enabled': bool(lbt.get('enabled', False)),
                             'lbt_pass': bool(lbt.get('pass', True)),
@@ -2651,11 +2663,11 @@ class WM1303Backend:
                             'lbt_retries': int(lbt.get('retries', 0)),
                         })
                         logger.info('WM1303Backend: TX_ACK post-TX token=0x%04x '
-                                    'tx_result=%s cad[en=%s det=%s r=%d rssi=%s reason=%s] '
+                                    'tx_result=%s cad[en=%s det=%s r=%d tx_nf=%s reason=%s] '
                                     'lbt[en=%s pass=%s rssi=%s thr=%s r=%d]',
                                     token, ack_info['tx_result'],
                                     ack_info['cad_enabled'], ack_info['cad_detected'],
-                                    ack_info['cad_retries'], ack_info['cad_rssi_dbm'],
+                                    ack_info['cad_retries'], ack_info['tx_noisefloor_dbm'],
                                     ack_info['cad_reason'],
                                     ack_info['lbt_enabled'], ack_info['lbt_pass'],
                                     ack_info['lbt_rssi_dbm'], ack_info['lbt_threshold_dbm'],
@@ -2673,7 +2685,7 @@ class WM1303Backend:
                                 'phase': 'post_tx',
                                 'cad': {}, 'lbt': {},
                                 'cad_enabled': False, 'cad_detected': False,
-                                'cad_retries': 0, 'cad_rssi_dbm': None,
+                                'cad_retries': 0, 'tx_noisefloor_dbm': None,
                                 'cad_reason': '', 'lbt_enabled': False,
                                 'lbt_pass': True, 'lbt_rssi_dbm': None,
                                 'lbt_threshold_dbm': None, 'lbt_retries': 0,
@@ -2790,6 +2802,21 @@ class WM1303Backend:
         _rx_lsnr = rxpk.get('lsnr', '?')
         _raw_data = rxpk.get('data', '')
         _raw_size = len(_raw_data)
+        # Per-channel CRC error rate counter (ALL errors/disabled, no filtering)
+        if _rx_stat != 1:
+            _rate_freq_hz = int(float(_rx_freq) * 1e6)
+            _rate_ch = self._freq_to_ch_id.get(_rate_freq_hz)
+            if _rate_ch is None:
+                for _rk, _rv in self._freq_to_ch_id.items():
+                    if abs(_rk - _rate_freq_hz) <= 1000:
+                        _rate_ch = _rv
+                        break
+            _rate_ch = _rate_ch or 'unknown'
+            _rate_key = 'crc_error' if _rx_stat == -1 else 'crc_disabled'
+            with self._crc_rate_lock:
+                if _rate_ch not in self._crc_rate_counters:
+                    self._crc_rate_counters[_rate_ch] = {'crc_error': 0, 'crc_disabled': 0}
+                self._crc_rate_counters[_rate_ch][_rate_key] += 1
         if _rx_stat != 1:  # Not CRC OK - log as WARNING with hex for analysis
             try:
                 import base64 as _b64
@@ -3003,7 +3030,8 @@ class WM1303Backend:
     # TX via direct PULL_RESP (through RF0)
     # ------------------------------------------------------------------
 
-    async def send(self, channel_id_or_data, data: bytes = None, tx_power: int = None) -> dict:
+    async def send(self, channel_id_or_data, data: bytes = None, tx_power: int = None,
+                   trace_hash: str = None) -> dict:
         """Send a packet on the specified channel via GlobalTXScheduler.
 
         Supports two calling conventions:
@@ -3046,11 +3074,12 @@ class WM1303Backend:
 
         # Enqueue to the per-channel TXQueue (GlobalTXScheduler handles sending)
         if self._tx_queue_manager:
-            result = await self._tx_queue_manager.enqueue(channel_id, data, tx_power)
+            result = await self._tx_queue_manager.enqueue(channel_id, data, tx_power,
+                                                           trace_hash=trace_hash)
         else:
             logger.warning('WM1303Backend: No TX queue manager, sending directly')
             txpk = self._build_txpk(cfg, data, tx_power)
-            result = await self._send_pull_resp(txpk)
+            result = await self._send_pull_resp(txpk, channel_id=channel_id, trace_hash=trace_hash)
 
         if result.get('ok'):
             self._tx_packets_sent_total += 1
@@ -3069,7 +3098,8 @@ class WM1303Backend:
 
         return result
 
-    async def _send_for_scheduler(self, txpk: dict, channel_id: str) -> dict:
+    async def _send_for_scheduler(self, txpk: dict, channel_id: str,
+                                  trace_hash: str = None) -> dict:
         """Send a single txpk via PULL_RESP. Called by GlobalTXScheduler.
 
         After the send completes and the post-TX TX_ACK has been merged into
@@ -3077,7 +3107,8 @@ class WM1303Backend:
         TX queue manager so per-channel stats (cad_clear, cad_hw_clear, etc.)
         reflect hardware CAD activity — even when SW LBT/CAD is disabled.
         """
-        result = await self._send_pull_resp(txpk)
+        result = await self._send_pull_resp(txpk, channel_id=channel_id,
+                                            trace_hash=trace_hash)
         # Fix (Bug 1 / HW CAD counters): when the HAL C code ran HW CAD before
         # this TX, the post-TX TX_ACK carries its outcome. Flow it into the
         # per-channel queue stats so cad_events recorder and the UI see it.
@@ -3090,6 +3121,20 @@ class WM1303Backend:
                 })
         except Exception as _e:
             logger.debug('WM1303Backend: record_hw_cad_result error: %s', _e)
+        # Fix (Bug d / LBT counters): forward LBT outcome from post-TX TX_ACK
+        # into per-channel queue stats (lbt_blocked/lbt_passed/lbt_skipped).
+        # Without this hook, channel_stats.json shows zeros even though the
+        # HAL C code is actively blocking TX on LBT busy.
+        try:
+            if self._tx_queue_manager and isinstance(result, dict) and 'lbt_enabled' in result:
+                self._tx_queue_manager.record_lbt_result(channel_id, {
+                    'enabled': bool(result.get('lbt_enabled', False)),
+                    'pass': bool(result.get('lbt_pass', True)),
+                    'rssi_dbm': result.get('lbt_rssi_dbm'),
+                    'threshold_dbm': result.get('lbt_threshold_dbm'),
+                })
+        except Exception as _e:
+            logger.debug('WM1303Backend: record_lbt_result error: %s', _e)
         return result
 
     def _update_tx_stats(self, channel_id: str, send_ms: float,
@@ -3183,7 +3228,8 @@ class WM1303Backend:
 
 
 
-    async def _send_pull_resp(self, txpk: dict) -> dict:
+    async def _send_pull_resp(self, txpk: dict, channel_id: str = '',
+                              trace_hash: str = None) -> dict:
         """Send a PULL_RESP packet to lora_pkt_fwd (async, cancellable).
 
         Uses asyncio.Lock and asyncio.sleep so that cancellation (e.g. from
@@ -3212,6 +3258,13 @@ class WM1303Backend:
                 _airtime_wait_ms = round(wait_s * 1000, 1)
                 logger.info('WM1303Backend: waiting %.1fms for previous TX airtime to clear',
                            _airtime_wait_ms)
+                # Emit rf_guard trace event if wait is noticeable (>20ms).
+                # Shows the user why this packet was delayed.
+                if trace_hash and _airtime_wait_ms > 20:
+                    _trace(trace_hash, 'rf_guard', channel=channel_id,
+                           detail='Waiting for RF chain\n  Remaining: %.1f ms'
+                                  % _airtime_wait_ms,
+                           status='ok')
                 await asyncio.sleep(wait_s)
 
             token = random.randint(0, 0xFFFF)
@@ -3224,11 +3277,14 @@ class WM1303Backend:
 
             # Send with auto-recovery: retry once after socket recreation on OSError
             _send_ms = 0.0
+            _pull_resp_sent_mono = 0.0  # captured on successful sendto
             for _attempt in range(2):
                 try:
                     _send_start = time.monotonic()
                     self._sock.sendto(pkt, self._pull_addr)
                     _send_ms = round((time.monotonic() - _send_start) * 1000, 2)
+                    # Capture reference moment for TX-phase trace backdating
+                    _pull_resp_sent_mono = time.monotonic()
                     logger.info('WM1303Backend: PULL_RESP sent to %s '
                                 '(freq=%.6f, datr=%s, rfch=0, udp_send=%.1fms, airwait=%.1fms)',
                                 self._pull_addr, txpk['freq'], txpk['datr'],
@@ -3312,7 +3368,7 @@ class WM1303Backend:
                     # Merge cad/lbt fields into result
                     for _k in ('tx_result', 'phase', 'cad', 'lbt',
                                'cad_enabled', 'cad_detected', 'cad_retries',
-                               'cad_rssi_dbm', 'cad_reason',
+                               'tx_noisefloor_dbm', 'cad_reason',
                                'lbt_enabled', 'lbt_pass', 'lbt_rssi_dbm',
                                'lbt_threshold_dbm', 'lbt_retries'):
                         if _k in _post_ack:
@@ -3353,7 +3409,205 @@ class WM1303Backend:
             except Exception as _e:
                 self._tx_ack_unregister_future(token)
                 logger.debug('WM1303Backend: post-TX ack await error: %s', _e)
+            _result['last_tx_end'] = self._last_tx_end
+
+            # Emit chronologically-correct TX-phase trace events now that
+            # ACK has arrived (or timed out). Back-dates events using the
+            # captured _pull_resp_sent_mono reference moment.
+            if trace_hash and _pull_resp_sent_mono > 0:
+                self._emit_tx_phase_trace(trace_hash, channel_id,
+                                          _pull_resp_sent_mono, _result)
             return _result
+
+    def _emit_tx_phase_trace(self, trace_hash: str, channel_id: str,
+                             pull_resp_sent_mono: float, result: dict) -> None:
+        """Emit chronologically-correct TX-phase trace events after TX_ACK.
+
+        Events emitted (relative to post-TX ACK emission time NOW):
+          - tx_noisefloor   : PULL_RESP + ~16ms (FSK noisefloor read)
+          - rf_tx_start     : PULL_RESP + ~88ms (after CAD/LBT/restart-defer)
+          - rf_tx_end       : rf_tx_start + airtime_ms
+          - sx1261_rx_restart : rf_tx_end + ~209ms (TX inhibit cooldown)
+          - tx_ack          : NOW (no back-dating)
+
+        All back-dating uses packet_trace's ts_offset_ms (milliseconds to
+        subtract from current time). Events are emitted in chronological
+        order, and packet_trace.trace_event() preserves insertion order for
+        events with identical or nearly-identical timestamps.
+
+        Safe no-op when trace callback is not registered.
+        """
+        if not trace_hash:
+            return
+        try:
+            _now_mono = time.monotonic()
+            _elapsed_total_ms = (_now_mono - pull_resp_sent_mono) * 1000.0
+            _airtime_ms = float(result.get('airtime_ms', 0) or 0)
+            _ack_received = bool(result.get('ack_received', False))
+            _tx_result = result.get('tx_result', 'unknown')
+            _tx_nf = result.get('tx_noisefloor_dbm')
+            _cad_retries = int(result.get('cad_retries', 0) or 0)
+            _freq_mhz = result.get('freq', 0)
+            _datr = result.get('datr', '')
+            _cad_enabled = bool(result.get('cad_enabled', False))
+            _lbt_enabled = bool(result.get('lbt_enabled', False))
+
+            # Whether we have a successful TX whose hardware timing we can
+            # use to anchor the scan + TX-phase events.
+            _tx_sent = _ack_received and _tx_result == 'sent'
+
+            # Edge-B guard: the Option-3 timing model requires at least
+            # _ACK_ROUNDTRIP_MS + _FEM_SETTLE_MS + 1 ms of elapsed time
+            # between pull_resp_sent and NOW, otherwise the back-dating
+            # anchors collide and ordering cannot be preserved. This is
+            # physically unreachable for a real TX (min chain ~100 ms+),
+            # so firing this guard indicates a degenerate measurement.
+            if _tx_sent and _elapsed_total_ms < 48.0:
+                logger.warning(
+                    'WM1303Backend: _emit_tx_phase_trace: '
+                    '_elapsed_total_ms=%.1f ms < 48 ms, TX-phase timing '
+                    'model degenerate; skipping rf_tx_start/end/restart '
+                    'emission (scan events still use pull_resp_sent anchor)',
+                    _elapsed_total_ms)
+                _tx_sent = False  # fall through to the failure-path formulas
+
+            _FEM_SETTLE_MS = 5.0
+
+            # Compute hardware-grounded TX anchors (bottom-up from the
+            # Option D post-TX restart measurement) when TX succeeded.
+            if _tx_sent:
+                _offset_restart = float(_ACK_ROUNDTRIP_MS)
+                _offset_end = _offset_restart + _FEM_SETTLE_MS
+                _offset_start = _offset_end + _airtime_ms
+                # Cap rf_tx_start to not precede pull_resp_sent.
+                _offset_start = min(_offset_start,
+                                    max(0.0, _elapsed_total_ms - 1.0))
+                # Re-clamp rf_tx_end to stay strictly between
+                # rf_tx_start and sx1261_rx_restart.
+                _offset_end = min(_offset_end,
+                                  max(_offset_restart + 1.0,
+                                      _offset_start - 1.0))
+                # Scan events anchored to the hardware-grounded rf_tx_start
+                # so they appear immediately before TX (physically correct:
+                # HAL performs LBT/CAD right before firing the TX).
+                _pre_rf_span_ms = float(_PRE_RF_TX_MS - _PRE_NOISEFLOOR_MS)
+                _offset_scan_start = _offset_start + _pre_rf_span_ms
+                _offset_scan_result = _offset_start + 1.0
+                # Cap scan offsets so they never predate pull_resp_sent.
+                # This matters in the "short-wait" case where the HAL fires
+                # TX almost immediately after pull_resp and the assumed
+                # 72 ms CAD span (_PRE_RF_TX_MS - _PRE_NOISEFLOOR_MS) would
+                # otherwise back-date cad_start before pull_resp_sent and
+                # break chronological ordering with upstream RX/enqueue steps.
+                _scan_cap = max(0.0, _elapsed_total_ms - 1.0)
+                _offset_scan_start = min(_offset_scan_start, _scan_cap)
+                _offset_scan_result = min(_offset_scan_result,
+                                          _offset_scan_start)
+                _offset_nf = _offset_scan_start
+            else:
+                # Failure path or degenerate-elapsed guard: no rf_tx_start
+                # anchor available, fall back to pull_resp_sent-relative
+                # formulas (the historical behaviour).
+                _offset_scan_start = max(0.0,
+                                         _elapsed_total_ms - _PRE_NOISEFLOOR_MS)
+                _offset_nf = _offset_scan_start
+                _offset_scan_result = max(0.0,
+                                          _elapsed_total_ms - _PRE_RF_TX_MS)
+
+            # ---- cad_start (HAL CAD scan begins, ~same moment as noisefloor read) ----
+            if _cad_enabled or _lbt_enabled:
+                _scan_detail_parts = ['CAD + LBT scan started']
+                if _lbt_enabled:
+                    _lbt_thr = result.get('lbt_threshold_dbm')
+                    if _lbt_thr is not None:
+                        _scan_detail_parts.append('  LBT threshold: %s dBm' % _lbt_thr)
+                _trace(trace_hash, 'cad_start', channel=channel_id,
+                       detail='\n'.join(_scan_detail_parts),
+                       status='ok', ts_offset_ms=_offset_scan_start)
+
+            # ---- tx_noisefloor (pre-CAD FSK noise floor read) ----
+            if _tx_nf is not None:
+                _trace(trace_hash, 'tx_noisefloor', channel=channel_id,
+                       detail='Noise floor: %s dBm (FSK-RX)' % _tx_nf,
+                       status='ok', ts_offset_ms=_offset_nf)
+
+            # ---- lbt_check + cad_check (at scan completion, just before rf_tx_start) ----
+            if _lbt_enabled:
+                _lbt_pass = bool(result.get('lbt_pass', True))
+                _lbt_rssi = result.get('lbt_rssi_dbm')
+                _lbt_thr = result.get('lbt_threshold_dbm')
+                _lbt_retries = int(result.get('lbt_retries', 0) or 0)
+                _lbt_header = 'LBT PASS' if _lbt_pass else 'LBT BLOCKED'
+                _lbt_parts = [_lbt_header]
+                if _lbt_rssi is not None:
+                    _lbt_parts.append('  RSSI: %s dBm' % _lbt_rssi)
+                if _lbt_thr is not None:
+                    _lbt_parts.append('  Threshold: %s dBm' % _lbt_thr)
+                _lbt_parts.append('  Retries: %d' % _lbt_retries)
+                _lbt_status = ('ok' if _lbt_pass and _lbt_retries == 0 else
+                               ('filtered' if not _lbt_pass else 'partial'))
+                _trace(trace_hash, 'lbt_check', channel=channel_id,
+                       detail='\n'.join(_lbt_parts), status=_lbt_status,
+                       ts_offset_ms=_offset_scan_result)
+            if _cad_enabled:
+                _cad_detected = bool(result.get('cad_detected', False))
+                _cad_reason = (result.get('cad_reason') or '').strip()
+                _cad_header = 'CAD DETECTED' if _cad_detected else 'CAD CLEAR'
+                _cad_parts = [_cad_header]
+                if _tx_nf is not None:
+                    _cad_parts.append('  TX Noisefloor: %s dBm' % _tx_nf)
+                if _cad_reason:
+                    _cad_parts.append('  Reason: %s' % _cad_reason)
+                _cad_parts.append('  Retries: %d' % _cad_retries)
+                _cad_status = ('filtered' if _cad_detected else
+                               ('ok' if _cad_retries == 0 else 'partial'))
+                _trace(trace_hash, 'cad_check', channel=channel_id,
+                       detail='\n'.join(_cad_parts), status=_cad_status,
+                       ts_offset_ms=_offset_scan_result)
+
+            # ---- TX-phase events (only when TX actually sent and guard passed) ----
+            if _tx_sent:
+                _tx_detail = ('RF transmission started\n  Frequency: %s MHz\n'
+                              '  Datarate: %s\n  Airtime: %.1f ms'
+                              % (_freq_mhz, _datr, _airtime_ms))
+                _trace(trace_hash, 'rf_tx_start', channel=channel_id,
+                       detail=_tx_detail, status='ok',
+                       ts_offset_ms=_offset_start)
+                _trace(trace_hash, 'rf_tx_end', channel=channel_id,
+                       detail='RF transmission complete\n  Airtime: %.1f ms'
+                              % _airtime_ms,
+                       status='ok', ts_offset_ms=_offset_end)
+                _trace(trace_hash, 'sx1261_rx_restart', channel=channel_id,
+                       detail='SX1261 LoRa RX restarted (post-TX inhibit cleared)',
+                       status='ok', ts_offset_ms=_offset_restart)
+
+            # ---- tx_ack (emit at current time) ----
+            if _ack_received:
+                if _tx_result == 'sent':
+                    _ack_detail = ('TX acknowledged\n  Result: sent\n  Token: 0x%04x'
+                                   % (int(result.get('tx_token', 0)) & 0xFFFF))
+                    _ack_status = 'ok'
+                elif _tx_result == 'dropped':
+                    _ack_detail = ('TX dropped by JIT\n  Result: %s\n  Error: %s'
+                                   % (_tx_result, result.get('error', 'unknown')))
+                    _ack_status = 'error'
+                else:
+                    _ack_detail = 'TX blocked\n  Result: %s' % _tx_result
+                    _ack_status = 'warning'
+                if _cad_retries > 0:
+                    _ack_detail += '\n  CAD retries: %d' % _cad_retries
+                _trace(trace_hash, 'tx_ack', channel=channel_id,
+                       detail=_ack_detail, status=_ack_status,
+                       ts_offset_ms=0)
+            else:
+                # ACK timeout: emit a warning tx_ack so the trace shows it
+                _trace(trace_hash, 'tx_ack', channel=channel_id,
+                       detail='TX ACK timeout (no response from pkt_fwd)',
+                       status='warning', ts_offset_ms=0)
+        except Exception as _trace_e:
+            logger.debug('WM1303Backend: _emit_tx_phase_trace failed: %s',
+                         _trace_e)
+
 
     # ------------------------------------------------------------------
     # Status & Stats
@@ -3645,10 +3899,16 @@ class WM1303Backend:
                     lbt_passed INTEGER DEFAULT 0,
                     lbt_last_rssi REAL,
                     lbt_threshold REAL,
-                    noise_floor_dbm REAL
+                    noise_floor_dbm REAL,
+                    tx_noisefloor_dbm REAL
                 )""")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_csh_ts ON channel_stats_history(timestamp)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_csh_ch ON channel_stats_history(channel_id)")
+                # Migration: add tx_noisefloor_dbm column if missing (existing installs)
+                try:
+                    conn.execute("ALTER TABLE channel_stats_history ADD COLUMN tx_noisefloor_dbm REAL")
+                except Exception:
+                    pass  # column already exists
                 conn.commit()
             logger.info("channel_stats_history table ready")
         except Exception as e:
@@ -3750,18 +4010,19 @@ class WM1303Backend:
                     lbt_threshold = data.get("lbt_last_threshold")
                     if lbt_threshold is None:
                         lbt_threshold = _lbt_thresholds.get(ch_id)
+                    tx_nf_dbm = data.get("tx_noisefloor_avg")
 
                     conn.execute(
                         """INSERT INTO channel_stats_history
                         (timestamp, channel_id, rx_count, avg_rssi, avg_snr,
                          tx_count, tx_failed, tx_airtime_ms, tx_bytes,
                          lbt_blocked, lbt_passed, lbt_last_rssi, lbt_threshold,
-                         noise_floor_dbm)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         noise_floor_dbm, tx_noisefloor_dbm)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (now, ch_id, rx_count, avg_rssi, avg_snr,
                          tx_count, tx_failed, tx_airtime, tx_bytes,
                          lbt_blocked, lbt_passed, lbt_last_rssi, lbt_threshold,
-                         _nf_by_ch_id.get(ch_id)))
+                         _nf_by_ch_id.get(ch_id), tx_nf_dbm))
                 conn.commit()
             logger.debug("Channel stats snapshot: %d channels recorded", len(ch_stats))
         except Exception as e:

@@ -162,16 +162,23 @@ class VirtualLoRaRadio(LoRaRadio):
         """Return the estimated noise floor in dBm."""
         return self._noise_floor_dbm
 
-    async def send(self, data: bytes):
+    async def send(self, data: bytes, trace_hash: str = None, **kwargs):
         """Send data on this channel.
 
         Routes through backend.send() which uses:
         - Channel E TX queue (primary) - dedicated TX radio, no RX interruption
         - SX1303 PULL_RESP (fallback) - if Channel E unavailable
+
+        The optional ``trace_hash`` is forwarded to the backend so that
+        chronologically-correct TX-phase trace events
+        (tx_noisefloor/cad_start/lbt_check/cad_check/rf_tx_start/rf_tx_end/
+        sx1261_rx_restart/tx_ack/rf_guard) can be emitted by the backend
+        once the post-TX ACK arrives.
         """
         meta = await self.backend.send(
             self.channel_id, data,
-            tx_power=int(self.channel_config.get("tx_power", 14))
+            tx_power=int(self.channel_config.get("tx_power", 14)),
+            trace_hash=trace_hash,
         )
         self._last_tx_metadata = meta
         return meta

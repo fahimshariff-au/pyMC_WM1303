@@ -110,6 +110,9 @@ class DebugCollector:
             await self._collect_database_info(work_dir)
             await self._collect_identity_info(work_dir)
             self._collect_metrics_data(work_dir)
+            # Compute health_snapshot.json last (depends on metrics being dumped
+            # and the sx1261_health_events table being populated).
+            self._compute_health_snapshot(work_dir)
             self._collect_packet_traces(work_dir)
             self._collect_versions(work_dir)
             self._write_manifest(work_dir)
@@ -338,6 +341,43 @@ class DebugCollector:
 
         info.append("=== Kernel Messages (SPI/hardware related) ===")
         info.append(self._run_cmd("dmesg | grep -iE 'spi|lora|gpio|thermal|throttl' | tail -50"))
+
+        info.append("=== Kernel Messages (dmesg tail -200, broader context) ===")
+        try:
+            info.append(self._run_cmd("dmesg -T 2>/dev/null | tail -200 || dmesg | tail -200", timeout=10))
+        except Exception as exc:
+            info.append(f"dmesg -T failed: {exc}")
+
+        info.append("=== RPi Thermal/Power Throttling ===")
+        try:
+            info.append("--- vcgencmd get_throttled ---")
+            info.append(self._run_cmd("vcgencmd get_throttled 2>/dev/null || echo 'vcgencmd not available'", timeout=10))
+            info.append("--- voltages ---")
+            for rail in ("core", "sdram_c", "sdram_i", "sdram_p"):
+                info.append(f"volts {rail}: " + self._run_cmd(f"vcgencmd measure_volts {rail} 2>/dev/null", timeout=5).strip())
+            info.append("--- clocks ---")
+            for clk in ("arm", "core", "emmc"):
+                info.append(f"clock {clk}: " + self._run_cmd(f"vcgencmd measure_clock {clk} 2>/dev/null", timeout=5).strip())
+        except Exception as exc:
+            info.append(f"throttling block failed: {exc}")
+
+        info.append("=== SPI Interrupt Statistics ===")
+        try:
+            info.append(self._run_cmd("grep -i spi /proc/interrupts 2>/dev/null || echo 'no SPI entries in /proc/interrupts'", timeout=5))
+            info.append("--- spi0.0 max_speed_hz ---")
+            info.append(self._run_cmd("cat /sys/bus/spi/devices/spi0.0/max_speed_hz 2>/dev/null || echo 'spi0.0 not present'", timeout=5))
+        except Exception as exc:
+            info.append(f"SPI interrupt block failed: {exc}")
+
+        info.append("=== Kernel warnings (journalctl -k -p warning, last 1h) ===")
+        try:
+            info.append(self._run_cmd(
+                "journalctl -k -p warning --since '1 hour ago' --no-pager 2>/dev/null | tail -50 "
+                "|| echo 'journalctl -k not available'",
+                timeout=15,
+            ))
+        except Exception as exc:
+            info.append(f"journalctl -k failed: {exc}")
 
         self._write(work_dir / "system_info.txt", "\n".join(info))
 
@@ -805,6 +845,8 @@ class DebugCollector:
             ("repeater.db",         "cad_events",              "timestamp"),
             ("repeater.db",         "packet_activity",         "timestamp"),
             ("repeater.db",         "origin_channel_stats",    "timestamp"),
+            ("repeater.db",         "sx1261_health_events",    "timestamp"),
+            ("repeater.db",         "crc_error_rate",          "timestamp"),
             ("spectrum_history.db", "spectrum_scans",          "timestamp"),
         ]
         summary = {}
@@ -832,6 +874,215 @@ class DebugCollector:
             summary["packets_tail"] = -1
         with open(os.path.join(out_dir, "_summary.json"), "w") as f:
             json.dump(summary, f, indent=2)
+
+    def _compute_health_snapshot(self, work_dir):
+        """Analyze recent metrics/events and write health_snapshot.json.
+
+        Reads the last 30 minutes of data from noise_floor_history,
+        channel_stats_history and sx1261_health_events, computes simple
+        anomaly indicators (stuck noise floor, TX success rate, SX1261
+        health score), and writes a compact summary plus human alerts.
+        """
+        import sqlite3 as _sql
+        _db = "/var/lib/pymc_repeater/repeater.db"
+        _now = time.time()
+        _window_s = 30 * 60
+        _since = _now - _window_s
+        snapshot = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "period_analyzed_minutes": int(_window_s / 60),
+            "period_start_epoch": _since,
+            "period_end_epoch": _now,
+            "noise_floor": {},
+            "tx_success_rate": {},
+            "sx1261_health": {
+                "spectral_scans_attempted": 0,
+                "timeout": 0,
+                "status_unexpected": 0,
+                "recoveries": 0,
+                "cad_timeouts": 0,
+                "cad_force_tx": 0,
+                "lbt_rssi_busy": 0,
+                "health_score": "good",
+            },
+            "cad_retry_histogram": {},
+            "alerts": [],
+        }
+
+        # ---- Noise floor: detect stuck values per channel ------------------
+        try:
+            with _sql.connect(_db, timeout=5) as conn:
+                conn.row_factory = _sql.Row
+                rows = conn.execute(
+                    "SELECT channel_id, timestamp, noise_floor_dbm "
+                    "FROM noise_floor_history "
+                    "WHERE timestamp >= ? "
+                    "ORDER BY channel_id, timestamp ASC",
+                    (_since,),
+                ).fetchall()
+            by_ch: dict[str, list] = {}
+            for r in rows:
+                by_ch.setdefault(r["channel_id"], []).append(
+                    (r["timestamp"], r["noise_floor_dbm"]))
+            for ch_id, samples in by_ch.items():
+                vals = [v for _, v in samples if v is not None]
+                if not vals:
+                    continue
+                _min = round(min(vals), 1)
+                _max = round(max(vals), 1)
+                _cur = round(vals[-1], 1)
+                # Count trailing "stuck" samples (identical within ±0.1 dB)
+                stuck = 1
+                for i in range(len(vals) - 2, -1, -1):
+                    if abs(vals[i] - _cur) <= 0.1:
+                        stuck += 1
+                    else:
+                        break
+                anomaly = stuck >= 10
+                reason = "stuck_noise_floor" if anomaly else ""
+                snapshot["noise_floor"][ch_id] = {
+                    "min": _min,
+                    "max": _max,
+                    "current": _cur,
+                    "samples": len(vals),
+                    "stuck_samples": stuck,
+                    "anomaly": anomaly,
+                    "anomaly_reason": reason,
+                }
+                if anomaly:
+                    snapshot["alerts"].append(
+                        f"Noise floor appears stuck on {ch_id}: "
+                        f"{stuck} consecutive samples at ~{_cur} dBm"
+                    )
+        except Exception as _e:
+            snapshot["alerts"].append(f"noise_floor analysis failed: {_e}")
+
+        # ---- TX success rate: from channel_stats_history deltas ------------
+        try:
+            with _sql.connect(_db, timeout=5) as conn:
+                conn.row_factory = _sql.Row
+                rows = conn.execute(
+                    "SELECT channel_id, timestamp, tx_count, lbt_blocked, lbt_passed "
+                    "FROM channel_stats_history "
+                    "WHERE timestamp >= ? "
+                    "ORDER BY channel_id, timestamp ASC",
+                    (_since,),
+                ).fetchall()
+            by_ch: dict[str, list] = {}
+            for r in rows:
+                by_ch.setdefault(r["channel_id"], []).append(r)
+            for ch_id, samples in by_ch.items():
+                if len(samples) < 2:
+                    continue
+                first = samples[0]
+                last = samples[-1]
+                sent = max(0, (last["tx_count"] or 0) - (first["tx_count"] or 0))
+                blocked = max(0, (last["lbt_blocked"] or 0) - (first["lbt_blocked"] or 0))
+                passed = max(0, (last["lbt_passed"] or 0) - (first["lbt_passed"] or 0))
+                _total = sent + blocked
+                rate = round((sent / _total) * 100, 1) if _total > 0 else None
+                snapshot["tx_success_rate"][ch_id] = {
+                    "sent": sent,
+                    "blocked": blocked,
+                    "lbt_passed": passed,
+                    "rate_pct": rate,
+                }
+                if rate is not None and rate < 50 and _total >= 5:
+                    snapshot["alerts"].append(
+                        f"Low TX success rate on {ch_id}: "
+                        f"{rate}% ({sent}/{_total})"
+                    )
+        except Exception as _e:
+            snapshot["alerts"].append(f"tx_success_rate analysis failed: {_e}")
+
+        # ---- SX1261 health: counts by event_type ---------------------------
+        try:
+            with _sql.connect(_db, timeout=5) as conn:
+                conn.row_factory = _sql.Row
+                rows = conn.execute(
+                    "SELECT event_type, COUNT(*) AS n "
+                    "FROM sx1261_health_events "
+                    "WHERE timestamp >= ? "
+                    "GROUP BY event_type",
+                    (_since,),
+                ).fetchall()
+            counts = {r["event_type"]: r["n"] for r in rows}
+            h = snapshot["sx1261_health"]
+            h["timeout"] = counts.get("spectral_scan_timeout", 0)
+            h["status_unexpected"] = counts.get("spectral_scan_status_unexpected", 0)
+            h["recoveries"] = counts.get("sx1261_recovery", 0)
+            h["cad_timeouts"] = counts.get("cad_timeout", 0)
+            h["cad_force_tx"] = counts.get("cad_force_tx", 0)
+            h["lbt_rssi_busy"] = counts.get("lbt_rssi_busy", 0)
+            # spectral_scans_attempted isn't directly tracked; expose the count
+            # of completions we could detect (timeouts + status_unexpected are
+            # failures). For now report only failures-derived numbers.
+            h["spectral_scans_attempted"] = h["timeout"] + h["status_unexpected"]
+            # Health score based on timeouts
+            if h["timeout"] == 0:
+                h["health_score"] = "good"
+            elif h["timeout"] <= 3:
+                h["health_score"] = "degraded"
+                snapshot["alerts"].append(
+                    f"SX1261 degraded: {h['timeout']} spectral scan timeouts in last "
+                    f"{int(_window_s/60)} min"
+                )
+            else:
+                h["health_score"] = "critical"
+                snapshot["alerts"].append(
+                    f"SX1261 CRITICAL: {h['timeout']} spectral scan timeouts in last "
+                    f"{int(_window_s/60)} min"
+                )
+            if h["recoveries"] > 0:
+                snapshot["alerts"].append(
+                    f"SX1261 recoveries triggered {h['recoveries']}x in last "
+                    f"{int(_window_s/60)} min"
+                )
+        except Exception as _e:
+            snapshot["alerts"].append(f"sx1261_health analysis failed: {_e}")
+
+        # ---- CAD retry histogram (best-effort; schema may vary) -----------
+        try:
+            with _sql.connect(_db, timeout=5) as conn:
+                conn.row_factory = _sql.Row
+                # Check if cad_events has a 'retries' column; if not, skip
+                cols = [r[1] for r in conn.execute(
+                    "PRAGMA table_info(cad_events)").fetchall()]
+                if "channel_id" in cols and ("retries" in cols or "cad_retries" in cols):
+                    _rcol = "retries" if "retries" in cols else "cad_retries"
+                    rows = conn.execute(
+                        f"SELECT channel_id, {_rcol} AS r, COUNT(*) AS n "
+                        "FROM cad_events "
+                        "WHERE timestamp >= ? "
+                        f"GROUP BY channel_id, {_rcol}",
+                        (_since,),
+                    ).fetchall()
+                    hist: dict[str, dict] = {}
+                    for r in rows:
+                        ch = r["channel_id"] or "unknown"
+                        rv = int(r["r"] or 0)
+                        n = int(r["n"] or 0)
+                        _h = hist.setdefault(ch, {"r=0": 0, "r>=5": 0, "r=15_forced": 0, "total": 0})
+                        _h["total"] += n
+                        if rv == 0:
+                            _h["r=0"] += n
+                        elif rv >= 15:
+                            _h["r=15_forced"] += n
+                        elif rv >= 5:
+                            _h["r>=5"] += n
+                    snapshot["cad_retry_histogram"] = hist
+        except Exception as _e:
+            snapshot["alerts"].append(f"cad_retry_histogram analysis failed: {_e}")
+
+        # Write output
+        try:
+            out_dir = Path(work_dir) / "stats"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "health_snapshot.json").write_text(
+                json.dumps(snapshot, indent=2, default=str), encoding="utf-8"
+            )
+        except Exception as _e:
+            logger.debug("DebugCollector: writing health_snapshot failed: %s", _e)
 
     def _collect_packet_traces(self, work_dir):
         """Dump recent packet traces from the packet_trace ring buffer."""

@@ -120,6 +120,10 @@ static volatile bool sx1261_tx_inhibit_rx = false;
    tx_inhibit active. Checked and cleared when tx_inhibit is released. */
 static volatile bool sx1261_deferred_rx_restart = false;
 
+/* Last measured LBT RSSI (dBm). Updated in sx1261_lbt_start() after the
+   scan period. Readable via sx1261_lbt_get_last_rssi(). */
+static int16_t sx1261_lbt_last_rssi = -128;
+
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS ---------------------------------------------------- */
 
@@ -576,7 +580,19 @@ int sx1261_lbt_start(lgw_lbt_scan_time_t scan_time_us, int8_t threshold_dbm) {
     CHECK_ERR(err);
 #endif
 
-    /* Configure LBT scan */
+    /* ---- Pre-LBT noise floor RSSI (while SX1261 is in FSK RX) ---- */
+    /* Read RSSI BEFORE starting the carrier sense scan, because after the
+       scan completes the SX1261 may be in an undefined state where
+       GetRssiInst returns sentinel values (-128/-127). */
+    sx1261_lbt_last_rssi = -128;
+    wait_ms(1); /* let FSK RX RSSI settle */
+    err = sx1261_get_rssi_inst(&sx1261_lbt_last_rssi);
+    if (err == LGW_REG_SUCCESS && sx1261_lbt_last_rssi > -128) {
+        printf("INFO: [LBT] pre-scan RSSI: %d dBm (threshold: %d dBm)\n",
+               sx1261_lbt_last_rssi, threshold_dbm);
+    }
+
+    /* Configure and start LBT carrier sense scan */
     buff[0] = 11; // intervall_rssi_read (10 => 7.68 usec,11 => 8.2 usec, 12 => 8.68 usec)
     buff[1] = (nb_scan >> 8) & 0xFF;
     buff[2] = (nb_scan >> 0) & 0xFF;
@@ -595,6 +611,7 @@ int sx1261_lbt_start(lgw_lbt_scan_time_t scan_time_us, int8_t threshold_dbm) {
     return LGW_REG_SUCCESS;
 
 }
+
 
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 
@@ -622,16 +639,29 @@ int sx1261_lbt_stop(void) {
 
     _meas_time_stop(4, tm, __FUNCTION__);
 
-    /* Restart LoRa RX if it was configured */
-    if (sx1261_lora_rx_enabled) {
-        printf("SX1261: Restarting LoRa RX after LBT\n");
-        sx1261_lora_rx_start();
+    /* Restart LoRa RX if it was configured and not inhibited by TX */
+    if (sx1261_lora_rx_enabled && !sx1261_tx_inhibit_rx) {
+        printf("SX1261: Restarting LoRa RX after LBT (light)\n");
+        sx1261_lora_rx_restart_light();
+    } else if (sx1261_lora_rx_enabled && sx1261_tx_inhibit_rx) {
+        /* TX inhibit active — defer RX restart until inhibit clears */
+        printf("SX1261: Deferred LoRa RX restart (TX inhibit active)\n");
+        sx1261_deferred_rx_restart = true;
     }
 
     return LGW_REG_SUCCESS;
 }
 
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+
+int sx1261_lbt_get_last_rssi(int16_t *rssi) {
+    if (rssi == NULL) {
+        return -1;
+    }
+    *rssi = sx1261_lbt_last_rssi;
+    return 0;
+}
+
 
 int sx1261_spectral_scan_start(uint16_t nb_scan) {
     int err;
@@ -941,9 +971,9 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
     uint8_t bw_reg;
     uint8_t cad_det_peak;
     uint16_t irq_status;
-    int timeout_cnt;
+    int timeout_cnt = 0;
     struct timeval tm, t0, t1;
-    double ms_abort, ms_setup, ms_cad, ms_cleanup, ms_total;
+    double ms_abort, ms_fsk_rssi, ms_setup, ms_cad, ms_cleanup, ms_total;
 
     /* Check input parameters */
     if (result == NULL) {
@@ -959,7 +989,7 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
     result->detected = false;
     result->rssi_dbm = -128;
     result->status = 2; /* error until proven otherwise */
-    ms_abort = ms_setup = ms_cad = ms_cleanup = 0.0;
+    ms_abort = ms_fsk_rssi = ms_setup = ms_cad = ms_cleanup = 0.0;
 
     _meas_time_start(&tm);
 
@@ -1013,7 +1043,128 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
     gettimeofday(&t1, NULL);
     ms_abort = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
 
-    /* ============ Phase 2: Configure LoRa registers for CAD ============ */
+    /* ============ Phase 2: Pre-TX noise floor measurement via FSK RX ============ */
+    /* The SX1261 GetRssiInst command only returns valid RSSI when the radio
+     * is actively receiving.  In STDBY_RC (post-CAD) it always reads -128.
+     * Solution: briefly enter FSK continuous-RX on the target frequency,
+     * read the instantaneous RSSI, then return to standby before
+     * configuring LoRa for the actual CAD scan.
+     * This mirrors the FSK-RX pattern used by sx1261_set_rx_params(). */
+    gettimeofday(&t0, NULL);
+    {
+        int16_t _tx_noisefloor = -128;
+        uint8_t fsk_bw_reg;
+
+        /* Map CAD BW to FSK RX bandwidth (~2x LoRa BW for full coverage) */
+        switch (bw) {
+            case 3:  fsk_bw_reg = 0x0B; break; /* 62.5 kHz LoRa -> 117.3 kHz FSK */
+            case 0:  fsk_bw_reg = 0x0A; break; /* 125 kHz LoRa  -> 234.3 kHz FSK */
+            case 1:  fsk_bw_reg = 0x09; break; /* 250 kHz LoRa  -> 467.0 kHz FSK */
+            case 2:  fsk_bw_reg = 0x09; break; /* 500 kHz LoRa  -> 467.0 kHz FSK */
+            default: fsk_bw_reg = 0x0A; break;
+        }
+
+        /* 1. Set frequency synthesis mode */
+        err = sx1261_reg_w(SX1261_SET_FS, buff, 0);
+        if (err != LGW_REG_SUCCESS) {
+            printf("WARNING: [CAD] TX noisefloor FSK: SetFS failed\n");
+            goto skip_fsk_rssi;
+        }
+
+        /* 2. Set RF frequency (same as the CAD target) */
+        freq_reg = SX1261_FREQ_TO_REG(freq_hz);
+        buff[0] = (uint8_t)(freq_reg >> 24);
+        buff[1] = (uint8_t)(freq_reg >> 16);
+        buff[2] = (uint8_t)(freq_reg >> 8);
+        buff[3] = (uint8_t)(freq_reg >> 0);
+        err = sx1261_reg_w(SX1261_SET_RF_FREQUENCY, buff, 4);
+        if (err != LGW_REG_SUCCESS) {
+            printf("WARNING: [CAD] TX noisefloor FSK: SetRfFrequency failed\n");
+            goto skip_fsk_rssi;
+        }
+
+        /* 3. Configure RSSI averaging window (same as LBT) */
+        buff[0] = 0x08;
+        buff[1] = 0x9B;
+        buff[2] = 0x05 << 2;
+        err = sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 3);
+        if (err != LGW_REG_SUCCESS) {
+            printf("WARNING: [CAD] TX noisefloor FSK: WriteRegister (RSSI avg) failed\n");
+            goto skip_fsk_rssi;
+        }
+
+        /* 4. Set packet type to FSK */
+        buff[0] = 0x00; /* PACKET_TYPE_GFSK */
+        err = sx1261_reg_w(SX1261_SET_PACKET_TYPE, buff, 1);
+        if (err != LGW_REG_SUCCESS) {
+            printf("WARNING: [CAD] TX noisefloor FSK: SetPacketType failed\n");
+            goto skip_fsk_rssi;
+        }
+
+        /* 5. Set FSK modulation parameters (same as LBT) */
+        buff[0] = 0x00;        /* BR MSB */
+        buff[1] = 0x14;        /* BR */
+        buff[2] = 0x00;        /* BR LSB */
+        buff[3] = 0x00;        /* Gaussian BT disabled */
+        buff[4] = fsk_bw_reg;  /* RX bandwidth */
+        buff[5] = 0x02;        /* FDEV MSB */
+        buff[6] = 0xE9;        /* FDEV */
+        buff[7] = 0x0F;        /* FDEV LSB */
+        err = sx1261_reg_w(SX1261_SET_MODULATION_PARAMS, buff, 8);
+        if (err != LGW_REG_SUCCESS) {
+            printf("WARNING: [CAD] TX noisefloor FSK: SetModulationParams failed\n");
+            goto skip_fsk_rssi;
+        }
+
+        /* 6. Set FSK packet parameters (same as LBT) */
+        buff[0] = 0x00;  /* Preamble length MSB */
+        buff[1] = 0x20;  /* Preamble length LSB: 32 bits */
+        buff[2] = 0x05;  /* Preamble detector length: 16 bits */
+        buff[3] = 0x20;  /* SyncWord length: 32 bits */
+        buff[4] = 0x00;  /* AddrComp: disabled */
+        buff[5] = 0x01;  /* PacketType: variable size */
+        buff[6] = 0xFF;  /* PayloadLength: 255 bytes */
+        buff[7] = 0x00;  /* CRCType: 1 byte */
+        buff[8] = 0x00;  /* Whitening: disabled */
+        err = sx1261_reg_w(SX1261_SET_PACKET_PARAMS, buff, 9);
+        if (err != LGW_REG_SUCCESS) {
+            printf("WARNING: [CAD] TX noisefloor FSK: SetPacketParams failed\n");
+            goto skip_fsk_rssi;
+        }
+
+        /* 7. Enter continuous RX mode */
+        buff[0] = 0xFF;
+        buff[1] = 0xFF;
+        buff[2] = 0xFF;
+        err = sx1261_reg_w(SX1261_SET_RX, buff, 3);
+        if (err != LGW_REG_SUCCESS) {
+            printf("WARNING: [CAD] TX noisefloor FSK: SetRx failed\n");
+            goto skip_fsk_rssi;
+        }
+
+        /* 8. Wait for RSSI to settle (1ms is sufficient per datasheet) */
+        wait_ms(1);
+
+        /* 9. Read instantaneous RSSI */
+        err = sx1261_get_rssi_inst(&_tx_noisefloor);
+        if (err == LGW_REG_SUCCESS && _tx_noisefloor > -128) {
+            result->rssi_dbm = _tx_noisefloor;
+            printf("INFO: [CAD] TX noisefloor: %d dBm (FSK-RX)\n", _tx_noisefloor);
+        } else {
+            printf("WARNING: [CAD] TX noisefloor FSK RSSI read returned %d dBm (err=%d)\n",
+                   _tx_noisefloor, err);
+        }
+
+skip_fsk_rssi:
+        /* 10. Return to standby before LoRa CAD configuration */
+        buff[0] = SX1261_STDBY_RC;
+        sx1261_reg_w(SX1261_SET_STANDBY, buff, 1);
+    }
+
+    gettimeofday(&t1, NULL);
+    ms_fsk_rssi = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+
+    /* ============ Phase 3: Configure LoRa registers for CAD ============ */
     gettimeofday(&t0, NULL);
 
     /* Set LoRa packet type */
@@ -1087,15 +1238,10 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
         goto cad_done;
     }
 
-    /* NOTE: RSSI measurement inside the CAD flow is not possible.
-     * Any FSK/LoRa mode switching corrupts the CAD state, causing timeouts.
-     * RSSI-based LBT is handled separately by the Custom LBT check in
-     * the JIT thread (lora_pkt_fwd.c) which runs after the CAD scan. */
-
     gettimeofday(&t1, NULL);
     ms_setup = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
 
-    /* ============ Phase 3: Execute CAD scan ============ */
+    /* ============ Phase 4: Execute CAD scan ============ */
     gettimeofday(&t0, NULL);
 
     buff[0] = 0x00; /* dummy byte */
@@ -1142,11 +1288,16 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
         result->status = 1; /* timeout */
     }
 
+    /* NOTE: Old post-CAD RSSI read removed — it always returned -128/-127
+     * because GetRssiInst requires active RX mode.  The pre-TX FSK-RX
+     * measurement (Phase 2) now provides a reliable TX noise floor reading. */
+
+
     gettimeofday(&t1, NULL);
     ms_cad = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
 
 cad_done:
-    /* ============ Phase 4: GPIO reset + full reinit (with FAST bulk PRAM load) ============
+    /* ============ Phase 5: GPIO reset + full reinit (with FAST bulk PRAM load) ============
      * After CAD, the SX1261 LoRa mode corrupts its internal state and PRAM.
      * A GPIO reset clears the hardware completely. The PRAM firmware patch is
      * then reloaded using an optimized bulk SPI write (~5ms vs ~430ms).
@@ -1191,13 +1342,13 @@ cad_done:
     gettimeofday(&t1, NULL);
     ms_cleanup = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
 
-    ms_total = ms_abort + ms_setup + ms_cad + ms_cleanup;
+    ms_total = ms_abort + ms_fsk_rssi + ms_setup + ms_cad + ms_cleanup;
 
     /* ============ Detailed timing log ============ */
-    printf("INFO: [CAD] freq=%uHz SF%u BW%u detected=%d rssi=%ddBm status=%d | "
-           "abort=%.1fms setup=%.1fms cad=%.1fms(%dpolls) reinit=%.1fms TOTAL=%.1fms\n",
+    printf("INFO: [CAD] freq=%uHz SF%u BW%u detected=%d tx_nf=%ddBm status=%d | "
+           "abort=%.1fms fsk_rssi=%.1fms setup=%.1fms cad=%.1fms(%dpolls) reinit=%.1fms TOTAL=%.1fms\n",
            freq_hz, sf, bw, result->detected, result->rssi_dbm, result->status,
-           ms_abort, ms_setup, ms_cad, timeout_cnt,
+           ms_abort, ms_fsk_rssi, ms_setup, ms_cad, timeout_cnt,
            ms_cleanup, ms_total);
 
     _meas_time_stop(4, tm, __FUNCTION__);

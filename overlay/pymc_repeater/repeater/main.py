@@ -32,6 +32,21 @@ except ImportError:
     _BRIDGE_AVAILABLE = False
 
 
+# Register packet-trace callbacks with pymc_core modules so they can emit
+# TX-phase trace events without importing repeater.web (layering boundary).
+try:
+    from repeater.web.packet_trace import trace_event as _trace_event_fn
+    from pymc_core.hardware import wm1303_backend as _wm1303_backend_mod
+    from pymc_core.hardware import tx_queue as _tx_queue_mod
+    if hasattr(_wm1303_backend_mod, 'set_trace_callback'):
+        _wm1303_backend_mod.set_trace_callback(_trace_event_fn)
+    if hasattr(_tx_queue_mod, 'set_trace_callback'):
+        _tx_queue_mod.set_trace_callback(_trace_event_fn)
+except Exception as _trace_setup_err:
+    logging.getLogger(__name__).warning(
+        'Packet-trace callback registration failed: %s', _trace_setup_err)
+
+
 logger = logging.getLogger("RepeaterDaemon")
 
 

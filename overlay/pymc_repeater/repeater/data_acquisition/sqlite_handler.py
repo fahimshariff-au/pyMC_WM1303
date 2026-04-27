@@ -117,6 +117,21 @@ class SQLiteHandler:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_pktmet_ch_ts ON packet_metrics(channel_id, timestamp)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_pktmet_dir_ts ON packet_metrics(direction, timestamp)")
 
+                # Per-channel per-minute CRC error rate tracking
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS crc_error_rate (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        crc_error_count INTEGER NOT NULL DEFAULT 0,
+                        crc_disabled_count INTEGER NOT NULL DEFAULT 0
+                    )
+                """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_crcrate_ts ON crc_error_rate(timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_crcrate_ch_ts ON crc_error_rate(channel_id, timestamp)")
+
 
                 conn.execute(
                     """
@@ -233,6 +248,29 @@ class SQLiteHandler:
                     "CREATE INDEX IF NOT EXISTS idx_room_client_sync_pending ON room_client_sync(pending_ack_crc)"
                 )
 
+                # SX1261 health events (structured log of pkt_fwd SX1261 events
+                # such as spectral scan timeouts, CAD timeouts, LBT RSSI busy,
+                # recoveries). Filled by the pkt_fwd stdout parser in the
+                # WM1303 backend. Used by debug_collector health_snapshot.
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sx1261_health_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL NOT NULL,
+                        event_type TEXT NOT NULL,
+                        freq_hz INTEGER,
+                        rssi_dbm REAL,
+                        threshold_dbm REAL,
+                        sf INTEGER,
+                        duration_ms REAL,
+                        details TEXT
+                    )
+                """)
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sx1261_health_ts ON sx1261_health_events(timestamp)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sx1261_health_type ON sx1261_health_events(event_type)"
+                )
                 conn.commit()
                 logger.info(f"SQLite database initialized: {self.sqlite_path}")
 
@@ -842,6 +880,61 @@ class SQLiteHandler:
                 return [{"timestamp": r["timestamp"], "count": r["count"]} for r in reversed(rows)]
         except Exception as e:
             logger.error(f"Failed to get CRC error history: {e}")
+            return []
+
+    def store_crc_error_rate(self, records: list):
+        """Store per-channel CRC error rate rows.
+
+        Each record: {timestamp, channel_id, crc_error_count, crc_disabled_count}
+        """
+        if not records:
+            return
+        try:
+            with sqlite3.connect(self.sqlite_path) as conn:
+                conn.executemany("""
+                    INSERT INTO crc_error_rate (timestamp, channel_id, crc_error_count, crc_disabled_count)
+                    VALUES (?, ?, ?, ?)
+                """, [(
+                    float(r.get("timestamp", time.time())),
+                    str(r.get("channel_id", "unknown")),
+                    int(r.get("crc_error_count", 0)),
+                    int(r.get("crc_disabled_count", 0)),
+                ) for r in records])
+        except Exception as e:
+            logger.error(f"Failed to store crc_error_rate: {e}")
+
+    def get_crc_error_rate(self, hours: int = 24, channel_id: str = None) -> list:
+        """Return CRC error rate records within the given time window (chronological).
+
+        Optional channel_id filter. Returns list of dicts:
+        {timestamp, channel_id, crc_error_count, crc_disabled_count}
+        """
+        try:
+            cutoff = time.time() - (hours * 3600)
+            with sqlite3.connect(self.sqlite_path) as conn:
+                conn.row_factory = sqlite3.Row
+                if channel_id:
+                    rows = conn.execute(
+                        "SELECT timestamp, channel_id, crc_error_count, crc_disabled_count "
+                        "FROM crc_error_rate WHERE channel_id = ? AND timestamp > ? "
+                        "ORDER BY timestamp",
+                        (channel_id, cutoff)
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT timestamp, channel_id, crc_error_count, crc_disabled_count "
+                        "FROM crc_error_rate WHERE timestamp > ? "
+                        "ORDER BY timestamp",
+                        (cutoff,)
+                    ).fetchall()
+                return [{
+                    "timestamp": r["timestamp"],
+                    "channel_id": r["channel_id"],
+                    "crc_error_count": r["crc_error_count"],
+                    "crc_disabled_count": r["crc_disabled_count"],
+                } for r in rows]
+        except Exception as e:
+            logger.error(f"Failed to get crc_error_rate: {e}")
             return []
 
     def get_packet_stats(self, hours: int = 24) -> dict:
