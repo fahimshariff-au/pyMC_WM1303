@@ -670,10 +670,10 @@ class WM1303Backend:
         self._tx_hold_until = 0.0  # monotonic timestamp; TX held until this time
         # Dynamic hold thresholds (seconds) — design principle: TX ASAP!
         #   0 packets pending → 0ms  (nothing to send)
-        #   1 packet  pending → 100ms (brief dedup window)
+        #   1 packet  pending → 50ms  (brief dedup window)
         #   2+ packets pending → 0ms  (batch ready, send NOW!)
         self._tx_hold_empty = 0.0       # hold when no packets pending
-        self._tx_hold_single = 0.100    # hold when 1 packet pending (brief dedup window)
+        self._tx_hold_single = 0.050    # hold when 1 packet pending (brief dedup window)
 
         # Per-channel TX queues (managed internally)
         self._tx_queue_manager: TXQueueManager | None = None
@@ -1297,7 +1297,7 @@ class WM1303Backend:
         Once a batch is formed (2+ pending), hold is ZERO — send immediately!
 
         - 0 packets pending → no hold (nothing to send)
-        - 1 packet  pending → 100ms (brief dedup window)
+        - 1 packet  pending → 50ms  (brief dedup window)
         - 2+ packets pending → 0ms (batch ready, TX ASAP!)
         """
         pending = self._get_total_tx_pending()
@@ -2925,6 +2925,15 @@ class WM1303Backend:
                     logger.warning('WM1303Backend: Self-echo detected! hash=%s age=%.1fs rssi=%s '
                                    'freq=%.3f (total_echoes=%d) - DISCARDING',
                                    _rx_echo_hash, _age, _rx_rssi, _rx_freq, self._tx_echo_detected)
+                    # Record for dedup visualization
+                    try:
+                        from repeater.bridge_engine import _active_bridge
+                        if _active_bridge:
+                            _active_bridge._record_dedup_event('hal_tx_echo', 'HAL',
+                                                               _rx_echo_hash, len(payload),
+                                                               self._get_packet_type_name(payload) if hasattr(self, '_get_packet_type_name') else '')
+                    except Exception:
+                        pass
                     return
                 else:
                     del self._tx_echo_hashes[_rx_echo_hash]
@@ -2934,6 +2943,15 @@ class WM1303Backend:
             if _dd_hash in self._rx_dedup_cache:
                 if _dd_now - self._rx_dedup_cache[_dd_hash] < 2.0:
                     logger.debug('WM1303Backend: multi-demod dup %s', _dd_hash)
+                    # Record for dedup visualization
+                    try:
+                        from repeater.bridge_engine import _active_bridge
+                        if _active_bridge:
+                            _active_bridge._record_dedup_event('multi_demod', 'HAL',
+                                                               _dd_hash, len(payload),
+                                                               self._get_packet_type_name(payload) if hasattr(self, '_get_packet_type_name') else '')
+                    except Exception:
+                        pass
                     return
             self._rx_dedup_cache[_dd_hash] = _dd_now
             if len(self._rx_dedup_cache) > 100:
@@ -3254,7 +3272,7 @@ class WM1303Backend:
             now = time.monotonic()
             _airtime_wait_ms = 0.0
             if self._last_tx_end > now:
-                wait_s = self._last_tx_end - now + 0.05
+                wait_s = self._last_tx_end - now
                 _airtime_wait_ms = round(wait_s * 1000, 1)
                 logger.info('WM1303Backend: waiting %.1fms for previous TX airtime to clear',
                            _airtime_wait_ms)
@@ -3309,9 +3327,9 @@ class WM1303Backend:
 
             # --- Success path: sendto completed ---
 
-            # Calculate LoRa airtime (but do NOT set _last_tx_end yet —
-            # we set it after receiving the post-TX ACK so the guard
-            # aligns with the actual TX start, not the UDP send time).
+            # Calculate LoRa airtime for logging and conservative fallback.
+            # The actual _last_tx_end is set AFTER receiving the post-TX ACK
+            # with a small 50ms safety margin (TX is already complete at that point).
             _airtime_ms_val = 0.0
             _airtime_s = 0.0
             _datr = txpk.get("datr", "SF8BW125")
@@ -3322,7 +3340,7 @@ class WM1303Backend:
                 _airtime_s = self._lora_airtime_s(_sf, _bw, txpk.get("size", 0), txpk.get("prea", 17))
                 _airtime_ms_val = round(_airtime_s * 1000, 1)
                 # Set a CONSERVATIVE _last_tx_end in case ACK never arrives.
-                # This will be overwritten with a precise value after ACK.
+                # This will be overwritten with now + 50ms after ACK (TX already done).
                 self._last_tx_end = time.monotonic() + _airtime_s + 2.0
                 logger.info('WM1303Backend: TX airtime %.1fms (SF%d BW%d %d bytes)',
                            _airtime_ms_val, _sf, _bw, txpk.get('size', 0))
@@ -3351,11 +3369,11 @@ class WM1303Backend:
             # self._schedule_agc_reset()
 
             # WM1303 Approach 3: await post-TX ack for CAD/LBT data.
-            # The post-TX ACK arrives right after lgw_send() in the C code,
-            # i.e. after CAD/LBT checks are done and the TX buffer is loaded.
-            # By waiting for this ACK we know the EXACT moment TX starts on RF,
-            # so we can set _last_tx_end precisely (overwriting the conservative
-            # estimate set earlier).
+            # The post-TX ACK arrives AFTER the TX is complete (the C code
+            # polls TX_STATUS until TX_FREE before sending the ACK).
+            # Since TX is already done when we receive the ACK, we set
+            # _last_tx_end = now + 50ms (small safety margin), overwriting
+            # the conservative fallback set earlier.
             _result = {'ok': True, 'freq': txpk['freq'], 'datr': txpk['datr'],
                        'airtime_ms': _airtime_ms_val, 'send_ms': _send_ms,
                        'tx_token': token, 'ack_received': False}
@@ -3386,16 +3404,17 @@ class WM1303Backend:
                         _result['tx_blocked'] = True
                     elif _post_ack.get('tx_result') and _post_ack['tx_result'] != 'sent':
                         # Other non-sent results
-                        self._last_tx_end = time.monotonic() + _airtime_s
-                        logger.info('WM1303Backend: post-TX ACK received — precise guard: '
-                                    '_last_tx_end = now + %.1fms airtime', _airtime_ms_val)
+                        self._last_tx_end = time.monotonic() + 0.05  # 50ms safety margin; TX already complete
+                        logger.info('WM1303Backend: post-TX ACK received — _last_tx_end = now + 50ms '
+                                    '(TX complete, non-sent result)')
                         _result['tx_blocked'] = True
                     else:
-                        # ── ACK received: TX has started on RF ──
-                        # Set _last_tx_end precisely: now + airtime.
-                        self._last_tx_end = time.monotonic() + _airtime_s
-                        logger.info('WM1303Backend: post-TX ACK received — precise guard: '
-                                    '_last_tx_end = now + %.1fms airtime', _airtime_ms_val)
+                        # ── ACK received: TX has FINISHED on RF ──
+                        # Set _last_tx_end to now + 50ms safety margin.
+                        # TX is already complete when the ACK arrives.
+                        self._last_tx_end = time.monotonic() + 0.05  # 50ms safety margin; TX already complete
+                        logger.info('WM1303Backend: post-TX ACK received — _last_tx_end = now + 50ms '
+                                    '(TX complete, airtime was %.1fms)', _airtime_ms_val)
             except asyncio.TimeoutError:
                 # Graceful degradation: conservative _last_tx_end stays
                 # (set earlier to now + airtime + 2s). No precise guard.

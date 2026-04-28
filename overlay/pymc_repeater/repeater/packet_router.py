@@ -79,6 +79,14 @@ class PacketRouter:
         # Prune expired
         self._companion_delivered = {k: v for k, v in self._companion_delivered.items() if v > now}
         if key in self._companion_delivered:
+            # Record for dedup visualization
+            try:
+                from repeater.bridge_engine import _active_bridge
+                if _active_bridge:
+                    _active_bridge._record_dedup_event('companion_dedup', 'companion',
+                                                       key[:12], 0, '')
+            except Exception:
+                pass
             return False
         self._companion_delivered[key] = now + _COMPANION_DEDUPE_TTL_SEC
         return True

@@ -396,11 +396,25 @@ select.ci option{background:#1e293b}
     </div>
     <div class="gl p-4 text-center">
       <div class="text-3xl font-bold" style="color:#f97316" id="dd-echo">0</div>
-      <div class="text-xs mt-1" style="color:var(--txm)">Echoes</div>
+      <div class="text-xs mt-1" style="color:var(--txm)">Bridge Echo</div>
     </div>
     <div class="gl p-4 text-center">
       <div class="text-3xl font-bold" style="color:#ef4444" id="dd-filt">0</div>
       <div class="text-xs mt-1" style="color:var(--txm)">Filtered</div>
+    </div>
+  </div>
+  <div class="grid grid-cols-3 gap-4 mb-4">
+    <div class="gl p-4 text-center">
+      <div class="text-3xl font-bold" style="color:#fb923c" id="dd-hal-echo">0</div>
+      <div class="text-xs mt-1" style="color:var(--txm)">HAL Echo</div>
+    </div>
+    <div class="gl p-4 text-center">
+      <div class="text-3xl font-bold" style="color:#a78bfa" id="dd-multi-demod">0</div>
+      <div class="text-xs mt-1" style="color:var(--txm)">Multi-Demod</div>
+    </div>
+    <div class="gl p-4 text-center">
+      <div class="text-3xl font-bold" style="color:#38bdf8" id="dd-companion">0</div>
+      <div class="text-xs mt-1" style="color:var(--txm)">Companion</div>
     </div>
   </div>
   <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -1111,6 +1125,15 @@ function loadTxQueues(){
           html+='<div style="color:var(--txm);font-weight:500;">'+lbtLastRssi.toFixed(1)+' dBm</div>';
         }
       }
+      // Row: CAD status
+      var cadClear=live?live.cad_clear||0:0;
+      var cadDetected=live?live.cad_detected||0:0;
+      if(cadClear>0||cadDetected>0){
+        var cadColor=cadDetected>0?'#f59e0b':'#22c55e';
+        var cadText=cadDetected>0?(cadDetected+' detected / '+cadClear+' clear'):(cadClear>0?cadClear+' clear':'--');
+        html+='<div style="color:var(--txm)" title="Channel Activity Detection">CAD</div>';
+        html+='<div style="color:'+cadColor+';font-weight:500;">'+cadText+'</div>';
+      }
       html+='</div>';
       // Footer: Last RX / Last TX
       if(live){
@@ -1224,6 +1247,15 @@ function loadTxQueues(){
           html+='<div style="color:var(--txm)">LBT RSSI</div>';
           html+='<div style="color:var(--txm);font-weight:500;">'+eLbtLastRssi.toFixed(1)+' dBm</div>';
         }
+      }
+      // Row: CAD status (Channel E)
+      var eCadClear=eLive.cad_clear||0;
+      var eCadDetected=eLive.cad_detected||0;
+      if(eCadClear>0||eCadDetected>0){
+        var eCadColor=eCadDetected>0?'#f59e0b':'#22c55e';
+        var eCadText=eCadDetected>0?(eCadDetected+' detected / '+eCadClear+' clear'):(eCadClear>0?eCadClear+' clear':'--');
+        html+='<div style="color:var(--txm)" title="Channel Activity Detection">CAD</div>';
+        html+='<div style="color:'+eCadColor+';font-weight:500;">'+eCadText+'</div>';
       }
       html+='</div>';
       // Footer: Last RX / Last TX
@@ -2184,8 +2216,7 @@ showTab = function(name, btn) {
   <!-- LBT History Chart -->
   <div class="gl" style="padding:18px;margin-bottom:16px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <span style="font-size:13px;font-weight:600;color:#f472b6">&#128225; LBT History &mdash; TX Events vs Noise Floor</span>
-      <span style="font-size:11px;color:var(--txm)" id="lbtHistCount">0 TX events</span>
+      <span style="font-size:13px;font-weight:600;color:#f472b6">&#128225; LBT History &mdash; RSSI &amp; Noise Floor</span>
     </div>
     <div style="height:280px;position:relative"><canvas id="lbtHistChart"></canvas></div>
     <div id="lbtHistLegend" style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--txm)"></div>
@@ -2263,28 +2294,6 @@ showTab = function(name, btn) {
 
   <!-- LBT channel info -->
   <div id="specLbtList" style="margin-top:12px"></div>
-  <!-- CRC Error Rate chart -->
-  <div class="gl p-5">
-    <div class="flex items-center justify-between mb-3">
-      <div class="stl mb-0">CRC Error Rate</div>
-      <div class="flex items-center gap-2">
-        <div id="crcRateRangeBtns" class="flex gap-1">
-          <button class="btn sec sm crc-rng active" data-range="1h" onclick="crcRateSetRange('1h',this)">1h</button>
-          <button class="btn sec sm crc-rng" data-range="6h" onclick="crcRateSetRange('6h',this)">6h</button>
-          <button class="btn sec sm crc-rng" data-range="24h" onclick="crcRateSetRange('24h',this)">24h</button>
-          <button class="btn sec sm crc-rng" data-range="3d" onclick="crcRateSetRange('3d',this)">3d</button>
-          <button class="btn sec sm crc-rng" data-range="7d" onclick="crcRateSetRange('7d',this)">7d</button>
-        </div>
-        <button class="btn sec sm" onclick="crcRateLoad()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9H3"/><path d="M3 3v6h6"/></svg>Refresh</button>
-      </div>
-    </div>
-    <div style="position:relative;height:280px"><canvas id="crcRateChart"></canvas></div>
-    <div id="crcRateNoData" style="display:none;text-align:center;padding:40px 0;color:var(--txm)">
-      <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="margin:0 auto 12px;opacity:0.4"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-      <div>No CRC error rate data recorded yet</div>
-      <div style="font-size:12px;margin-top:4px">Data will appear as the recorder collects samples (every 60s)</div>
-    </div>
-  </div>
 </div>
 
 
@@ -3042,7 +3051,6 @@ function renderLbtHistChart(channels) {
   if (!canvas) return;
   if (lbtHistChart) lbtHistChart.destroy();
   var datasets = [];
-  var totalEvents = 0;
   var legendHtml = '';
   var globalMinT = null, globalMaxT = null;
 
@@ -3058,25 +3066,9 @@ function renderLbtHistChart(channels) {
     if (globalMaxT === null || lastT  > globalMaxT) globalMaxT = lastT;
 
     // Continuous lines — draw for every bucket (nulls become gaps; spanGaps bridges them)
-    var nfLine      = evts.map(function(e){ return { x: new Date(e.timestamp*1000), y: (e.noise_floor_dbm != null ? e.noise_floor_dbm : null) }; });
     var lbtRssiLine = evts.map(function(e){ return { x: new Date(e.timestamp*1000), y: (e.lbt_last_rssi   != null ? e.lbt_last_rssi   : null) }; });
     var rxRssiLine  = evts.map(function(e){ return { x: new Date(e.timestamp*1000), y: (e.avg_rssi        != null ? e.avg_rssi        : null) }; });
     var snrLine     = evts.map(function(e){ return { x: new Date(e.timestamp*1000), y: (e.avg_snr         != null ? e.avg_snr         : null) }; });
-
-    // Noise floor — solid line on dBm axis
-    datasets.push({
-      label: (ch.name || ch.friendly_name) + ' Noise Floor',
-      data: nfLine,
-      borderColor: color,
-      backgroundColor: 'transparent',
-      borderWidth: 2,
-      pointRadius: 0,
-      pointHoverRadius: 3,
-      showLine: true,
-      spanGaps: true,
-      tension: 0.2,
-      yAxisID: 'y'
-    });
     // LBT last RSSI — dotted line on dBm axis
     datasets.push({
       label: (ch.name || ch.friendly_name) + ' LBT RSSI',
@@ -3122,43 +3114,6 @@ function renderLbtHistChart(channels) {
       yAxisID: 'y2'
     });
 
-    // TX event markers — dots only where real TX occurred
-    var clearPts = [], busyPts = [];
-    evts.forEach(function(evt) {
-      var hadTxActivity = (evt.tx_count_delta || 0) > 0 || (evt.lbt_passed_delta || 0) > 0 || (evt.lbt_blocked_delta || 0) > 0;
-      if (!hadTxActivity) return;
-      if (evt.noise_floor_dbm == null) return;
-      var pt = { x: new Date(evt.timestamp * 1000), y: evt.noise_floor_dbm };
-      if (evt.lbt_clear) clearPts.push(pt); else busyPts.push(pt);
-    });
-    totalEvents += clearPts.length + busyPts.length;
-    if (clearPts.length > 0) {
-      datasets.push({
-        label: (ch.name || ch.friendly_name) + ' TX Clear',
-        data: clearPts,
-        backgroundColor: '#22c55e',
-        borderColor: color,
-        borderWidth: 2,
-        pointRadius: 5,
-        pointHoverRadius: 7,
-        showLine: false,
-        yAxisID: 'y'
-      });
-    }
-    if (busyPts.length > 0) {
-      datasets.push({
-        label: (ch.name || ch.friendly_name) + ' TX Busy',
-        data: busyPts,
-        backgroundColor: '#ef4444',
-        borderColor: color,
-        borderWidth: 2,
-        pointRadius: 6,
-        pointHoverRadius: 8,
-        pointStyle: 'crossRot',
-        showLine: false,
-        yAxisID: 'y'
-      });
-    }
 
     legendHtml += '<span style="color:' + color + '">&#9679; ' + (ch.name || ch.friendly_name) + '</span> ';
   });
@@ -3184,12 +3139,10 @@ function renderLbtHistChart(channels) {
     });
   }
 
-  legendHtml += '<span>| <span style="color:#22c55e">&#9679;</span> Clear TX &nbsp; <span style="color:#ef4444">&#10005;</span> Busy TX &nbsp; <span style="border-bottom:2px dashed #999">---</span> LBT Threshold &nbsp; <span style="border-bottom:2px dotted #999">···</span> LBT RSSI &nbsp; <span style="border-bottom:1px dashed #999">- -</span> RX RSSI</span>';
+  legendHtml += '<span>| <span style="border-bottom:2px dashed #999">---</span> LBT Threshold &nbsp; <span style="border-bottom:2px dotted #999">···</span> LBT RSSI &nbsp; <span style="border-bottom:1px dashed #999">- -</span> RX RSSI</span>';
   var legendEl = document.getElementById('lbtHistLegend');
   if (legendEl) legendEl.innerHTML = legendHtml;
 
-  var el = document.getElementById('lbtHistCount');
-  if (el) el.textContent = totalEvents + ' TX events';
 
   if (datasets.length === 0) {
     datasets.push({ label: 'No data', data: [{ x: new Date(), y: -120 }], borderColor: '#666', pointRadius: 3, showLine: false });
@@ -3494,20 +3447,31 @@ function renderPmTxTimingChart(channels) {
       datasets.push({
         label: (ch.label || ch.id) + ' airtime',
         data: airPts, borderColor: color, backgroundColor: 'transparent',
-        borderWidth: 2, pointRadius: 0, spanGaps: true, tension: 0.3
+        borderWidth: 2, pointRadius: 0, spanGaps: true, tension: 0.3,
+        yAxisID: 'y'
       });
     }
     if (waitPts.length) {
       datasets.push({
         label: (ch.label || ch.id) + ' wait',
         data: waitPts, borderColor: color, backgroundColor: 'transparent',
-        borderWidth: 2, borderDash: [6, 3], pointRadius: 0, spanGaps: true, tension: 0.3
+        borderWidth: 2, borderDash: [6, 3], pointRadius: 0, spanGaps: true, tension: 0.3,
+        yAxisID: 'y2'
       });
     }
   });
   var el = document.getElementById('pmTxTimingCount');
   if (el) el.textContent = totalPts + ' buckets';
-  pmTxTimingChart = new Chart(canvas, { type: 'line', data: { datasets: datasets }, options: _pmBaseOpts('Milliseconds (avg / minute)') });
+  var txTimingOpts = {
+    responsive: true, maintainAspectRatio: false,
+    scales: {
+      x: { type: 'time', time: { unit: _pmTimeUnit() }, grid: { color: 'rgba(128,128,128,0.1)' }, ticks: { color: '#999', maxTicksLimit: 12 } },
+      y: { title: { display: true, text: 'Airtime (ms)', color: '#999' }, grid: { color: 'rgba(128,128,128,0.1)' }, ticks: { color: '#999' }, beginAtZero: true, position: 'left' },
+      y2: { title: { display: true, text: 'Wait time (ms)', color: '#999' }, grid: { drawOnChartArea: false }, ticks: { color: '#999' }, beginAtZero: true, position: 'right' }
+    },
+    plugins: { legend: { labels: { color: '#999', usePointStyle: true } } }
+  };
+  pmTxTimingChart = new Chart(canvas, { type: 'line', data: { datasets: datasets }, options: txTimingOpts });
 }
 
 function renderPmHopsChart(channels) {
@@ -3610,11 +3574,14 @@ function renderPmCrcChart(channels) {
     var G = function(id) { return document.getElementById(id); };
     if (G('dd-fwd')) G('dd-fwd').textContent = (stats.total_forwarded || 0).toLocaleString();
     if (G('dd-dup')) G('dd-dup').textContent = (stats.total_duplicate || 0).toLocaleString();
-    if (G('dd-echo')) G('dd-echo').textContent = (stats.total_echo || 0).toLocaleString();
+    if (G('dd-echo')) G('dd-echo').textContent = (stats.total_tx_echo || 0).toLocaleString();
     if (G('dd-filt')) G('dd-filt').textContent = (stats.total_filtered || 0).toLocaleString();
+    if (G('dd-hal-echo')) G('dd-hal-echo').textContent = (stats.total_hal_tx_echo || 0).toLocaleString();
+    if (G('dd-multi-demod')) G('dd-multi-demod').textContent = (stats.total_multi_demod || 0).toLocaleString();
+    if (G('dd-companion')) G('dd-companion').textContent = (stats.total_companion_dedup || 0).toLocaleString();
     var ratio = stats.dedup_ratio || 0;
     if (G('dd-ratio')) G('dd-ratio').textContent = (ratio * 100).toFixed(1) + '%';
-    var total = (stats.total_forwarded||0) + (stats.total_duplicate||0) + (stats.total_echo||0) + (stats.total_filtered||0);
+    var total = (stats.total_forwarded||0) + (stats.total_duplicate||0) + (stats.total_tx_echo||0) + (stats.total_filtered||0) + (stats.total_hal_tx_echo||0) + (stats.total_multi_demod||0) + (stats.total_companion_dedup||0);
     if (G('dd-total')) G('dd-total').textContent = total.toLocaleString();
     if (G('dd-active')) G('dd-active').textContent = (stats.dedup_seen_active || 0).toLocaleString();
     if (G('dd-buffered')) G('dd-buffered').textContent = (stats.dedup_events_buffered || 0).toLocaleString();
@@ -3667,8 +3634,8 @@ function renderPmCrcChart(channels) {
         borderRadius: 2,
       },
       {
-        label: 'Echo',
-        data: buckets.map(function(b) { return b.echo || 0; }),
+        label: 'Bridge Echo',
+        data: buckets.map(function(b) { return b.tx_echo || 0; }),
         backgroundColor: 'rgba(249, 115, 22, 0.7)',
         borderColor: 'rgba(249, 115, 22, 1)',
         borderWidth: 1,
@@ -3679,6 +3646,30 @@ function renderPmCrcChart(channels) {
         data: buckets.map(function(b) { return b.filtered || 0; }),
         backgroundColor: 'rgba(239, 68, 68, 0.7)',
         borderColor: 'rgba(239, 68, 68, 1)',
+        borderWidth: 1,
+        borderRadius: 2,
+      },
+      {
+        label: 'HAL Echo',
+        data: buckets.map(function(b) { return b.hal_tx_echo || 0; }),
+        backgroundColor: 'rgba(251, 146, 60, 0.7)',
+        borderColor: 'rgba(251, 146, 60, 1)',
+        borderWidth: 1,
+        borderRadius: 2,
+      },
+      {
+        label: 'Multi-Demod',
+        data: buckets.map(function(b) { return b.multi_demod || 0; }),
+        backgroundColor: 'rgba(167, 139, 250, 0.7)',
+        borderColor: 'rgba(167, 139, 250, 1)',
+        borderWidth: 1,
+        borderRadius: 2,
+      },
+      {
+        label: 'Companion',
+        data: buckets.map(function(b) { return b.companion_dedup || 0; }),
+        backgroundColor: 'rgba(56, 189, 248, 0.7)',
+        borderColor: 'rgba(56, 189, 248, 1)',
         borderWidth: 1,
         borderRadius: 2,
       }
@@ -3916,168 +3907,6 @@ function renderPmCrcChart(channels) {
     pktActTabActive = true;
     setTimeout(function() { pktActLoad(); }, 2000);
     pktActTimer = setInterval(pktActLoad, 60000);
-  });
-})();
-</script>
-<script>
-/* ═══════════════════ CRC ERROR RATE CHART ═══════════════════ */
-(function(){
-  var crcRateChart = null;
-  var crcRateRange = "1h";
-  var crcRateTimer = null;
-  var crcRateTabActive = false;
-
-  function rangeToHours(r) {
-    if (r === "1h") return 1;
-    if (r === "6h") return 6;
-    if (r === "24h") return 24;
-    if (r === "3d") return 72;
-    if (r === "7d") return 168;
-    return 1;
-  }
-
-  window.crcRateSetRange = function(range, btn) {
-    crcRateRange = range;
-    document.querySelectorAll(".crc-rng").forEach(function(b){b.classList.remove("active");});
-    if (btn) btn.classList.add("active");
-    crcRateLoad();
-    clearInterval(crcRateTimer);
-    var interval = (crcRateRange === "1h") ? 30000 : 60000;
-    crcRateTimer = setInterval(crcRateLoad, interval);
-  };
-
-  window.crcRateLoad = async function() {
-    try {
-      var h = rangeToHours(crcRateRange);
-      var resp = await fetch("/api/wm1303/crc_error_rate?hours=" + h);
-      var data = await resp.json();
-      crcRateRender(data);
-    } catch(e) {
-      console.warn("crcRate fetch error:", e);
-    }
-  };
-
-  function crcRateRender(data) {
-    var channels = data.channels || [];
-    var noData = document.getElementById("crcRateNoData");
-    var canvas = document.getElementById("crcRateChart");
-    var hasData = channels.some(function(ch) { return ch.data && ch.data.length > 0; });
-    if (!hasData) {
-      if (noData) noData.style.display = "block";
-      if (canvas) canvas.style.display = "none";
-      if (crcRateChart) { crcRateChart.destroy(); crcRateChart = null; }
-      return;
-    }
-    if (noData) noData.style.display = "none";
-    if (canvas) canvas.style.display = "block";
-    crcRateRenderChart(channels);
-  }
-
-  function crcRateRenderChart(channels) {
-    if (typeof Chart === "undefined") return;
-    // Collect all unique timestamps
-    var tsSet = {};
-    channels.forEach(function(ch) {
-      (ch.data || []).forEach(function(pt) { tsSet[pt.t] = true; });
-    });
-    var timestamps = Object.keys(tsSet).map(Number).sort(function(a,b){return a-b;});
-    // Format labels
-    var labels = timestamps.map(function(ts) {
-      var d = new Date(ts * 1000);
-      if (crcRateRange === "1h" || crcRateRange === "6h" || crcRateRange === "24h") {
-        return d.getHours().toString().padStart(2,"0") + ":" + d.getMinutes().toString().padStart(2,"0");
-      } else {
-        return (d.getMonth()+1) + "/" + d.getDate() + " " + d.getHours().toString().padStart(2,"0") + ":00";
-      }
-    });
-    // Build datasets: for each channel, CRC_ERROR (solid) and CRC_DISABLED (lighter) stacked
-    var datasets = [];
-    var errColors = ["239,68,68", "249,115,22", "234,179,8", "168,85,247",
-                     "236,72,153", "244,63,94", "251,113,133", "251,191,36"];
-    var disColors = errColors.map(function(c){return c;});  // same base, different alpha
-    channels.forEach(function(ch, idx) {
-      var dataMap = {};
-      (ch.data || []).forEach(function(pt) { dataMap[pt.t] = pt; });
-      var errData = timestamps.map(function(ts) { return dataMap[ts] ? dataMap[ts].crc_error : 0; });
-      var disData = timestamps.map(function(ts) { return dataMap[ts] ? dataMap[ts].crc_disabled : 0; });
-      datasets.push({
-        label: ch.label + " CRC Error",
-        data: errData,
-        backgroundColor: "rgba(" + errColors[idx % errColors.length] + ",0.85)",
-        borderColor: "rgba(" + errColors[idx % errColors.length] + ",1)",
-        borderWidth: 1, borderRadius: 2, stack: "err"
-      });
-      datasets.push({
-        label: ch.label + " CRC Disabled",
-        data: disData,
-        backgroundColor: "rgba(" + disColors[idx % disColors.length] + ",0.35)",
-        borderColor: "rgba(" + disColors[idx % disColors.length] + ",0.7)",
-        borderWidth: 1, borderRadius: 2, stack: "dis"
-      });
-    });
-    var ctx = document.getElementById("crcRateChart").getContext("2d");
-    if (crcRateChart) crcRateChart.destroy();
-    crcRateChart = new Chart(ctx, {
-      type: "bar",
-      data: { labels: labels, datasets: datasets },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        animation: { duration: 300 },
-        plugins: {
-          legend: {
-            display: true, position: "top",
-            labels: { color: "rgba(255,255,255,0.6)", padding: 12, usePointStyle: true, pointStyle: "rectRounded", font: { size: 11 } }
-          },
-          tooltip: {
-            mode: "index", intersect: false,
-            callbacks: {
-              title: function(items) { return items[0].label; },
-              footer: function(items) {
-                var errSum = 0, disSum = 0;
-                items.forEach(function(it) { if (it.dataset.stack==="err") errSum+=it.raw; else disSum+=it.raw; });
-                return "Total CRC Errors: " + errSum + "  Disabled: " + disSum;
-              }
-            }
-          }
-        },
-        scales: {
-          x: {
-            stacked: true,
-            ticks: { color: "rgba(255,255,255,0.4)", maxTicksLimit: 16, font: { size: 10 } },
-            grid: { color: "rgba(255,255,255,0.05)" }
-          },
-          y: {
-            stacked: true, beginAtZero: true,
-            ticks: { color: "rgba(255,255,255,0.4)", font: { size: 10 } },
-            grid: { color: "rgba(255,255,255,0.05)" },
-            title: { display: true, text: "Count / interval", color: "rgba(255,255,255,0.4)", font: { size: 10 } }
-          }
-        }
-      }
-    });
-  }
-
-  // Hook into showTab to load/start/stop CRC rate polling
-  var _origShowTabCrcRate = window.showTab;
-  window.showTab = function(name, btn) {
-    _origShowTabCrcRate(name, btn);
-    if (name === "status") {
-      crcRateTabActive = true;
-      crcRateLoad();
-      clearInterval(crcRateTimer);
-      var interval = (crcRateRange === "1h") ? 30000 : 60000;
-      crcRateTimer = setInterval(crcRateLoad, interval);
-    } else {
-      crcRateTabActive = false;
-      clearInterval(crcRateTimer);
-    }
-  };
-
-  // Auto-load on page load (status tab is default)
-  document.addEventListener("DOMContentLoaded", function() {
-    crcRateTabActive = true;
-    setTimeout(function() { crcRateLoad(); }, 2500);
-    crcRateTimer = setInterval(crcRateLoad, 60000);
   });
 })();
 </script>
@@ -4402,7 +4231,7 @@ function renderPmCrcChart(channels) {
     filter_drop:       {icon:'\uD83D\uDED1', color:'#ef4444', phase:'Routing', label:'Filter drop'},
     rf_guard:          {icon:'\u23F3',       color:'#f59e0b', phase:'Guard',   label:'RF-chain guard'},
     tx_noisefloor:     {icon:'\uD83D\uDCCA', color:'#06b6d4', phase:'TX',      label:'TX noise floor'},
-    cad_start:         {icon:'\uD83D\uDD0D', color:'#eab308', phase:'TX',      label:'CAD scan start'},
+    cad_start:         {icon:'\uD83D\uDD0D', color:'#eab308', phase:'TX',      label:'CAD+LBT scan start'},
     lbt_check:         {icon:'\u2705',       color:'#22c55e', phase:'TX',      label:'LBT result'},
     cad_check:         {icon:'\u2705',       color:'#22c55e', phase:'TX',      label:'CAD result'},
     cad_retry:         {icon:'\u26A0',       color:'#f59e0b', phase:'TX',      label:'CAD retry'},
@@ -4550,6 +4379,108 @@ function renderPmCrcChart(channels) {
       });
     }
   })();
+  // ---------------------------------------------------------------------
+  // Semantic Δ computation (v2.4.1+):
+  // Instead of always showing "time since previous event", compute a
+  // context-aware Δ that represents the duration of the specific action
+  // described by each event row.
+  //
+  // Pairing rules:
+  //   cad_start    → forward-look to last of (lbt_check, cad_check)
+  //                  before next rf_tx_start/tx_send → Δ = scan duration
+  //   tx_noisefloor→ Δ = 0 (instantaneous marker, co-timed with cad_start)
+  //   lbt_check    → back-look to nearest cad_start → Δ = LBT scan portion
+  //   cad_check    → back-look to nearest cad_start → Δ = CAD scan portion
+  //   rf_tx_start  → back-look to nearest cad_check/lbt_check → Δ = scan-to-TX
+  //   all others   → gap since previous event (unchanged behavior)
+  // ---------------------------------------------------------------------
+  var _SEMANTIC_DELTA_TOOLTIPS = {
+    cad_start:         'CAD + LBT scan duration',
+    tx_noisefloor:     'Noise floor read (instantaneous)',
+    lbt_check:         'LBT result (instantaneous)',
+    cad_check:         'CAD result (instantaneous)',
+    rf_tx_start:       'Scan-to-TX launch delay',
+    rf_tx_end:         'RF airtime (on-air duration)',
+    sx1261_rx_restart: 'TX inhibit cooldown',
+    tx_ack:            'TX ACK roundtrip',
+    tx_send:           'Post-TX finalize',
+    received:          'RX event',
+    dedup_check:       'Dedup check (instantaneous)',
+    dedup_skip:        'Dedup skip (instantaneous)',
+    bridge_forward:    'Bridge routing time',
+    tx_enqueue:        'Queue enqueue time',
+    rf_guard:          'RF-chain guard wait'
+  };
+  function _computeSemanticDelta(steps, idx) {
+    var s = steps[idx];
+    var sElapsed = (s.elapsed_ms !== undefined) ? s.elapsed_ms : 0;
+    var prevStep = (idx > 0) ? steps[idx - 1] : null;
+    var prevElapsed = (prevStep && prevStep.elapsed_ms !== undefined) ? prevStep.elapsed_ms : null;
+    var defaultDelta = (prevElapsed !== null) ? (sElapsed - prevElapsed) : 0;
+    if (defaultDelta < 0) defaultDelta = 0;
+    var tooltip = _SEMANTIC_DELTA_TOOLTIPS[s.name] || 'Time since previous event';
+
+    // --- cad_start: forward-look to last scan result ---
+    if (s.name === 'cad_start') {
+      var scanEndElapsed = null;
+      for (var fwd = idx + 1; fwd < steps.length; fwd++) {
+        var fn = steps[fwd].name;
+        // Stop searching at rf_tx_start, tx_send, or another cad_start (next TX cycle)
+        if (fn === 'rf_tx_start' || fn === 'tx_send' || fn === 'cad_start') break;
+        if (fn === 'lbt_check' || fn === 'cad_check') {
+          var fe = (steps[fwd].elapsed_ms !== undefined) ? steps[fwd].elapsed_ms : 0;
+          // Take the latest (max) of lbt_check / cad_check
+          if (scanEndElapsed === null || fe > scanEndElapsed) scanEndElapsed = fe;
+        }
+      }
+      if (scanEndElapsed !== null) {
+        var scanDur = scanEndElapsed - sElapsed;
+        if (scanDur < 0) scanDur = 0;
+        return { delta: scanDur, tooltip: tooltip };
+      }
+      // Fallback: no scan result found, show 0
+      return { delta: 0, tooltip: tooltip + ' (no scan result found)' };
+    }
+
+    // --- tx_noisefloor: instantaneous marker ---
+    if (s.name === 'tx_noisefloor') {
+      return { delta: 0, tooltip: tooltip };
+    }
+
+    // --- lbt_check / cad_check: instantaneous result markers ---
+    // The scan duration is already shown on cad_start (forward-looking Δ).
+    // lbt_check and cad_check are co-timed with scan completion, and their
+    // previous event (tx_noisefloor) is co-timed with cad_start, so
+    // defaultDelta would equal the full scan duration — misleading.
+    // Show Δ = 0 to indicate these are instantaneous result markers.
+    if (s.name === 'lbt_check' || s.name === 'cad_check') {
+      return { delta: 0, tooltip: tooltip };
+    }
+
+    // --- dedup_check / dedup_skip: instantaneous events ---
+    if (s.name === 'dedup_check' || s.name === 'dedup_skip') {
+      return { delta: 0, tooltip: tooltip };
+    }
+
+    // --- rf_tx_start: back-look to last scan result ---
+    if (s.name === 'rf_tx_start') {
+      for (var bk2 = idx - 1; bk2 >= 0; bk2--) {
+        if (steps[bk2].name === 'cad_check' || steps[bk2].name === 'lbt_check') {
+          var scanResultElapsed = (steps[bk2].elapsed_ms !== undefined) ? steps[bk2].elapsed_ms : 0;
+          var txLaunchDelta = sElapsed - scanResultElapsed;
+          if (txLaunchDelta < 0) txLaunchDelta = 0;
+          return { delta: txLaunchDelta, tooltip: tooltip };
+        }
+        // Don't cross TX cycle boundaries
+        if (steps[bk2].name === 'tx_send' || steps[bk2].name === 'tx_ack' || steps[bk2].name === 'cad_start') break;
+      }
+      // Fallback: no scan result found
+      return { delta: defaultDelta, tooltip: 'Time since previous event' };
+    }
+
+    // --- All other events: gap since previous (unchanged) ---
+    return { delta: defaultDelta, tooltip: tooltip };
+  }
   function _renderTraces(traces) {
     var box = document.getElementById('traceList');
     var nodata = document.getElementById('traceNoData');
@@ -4676,14 +4607,37 @@ function renderPmCrcChart(channels) {
             var _stepElapsed = (s.elapsed_ms !== undefined) ? s.elapsed_ms : 0;
             var _prevStep = (j > 0) ? t.steps[j - 1] : null;
             var _prevElapsed = (_prevStep && _prevStep.elapsed_ms !== undefined) ? _prevStep.elapsed_ms : null;
-            var _stepDelta = (_prevElapsed !== null) ? (_stepElapsed - _prevElapsed) : 0;
-            if (_stepDelta < 0) _stepDelta = 0;
+            var _rawGapDelta = (_prevElapsed !== null) ? (_stepElapsed - _prevElapsed) : 0;
+            if (_rawGapDelta < 0) _rawGapDelta = 0;
+            var _sem = _computeSemanticDelta(t.steps, j);
+            var _stepDelta = _sem.delta;
+            var _stepDeltaTooltip = _sem.tooltip;
+
+
+            // Suppress WAIT rows for scan-internal gaps where the duration
+            // is already represented by cad_start's semantic Δ.
+            var _scanInternalGap = false;
+            if (_prevStep) {
+              var _pn = _prevStep.name;
+              var _cn = s.name;
+              // Gap from scan-start events to scan-result events
+              if ((_pn === 'cad_start' || _pn === 'tx_noisefloor') &&
+                  (_cn === 'lbt_check' || _cn === 'cad_check' || _cn === 'tx_noisefloor' || _cn === 'cad_start')) {
+                _scanInternalGap = true;
+              }
+              // Gap between co-timed scan results
+              if ((_pn === 'lbt_check' && _cn === 'cad_check') ||
+                  (_pn === 'cad_check' && _cn === 'lbt_check')) {
+                _scanInternalGap = true;
+              }
+            }
 
             // Insert WAIT row before this step when gap > threshold
             // (but ONLY when previous step is within the same phase block;
             // inter-phase gaps are rendered as phase separators instead).
+            // Skip scan-internal gaps (already shown on cad_start Δ).
             var _insideSamePhase = (j > _ph.startIdx);
-            if (_insideSamePhase && _stepDelta > _WAIT_THRESHOLD_MS) {
+            if (_insideSamePhase && _rawGapDelta > _WAIT_THRESHOLD_MS && !_scanInternalGap) {
               var _waitTxt = _waitLabel(_prevStep ? _prevStep.name : '', s.name);
               var _waitColor = '#f59e0b';
               html += '<div style="position:relative;padding-bottom:6px;margin-left:8px">';
@@ -4691,11 +4645,12 @@ function renderPmCrcChart(channels) {
               html += '<div style="position:absolute;left:-12px;top:15px;bottom:0;width:2px;background:repeating-linear-gradient(to bottom,' + _waitColor + '55 0 3px,transparent 3px 6px)"></div>';
               html += '<div style="display:flex;align-items:center;gap:10px;background:rgba(245,158,11,0.05);border-left:2px solid ' + _waitColor + ';padding:3px 8px;border-radius:3px;font-style:italic">';
               html += '<span style="color:' + _waitColor + ';font-weight:600;font-size:11px;min-width:150px">\u23F3 ' + _waitTxt + '</span>';
-              html += '<span style="font-family:monospace;font-size:10px;color:' + _waitColor + '" title="Gemeten tijdsverloop tussen twee events">\u0394 ' + _stepDelta.toFixed(1) + ' ms</span>';
+              html += '<span style="font-family:monospace;font-size:10px;color:' + _waitColor + '" title="Measured time gap between events">\u0394 ' + _rawGapDelta.toFixed(1) + ' ms</span>';
               // Mini-timeline bar (stretch goal)
-              var _barPct = Math.min(100, Math.max(1, (_stepDelta / _traceTotalMs) * 100));
-              html += '<span style="flex:1 1 auto;height:4px;background:rgba(245,158,11,0.12);border-radius:2px;overflow:hidden;min-width:60px" title="Relatieve duur t.o.v. totale trace"><span style="display:block;height:100%;width:' + _barPct.toFixed(1) + '%;background:' + _waitColor + ';opacity:0.55"></span></span>';
-              html += '</div></div>';
+              var _barPct = Math.min(100, Math.max(1, (_rawGapDelta / _traceTotalMs) * 100));
+              html += '<span style="flex:1 1 auto;height:4px;background:rgba(245,158,11,0.12);border-radius:2px;overflow:hidden;min-width:60px" title="Relative duration vs total trace"><span style="display:block;height:100%;width:' + _barPct.toFixed(1) + '%;background:' + _waitColor + ';opacity:0.55"></span></span>';
+              html += '</div>';
+              html += '</div>';
             }
 
             // Step row (action)
@@ -4723,7 +4678,7 @@ function renderPmCrcChart(channels) {
             html += '<span style="font-weight:700;color:' + _labelColor + ';font-size:12px;min-width:150px">' + _meta.label + '</span>';
             if (txTargetPill && !pillAtEnd) { html += txTargetPill; }
             html += '<span style="font-family:monospace;font-size:11px;min-width:150px;display:inline-flex;gap:6px;align-items:center">' +
-                    '<span style="color:var(--txs);font-weight:600" title="Tijd sinds vorige event">' + _deltaText + '</span>' +
+                    '<span style="color:var(--txs);font-weight:600" title="' + _stepDeltaTooltip + '">' + _deltaText + '</span>' +
                     '<span style="color:var(--txm);opacity:0.7" title="Tijd sinds begin van de trace">' + _cumText + '</span>' +
                     '</span>';
             html += '<span style="font-size:11px;color:var(--txs);white-space:pre-line;flex:1 1 auto">' + _enhanceDetail(s.detail || '') + '</span>';

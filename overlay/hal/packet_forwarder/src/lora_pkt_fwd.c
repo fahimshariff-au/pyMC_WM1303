@@ -422,13 +422,6 @@ static spectral_scan_t spectral_scan_params = {
    generic post-TX RX-restart logic. */
 static bool custom_cad_enable = false;  /* LoRa Channel Activity Detection */
 
-/* Time-based TX guard: track when the current TX window expires.
-   Instead of storing last_tx_time + airtime (which gets overwritten by
-   shorter TXs on other channels), we store the absolute expiry time.
-   Only updates if the new expiry extends beyond the current one.
-   This prevents a short Channel A TX from shortening a long Channel E guard.
-   NOTE: name retained from legacy custom-LBT era; now a generic post-TX guard. */
-static struct timespec custom_lbt_guard_expiry = {0, 0};
 
 /* Non-blocking LoRa RX restart after TX: stores the time at which
    the SX1261 LoRa RX should be restarted (after TX airtime completes).
@@ -3999,7 +3992,7 @@ void thread_down(void) {
                     hal_lbt_lookup(txpkt.freq_hz,
                                    &imme_extra.lbt_enabled,
                                    &imme_extra.lbt_threshold_dbm);
-                    imme_extra.lbt_rssi_dbm = -127; /* not available from HAL */
+                    imme_extra.lbt_rssi_dbm = -127; /* sentinel — overwritten by post-send lgw_lbt_get_last_rssi() */
                     imme_extra.lbt_pass = true; /* optimistic — updated after lgw_send */
 
 
@@ -4075,18 +4068,6 @@ void thread_down(void) {
                             }
                         }
 
-                        /* Record TX guard expiry (airtime + 150ms margin) */
-                        {
-                            struct timespec new_expiry;
-                            clock_gettime(CLOCK_MONOTONIC, &new_expiry);
-                            uint64_t add_ns = (uint64_t)(imme_airtime_ms + 150) * 1000000ULL;
-                            new_expiry.tv_nsec += add_ns;
-                            new_expiry.tv_sec  += new_expiry.tv_nsec / 1000000000;
-                            new_expiry.tv_nsec  = new_expiry.tv_nsec % 1000000000;
-                            if (difftimespec(new_expiry, custom_lbt_guard_expiry) > 0) {
-                                custom_lbt_guard_expiry = new_expiry;
-                            }
-                        }
 
                         /* Event-driven SX1261 RX restart (Option D):
                            Poll lgw_status(TX_STATUS) until the SX1302 reports
@@ -4452,7 +4433,7 @@ void thread_jit(void) {
                             hal_lbt_lookup(pkt.freq_hz,
                                            &extra.lbt_enabled,
                                            &extra.lbt_threshold_dbm);
-                            extra.lbt_rssi_dbm = -127; /* not available from HAL */
+                            extra.lbt_rssi_dbm = -127; /* sentinel — overwritten by post-send lgw_lbt_get_last_rssi() */
                             extra.lbt_pass = true; /* optimistic — updated after lgw_send */
                         }
                         /* --- Ensure SX1261 is NOT in RX mode before TX --- */
@@ -4564,20 +4545,6 @@ void thread_jit(void) {
                                 }
                             }
 
-                            /* Record TX guard expiry */
-                            {
-                                struct timespec new_expiry;
-                                clock_gettime(CLOCK_MONOTONIC, &new_expiry);
-                                uint64_t add_ns = (uint64_t)(est_airtime_ms + 150) * 1000000ULL;
-                                new_expiry.tv_nsec += add_ns;
-                                new_expiry.tv_sec  += new_expiry.tv_nsec / 1000000000;
-                                new_expiry.tv_nsec  = new_expiry.tv_nsec % 1000000000;
-                                if (difftimespec(new_expiry, custom_lbt_guard_expiry) > 0) {
-                                    custom_lbt_guard_expiry = new_expiry;
-                                    MSG("INFO: [jit] TX guard extended: %u ms (SF%u, BW=%u, size=%u)\n",
-                                        est_airtime_ms + 150, pkt.datarate, pkt.bandwidth, pkt.size);
-                                }
-                            }
 
                             /* Event-driven SX1261 RX restart (Option D):
                                Poll lgw_status(TX_STATUS) until TX_FREE rather

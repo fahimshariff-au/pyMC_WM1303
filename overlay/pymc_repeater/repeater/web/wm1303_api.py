@@ -1201,6 +1201,9 @@ class WM1303API:
                 'queue_size': ch_tx.get('queue_size', 15),
                 'dropped_overflow': ch_tx.get('dropped_overflow', 0),
                 'dropped_ttl': ch_tx.get('dropped_ttl', 0),
+                # CAD stats
+                'cad_clear': ch_tx.get('cad_clear', 0),
+                'cad_detected': ch_tx.get('cad_detected', 0),
             })
             active_idx += 1
 
@@ -1263,6 +1266,9 @@ class WM1303API:
                 "queue_size": ch_e_tx.get("queue_size", 15),
                 "dropped_overflow": ch_e_tx.get("dropped_overflow", 0),
                 "dropped_ttl": ch_e_tx.get("dropped_ttl", 0),
+                # CAD stats
+                "cad_clear": ch_e_tx.get("cad_clear", 0),
+                "cad_detected": ch_e_tx.get("cad_detected", 0),
             })
             total_rx += _che_rx
             total_tx += _che_tx_sent
@@ -1389,7 +1395,7 @@ class WM1303API:
             live_stats = {
                 "total_forwarded": st.get('forwarded_packets', 0),
                 "total_duplicate": st.get('dropped_duplicate', 0),
-                "total_echo": st.get('fwd_echo_detected', 0),
+                "total_tx_echo": st.get('fwd_echo_detected', 0),
                 "total_filtered": st.get('dropped_filtered', 0),
                 "dedup_seen_active": st.get('dedup_seen_active', 0),
                 "dedup_events_buffered": st.get('dedup_events_buffered', 0),
@@ -1399,7 +1405,9 @@ class WM1303API:
         db_path = "/var/lib/pymc_repeater/repeater.db"
         buckets = []
         period_stats = {"total_forwarded": 0, "total_duplicate": 0,
-                        "total_echo": 0, "total_filtered": 0,
+                        "total_tx_echo": 0, "total_filtered": 0,
+                        "total_hal_tx_echo": 0, "total_multi_demod": 0,
+                        "total_companion_dedup": 0,
                         "period_start": since_ts, "period_end": until_ts,
                         "dedup_ratio": 0.0}
 
@@ -1438,8 +1446,11 @@ class WM1303API:
                             CAST((ts / {bucket_secs}) AS INTEGER) * {bucket_secs} AS bucket_ts,
                             SUM(CASE WHEN event_type = 'forwarded' THEN 1 ELSE 0 END) AS forwarded,
                             SUM(CASE WHEN event_type = 'duplicate' THEN 1 ELSE 0 END) AS duplicate,
-                            SUM(CASE WHEN event_type = 'echo' THEN 1 ELSE 0 END) AS echo,
-                            SUM(CASE WHEN event_type = 'filtered' THEN 1 ELSE 0 END) AS filtered
+                            SUM(CASE WHEN event_type = 'tx_echo' THEN 1 ELSE 0 END) AS tx_echo,
+                            SUM(CASE WHEN event_type = 'filtered' THEN 1 ELSE 0 END) AS filtered,
+                            SUM(CASE WHEN event_type = 'hal_tx_echo' THEN 1 ELSE 0 END) AS hal_tx_echo,
+                            SUM(CASE WHEN event_type = 'multi_demod' THEN 1 ELSE 0 END) AS multi_demod,
+                            SUM(CASE WHEN event_type = 'companion_dedup' THEN 1 ELSE 0 END) AS companion_dedup
                         FROM dedup_events
                         WHERE ts >= ? AND ts <= ?
                         GROUP BY bucket_ts
@@ -1447,24 +1458,33 @@ class WM1303API:
                     """, (since_ts, until_ts)).fetchall()
 
                     buckets = [{"ts": int(r["bucket_ts"]), "forwarded": r["forwarded"],
-                                "duplicate": r["duplicate"], "echo": r["echo"],
-                                "filtered": r["filtered"]} for r in rows]
+                                "duplicate": r["duplicate"], "tx_echo": r["tx_echo"],
+                                "filtered": r["filtered"],
+                                "hal_tx_echo": r["hal_tx_echo"],
+                                "multi_demod": r["multi_demod"],
+                                "companion_dedup": r["companion_dedup"]} for r in rows]
 
                     # Totals from query
                     totals = conn.execute("""
                         SELECT
                             SUM(CASE WHEN event_type = 'forwarded' THEN 1 ELSE 0 END) AS tf,
                             SUM(CASE WHEN event_type = 'duplicate' THEN 1 ELSE 0 END) AS td,
-                            SUM(CASE WHEN event_type = 'echo' THEN 1 ELSE 0 END) AS te,
+                            SUM(CASE WHEN event_type = 'tx_echo' THEN 1 ELSE 0 END) AS te,
                             SUM(CASE WHEN event_type = 'filtered' THEN 1 ELSE 0 END) AS tfi,
+                            SUM(CASE WHEN event_type = 'hal_tx_echo' THEN 1 ELSE 0 END) AS the,
+                            SUM(CASE WHEN event_type = 'multi_demod' THEN 1 ELSE 0 END) AS tmd,
+                            SUM(CASE WHEN event_type = 'companion_dedup' THEN 1 ELSE 0 END) AS tcd,
                             COUNT(*) AS total
                         FROM dedup_events WHERE ts >= ? AND ts <= ?
                     """, (since_ts, until_ts)).fetchone()
 
                     period_stats["total_forwarded"] = totals["tf"] or 0
                     period_stats["total_duplicate"] = totals["td"] or 0
-                    period_stats["total_echo"] = totals["te"] or 0
+                    period_stats["total_tx_echo"] = totals["te"] or 0
                     period_stats["total_filtered"] = totals["tfi"] or 0
+                    period_stats["total_hal_tx_echo"] = totals["the"] or 0
+                    period_stats["total_multi_demod"] = totals["tmd"] or 0
+                    period_stats["total_companion_dedup"] = totals["tcd"] or 0
                     total = totals["total"] or 0
                     if total > 0:
                         period_stats["dedup_ratio"] = round(
@@ -1482,11 +1502,12 @@ class WM1303API:
                 for ev in events:
                     bts = int(ev['ts'] / bucket_secs) * bucket_secs
                     if bts not in bkt_map:
-                        bkt_map[bts] = {"ts": bts, "forwarded": 0, "duplicate": 0, "echo": 0, "filtered": 0}
+                        bkt_map[bts] = {"ts": bts, "forwarded": 0, "duplicate": 0, "tx_echo": 0,
+                                        "filtered": 0, "hal_tx_echo": 0, "multi_demod": 0,
+                                        "companion_dedup": 0}
                     et = ev.get('type', '')
                     if et in bkt_map[bts]:
                         bkt_map[bts][et] += 1
-                buckets = sorted(bkt_map.values(), key=lambda x: x['ts'])
                 for ev in events:
                     k = "total_" + ev.get('type', '')
                     if k in period_stats:
@@ -1731,6 +1752,9 @@ class WM1303API:
                     "last_wait_ms": ch_stats.get("last_wait_ms", 0),
                     "total_airtime_ms": ch_stats.get("total_airtime_ms", 0),
                     "total_send_ms": ch_stats.get("total_send_ms", 0),
+                    # CAD stats
+                    "cad_clear": ch_stats.get("cad_clear", 0),
+                    "cad_detected": ch_stats.get("cad_detected", 0),
                 }
             elif ch_cfg:
                 queues[ch_name] = {
@@ -1771,6 +1795,9 @@ class WM1303API:
                 "last_wait_ms": ch_e_stats.get("last_wait_ms", 0),
                 "total_airtime_ms": ch_e_stats.get("total_airtime_ms", 0),
                 "total_send_ms": ch_e_stats.get("total_send_ms", 0),
+                # CAD stats
+                "cad_clear": ch_e_stats.get("cad_clear", 0),
+                "cad_detected": ch_e_stats.get("cad_detected", 0),
             }
         elif _load_ui().get("channel_e", {}).get("enabled", False):
             _che_ui = _load_ui().get("channel_e", {})
@@ -3265,35 +3292,34 @@ class WM1303API:
                     ).fetchall()
                     timeseries = []
                     if len(rows) >= 2:
-                        # Group into buckets and compute deltas
+                        # Compute deltas between consecutive rows, assign to minute buckets
                         buckets = {}
-                        for row in rows:
-                            bk = int(row["timestamp"] / bucket_s) * bucket_s
+                        for i in range(1, len(rows)):
+                            prev, cur = rows[i-1], rows[i]
+                            bk = int(cur["timestamp"] / bucket_s) * bucket_s
+                            tx_d = max(0, (cur["tx_count"] or 0) - (prev["tx_count"] or 0))
+                            fail_d = max(0, (cur["tx_failed"] or 0) - (prev["tx_failed"] or 0))
+                            lbt_d = max(0, (cur["lbt_blocked"] or 0) - (prev["lbt_blocked"] or 0))
+                            air_d = max(0, (cur["tx_airtime_ms"] or 0) - (prev["tx_airtime_ms"] or 0))
+                            bytes_d = max(0, (cur["tx_bytes"] or 0) - (prev["tx_bytes"] or 0))
                             if bk not in buckets:
-                                buckets[bk] = []
-                            buckets[bk].append(row)
+                                buckets[bk] = {"tx_sent": 0, "tx_failed": 0, "lbt_blocked": 0,
+                                               "airtime_ms": 0.0, "tx_bytes": 0}
+                            buckets[bk]["tx_sent"] += tx_d
+                            buckets[bk]["tx_failed"] += fail_d
+                            buckets[bk]["lbt_blocked"] += lbt_d
+                            buckets[bk]["airtime_ms"] += air_d
+                            buckets[bk]["tx_bytes"] += bytes_d
                         for bk_ts in sorted(buckets.keys()):
-                            bk_rows = buckets[bk_ts]
-                            if len(bk_rows) >= 2:
-                                first, last = bk_rows[0], bk_rows[-1]
-                            elif bk_ts in buckets and len(buckets) > 1:
-                                # Single row in bucket - try delta from previous bucket
-                                first = last = bk_rows[0]
-                            else:
-                                continue
-                            tx_delta = max(0, (last["tx_count"] or 0) - (first["tx_count"] or 0))
-                            fail_delta = max(0, (last["tx_failed"] or 0) - (first["tx_failed"] or 0))
-                            lbt_delta = max(0, (last["lbt_blocked"] or 0) - (first["lbt_blocked"] or 0))
-                            air_delta = max(0, (last["tx_airtime_ms"] or 0) - (first["tx_airtime_ms"] or 0))
-                            bytes_delta = max(0, (last["tx_bytes"] or 0) - (first["tx_bytes"] or 0))
-                            if tx_delta > 0 or fail_delta > 0 or lbt_delta > 0:
+                            b = buckets[bk_ts]
+                            if b["tx_sent"] > 0 or b["tx_failed"] > 0 or b["lbt_blocked"] > 0:
                                 timeseries.append({
                                     "timestamp": bk_ts,
-                                    "tx_sent": tx_delta,
-                                    "tx_failed": fail_delta,
-                                    "lbt_blocked": lbt_delta,
-                                    "airtime_ms": round(air_delta, 1),
-                                    "tx_bytes": bytes_delta
+                                    "tx_sent": b["tx_sent"],
+                                    "tx_failed": b["tx_failed"],
+                                    "lbt_blocked": b["lbt_blocked"],
+                                    "airtime_ms": round(b["airtime_ms"], 1),
+                                    "tx_bytes": b["tx_bytes"]
                                 })
                     result_channels.append({
                         "name": ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}")),
@@ -3313,32 +3339,32 @@ class WM1303API:
                     che_ts = []
                     if len(che_rows) >= 2:
                         che_buckets = {}
-                        for row in che_rows:
-                            bk = int(row["timestamp"] / bucket_s) * bucket_s
+                        for i in range(1, len(che_rows)):
+                            prev, cur = che_rows[i-1], che_rows[i]
+                            bk = int(cur["timestamp"] / bucket_s) * bucket_s
+                            tx_d = max(0, (cur["tx_count"] or 0) - (prev["tx_count"] or 0))
+                            fail_d = max(0, (cur["tx_failed"] or 0) - (prev["tx_failed"] or 0))
+                            lbt_d = max(0, (cur["lbt_blocked"] or 0) - (prev["lbt_blocked"] or 0))
+                            air_d = max(0, (cur["tx_airtime_ms"] or 0) - (prev["tx_airtime_ms"] or 0))
+                            bytes_d = max(0, (cur["tx_bytes"] or 0) - (prev["tx_bytes"] or 0))
                             if bk not in che_buckets:
-                                che_buckets[bk] = []
-                            che_buckets[bk].append(row)
+                                che_buckets[bk] = {"tx_sent": 0, "tx_failed": 0, "lbt_blocked": 0,
+                                                   "airtime_ms": 0.0, "tx_bytes": 0}
+                            che_buckets[bk]["tx_sent"] += tx_d
+                            che_buckets[bk]["tx_failed"] += fail_d
+                            che_buckets[bk]["lbt_blocked"] += lbt_d
+                            che_buckets[bk]["airtime_ms"] += air_d
+                            che_buckets[bk]["tx_bytes"] += bytes_d
                         for bk_ts in sorted(che_buckets.keys()):
-                            bk_rows = che_buckets[bk_ts]
-                            if len(bk_rows) >= 2:
-                                first, last = bk_rows[0], bk_rows[-1]
-                            elif bk_ts in che_buckets and len(che_buckets) > 1:
-                                first = last = bk_rows[0]
-                            else:
-                                continue
-                            tx_delta = max(0, (last["tx_count"] or 0) - (first["tx_count"] or 0))
-                            fail_delta = max(0, (last["tx_failed"] or 0) - (first["tx_failed"] or 0))
-                            lbt_delta = max(0, (last["lbt_blocked"] or 0) - (first["lbt_blocked"] or 0))
-                            air_delta = max(0, (last["tx_airtime_ms"] or 0) - (first["tx_airtime_ms"] or 0))
-                            bytes_delta = max(0, (last["tx_bytes"] or 0) - (first["tx_bytes"] or 0))
-                            if tx_delta > 0 or fail_delta > 0 or lbt_delta > 0:
+                            b = che_buckets[bk_ts]
+                            if b["tx_sent"] > 0 or b["tx_failed"] > 0 or b["lbt_blocked"] > 0:
                                 che_ts.append({
                                     "timestamp": bk_ts,
-                                    "tx_sent": tx_delta,
-                                    "tx_failed": fail_delta,
-                                    "lbt_blocked": lbt_delta,
-                                    "airtime_ms": round(air_delta, 1),
-                                    "tx_bytes": bytes_delta
+                                    "tx_sent": b["tx_sent"],
+                                    "tx_failed": b["tx_failed"],
+                                    "lbt_blocked": b["lbt_blocked"],
+                                    "airtime_ms": round(b["airtime_ms"], 1),
+                                    "tx_bytes": b["tx_bytes"]
                                 })
                     result_channels.append({
                         "name": _che_cfg.get("name", _che_cfg.get("friendly_name", "Channel E")),

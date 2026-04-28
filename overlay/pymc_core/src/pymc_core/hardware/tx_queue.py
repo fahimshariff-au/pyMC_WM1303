@@ -710,43 +710,7 @@ class GlobalTXScheduler:
             future.set_result(result)
 
         self._packets_scheduled += 1
-        # Shared RF-chain guard: all channels transmit via the same physical
-        # rf_chain 0.  The SX1302 can only transmit one packet at a time —
-        # calling lgw_send() while a previous TX is still in progress will
-        # OVERWRITE the TX buffer, silently killing the first packet.
-        #
-        # Timestamp-based precision guard:
-        # The backend sets _last_tx_end (monotonic timestamp) when it knows
-        # precisely when the RF transmission will finish.  We use that to
-        # compute exactly how long we still need to wait, avoiding redundant
-        # delays after the post-TX ACK (which already confirms TX started).
-        _ack_received = result.get('ack_received', False) if isinstance(result, dict) else False
-        _last_tx_end = result.get('last_tx_end', 0) if isinstance(result, dict) else 0
-        if _ack_received and _last_tx_end > 0:
-            # Precise: use timestamp from backend
-            _now = time.monotonic()
-            _remaining_s = _last_tx_end - _now
-            _margin_ms = 50.0
-            if _remaining_s > 0:
-                _shared_rf_guard_ms = (_remaining_s * 1000.0) + _margin_ms
-                logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
-                            "(precise: remaining=%.1fms + %.0fms margin)",
-                            channel_id, _shared_rf_guard_ms,
-                            _remaining_s * 1000.0, _margin_ms)
-            else:
-                # TX already finished by the time we get here
-                _shared_rf_guard_ms = _margin_ms
-                logger.info("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
-                            "(TX already complete, margin only)",
-                            channel_id, _shared_rf_guard_ms)
-        else:
-            # Conservative: no ACK — use minimal sleep, _last_tx_end in
-            # _send_pull_resp already includes airtime + 2s fallback.
-            _shared_rf_guard_ms = 100.0  # minimal sleep; _last_tx_end guards the rest
-            logger.warning("GlobalTXScheduler: rf-chain guard after %s, %.1fms "
-                           "(conservative: no post-TX ACK received)",
-                           channel_id, _shared_rf_guard_ms)
-        await asyncio.sleep(_shared_rf_guard_ms / 1000.0)
+        # No sleep needed: backend _last_tx_end guard + _tx_lock serializes TX
 
     async def _scheduler_loop(self):
         """Round-robin poll all TX queues, send one packet at a time.
