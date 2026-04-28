@@ -5,14 +5,14 @@ A multi-channel LoRa bridge and repeater that turns an SX1302/SX1303-based conce
 Built on top of [pyMC_core](https://github.com/HansvanMeer/pyMC_core) (dev) and [pyMC_Repeater](https://github.com/HansvanMeer/pyMC_Repeater) (dev), this project adds the WM1303-specific backend, bridge engine, web management UI, and all HAL-level modifications needed to run the concentrator as a multi-channel MeshCore repeater.
 
 > **Currently tested on the SenseCAP M1** (Raspberry Pi 4 + WM1302/WM1303 HAT).  
-> In principle, it should work with **any SX1302/SX1303 concentrator module that includes an SX1261 or SX1262** companion radio.  
+> In principle, it should work with **any SX1302/SX1303 concentrator module that includes an onboard SX1261 or SX1262** radio.  
 > A future goal is to validate and support additional hardware platforms.
 
 ---
 
 ## Key Features
 
-- **5 simultaneous LoRa channels** — 4 channels at 125 kHz bandwidth via the SX1302 concentrator + 1 channel at 62.5 kHz via the SX1261 companion radio (future: 250 kHz and possibly 500 kHz support)
+- **5 simultaneous LoRa channels** — 4 channels at 125 kHz bandwidth via the SX1302 concentrator + 1 channel at 62.5 kHz via the onboard SX1261 radio (future: 250 kHz and possibly 500 kHz support)
 - **Per-channel radio configuration** — independently set frequency, bandwidth, spreading factor (SF), coding rate (CR), TX power, and preamble length for each channel
 - **Per-channel Listen Before Talk (LBT)** — enable/disable LBT per channel with configurable RSSI threshold
 - **Hardware CAD before every TX** — mandatory Channel Activity Detection (CAD) on the SX1261 replaces the standard MeshCore airtime + TX delay factor method, providing deterministic collision avoidance with worst-case ~1 second latency
@@ -34,9 +34,9 @@ Built on top of [pyMC_core](https://github.com/HansvanMeer/pyMC_core) (dev) and 
 | **Channel B** | SX1302 → SX1250 | 125 kHz | Concentrator IF chain |
 | **Channel C** | SX1302 → SX1250 | 125 kHz | Concentrator IF chain |
 | **Channel D** | SX1302 → SX1250 | 125 kHz | Concentrator IF chain |
-| **Channel E** | SX1261 | 62.5 kHz | Companion radio — sub-125 kHz support |
+| **Channel E** | SX1261 | 62.5 kHz | Dedicated radio — sub-125 kHz support |
 
-Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel E uses the SX1261 companion chip, enabling sub-125 kHz bandwidths that the concentrator cannot handle.
+Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel E uses the onboard SX1261, enabling sub-125 kHz bandwidths that the concentrator cannot handle.
 
 > **Tip:** Fewer active channels = more stable operation. 4 channels maximum is recommended.
 
@@ -208,7 +208,7 @@ pyMC_WM1303/
 | [Radio](docs/radio.md) | Radio topology, 5-channel model, RF chains |
 | [Hardware](docs/hardware.md) | WM1303 HAT, SPI layout, GPIO, platform details |
 | [Software](docs/software.md) | All software components and their roles |
-| [Channel E / SX1261](docs/channel_e_sx1261.md) | Channel E companion radio — full story |
+| [Channel E / SX1261](docs/channel_e_sx1261.md) | Channel E and the SX1261 radio — full story |
 | [Configuration](docs/configuration.md) | Config files, SSOT model |
 | [TX Queue](docs/tx_queue.md) | TX queue architecture and scheduling |
 | [LBT & CAD](docs/lbt_cad.md) | Listen Before Talk and Channel Activity Detection |
