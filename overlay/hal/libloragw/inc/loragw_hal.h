@@ -359,6 +359,7 @@ typedef enum {
 @brief Structure containing a Listen-Before-Talk channel configuration
 */
 struct lgw_conf_chan_lbt_s{
+    bool                enable;            /*!> enable or disable LBT for this channel */
     uint32_t            freq_hz;           /*!> LBT channel frequency */
     uint8_t             bandwidth;         /*!> LBT channel bandwidth */
     lgw_lbt_scan_time_t scan_time_us;      /*!> LBT channel carrier sense time */

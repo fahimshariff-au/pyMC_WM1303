@@ -64,6 +64,15 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #endif
 
 /* -------------------------------------------------------------------------- */
+/* --- PRIVATE STATE -------------------------------------------------------- */
+
+/* Tracks whether lgw_lbt_start() actually initiated an SX1261 LBT scan.
+   Read by lgw_lbt_tx_status() to skip the AGC status poll when LBT was
+   bypassed for a per-channel-disabled channel. */
+static bool lbt_scan_active = false;
+
+
+/* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
 
 /* As given frequencies have been converted from float to integer, some aliasing
@@ -137,6 +146,14 @@ int lgw_lbt_start(const struct lgw_conf_sx1261_s * sx1261_context, const struct 
         return -1;
     }
 
+    /* Determine if LBT is disabled for this specific channel */
+    bool channel_lbt_disabled = (sx1261_context->lbt_conf.channels[lbt_channel_selected].enable == false);
+    if (channel_lbt_disabled) {
+        DEBUG_PRINTF("LBT: chan[%d] freq=%u - LBT disabled for this channel, using permit-all threshold\n",
+                     lbt_channel_selected,
+                     sx1261_context->lbt_conf.channels[lbt_channel_selected].freq_hz);
+    }
+
     /* Check if the packet Time On Air exceeds the maximum allowed transmit time on this channel */
     /* Channel sensing is checked 1.5ms before the packet departure time, so need to take this into account */
     if (sx1261_context->lbt_conf.channels[lbt_channel_selected].transmit_time_ms * 1000 <= 1500) {
@@ -156,17 +173,25 @@ int lgw_lbt_start(const struct lgw_conf_sx1261_s * sx1261_context, const struct 
         return -1;
     }
 
-    /* Start LBT - use per-channel threshold if set (non-zero), else global */
-    int8_t channel_rssi_target = sx1261_context->lbt_conf.channels[lbt_channel_selected].rssi_target_dbm;
-    if (channel_rssi_target == 0) {
-        channel_rssi_target = sx1261_context->lbt_conf.rssi_target;
+    /* Start LBT - use permit-all threshold if channel LBT is disabled, per-channel threshold if set (non-zero), else global */
+    int8_t channel_rssi_target;
+    if (channel_lbt_disabled) {
+        channel_rssi_target = 127;  /* Permit-all: AGC handshake runs but never blocks TX */
+    } else {
+        channel_rssi_target = sx1261_context->lbt_conf.channels[lbt_channel_selected].rssi_target_dbm;
+        if (channel_rssi_target == 0) {
+            channel_rssi_target = sx1261_context->lbt_conf.rssi_target;
+        }
     }
-    DEBUG_PRINTF("LBT: chan[%d] freq=%u bw=%u using threshold %d dBm (offset %d)\n", lbt_channel_selected, sx1261_context->lbt_conf.channels[lbt_channel_selected].freq_hz, sx1261_context->lbt_conf.channels[lbt_channel_selected].bandwidth, channel_rssi_target, sx1261_context->rssi_offset);
+    DEBUG_PRINTF("LBT: chan[%d] freq=%u bw=%u using threshold %d dBm (offset %d)%s\n", lbt_channel_selected, sx1261_context->lbt_conf.channels[lbt_channel_selected].freq_hz, sx1261_context->lbt_conf.channels[lbt_channel_selected].bandwidth, channel_rssi_target, sx1261_context->rssi_offset, channel_lbt_disabled ? " [PERMIT-ALL]" : "");
     err = sx1261_lbt_start(sx1261_context->lbt_conf.channels[lbt_channel_selected].scan_time_us, channel_rssi_target + sx1261_context->rssi_offset);
     if (err != 0) {
         printf("ERROR: Cannot start LBT - sx1261 LBT start\n");
         return -1;
     }
+
+
+    lbt_scan_active = true;
 
     _meas_time_stop(3, tm, __FUNCTION__);
 
@@ -185,6 +210,15 @@ int lgw_lbt_tx_status(uint8_t rf_chain, bool * tx_ok) {
 
     /* Record function start time */
     _meas_time_start(&tm);
+
+    /* If LBT scan was skipped (per-channel disabled), TX is always allowed */
+    if (!lbt_scan_active) {
+        if (tx_ok != NULL) {
+            *tx_ok = true;
+        }
+        _meas_time_stop(3, tm, __FUNCTION__);
+        return 0;
+    }
 
     /* Wait for transmit to be initiated */
     /* Bit 0 in status: TX has been initiated on Radio A */

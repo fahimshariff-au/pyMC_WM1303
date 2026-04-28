@@ -1,10 +1,30 @@
 # pyMC WM1303 — LoRa Multi-Channel Bridge/Repeater
 
-> Turn a SenseCAP M1 into a MeshCore multi-channel LoRa bridge and repeater
+A multi-channel LoRa bridge and repeater that turns an SX1302/SX1303-based concentrator into a **MeshCore multi-channel radio gateway**. It receives, deduplicates, and retransmits packets across up to 5 independent LoRa channels — each with its own frequency, bandwidth, spreading factor, coding rate, and TX power — enabling MeshCore nodes on different channels to communicate through a single device.
 
-## What Is This?
+Built on top of [pyMC_core](https://github.com/HansvanMeer/pyMC_core) (dev) and [pyMC_Repeater](https://github.com/HansvanMeer/pyMC_Repeater) (dev), this project adds the WM1303-specific backend, bridge engine, web management UI, and all HAL-level modifications needed to run the concentrator as a multi-channel MeshCore repeater.
 
-This project transforms a **SenseCAP M1** (Raspberry Pi 4 + WM1303 LoRa concentrator HAT) into a **5-channel MeshCore bridge and repeater**. It bridges up to 5 simultaneous LoRa channels with independent frequency, bandwidth, and spreading factor configurations, so MeshCore nodes on any channel can communicate through the repeater.
+> **Currently tested on the SenseCAP M1** (Raspberry Pi 4 + WM1302/WM1303 HAT).  
+> In principle, it should work with **any SX1302/SX1303 concentrator module that includes an SX1261 or SX1262** companion radio.  
+> A future goal is to validate and support additional hardware platforms.
+
+---
+
+## Key Features
+
+- **5 simultaneous LoRa channels** — 4 channels at 125 kHz bandwidth via the SX1302 concentrator + 1 channel at 62.5 kHz via the SX1261 companion radio (future: 250 kHz and possibly 500 kHz support)
+- **Per-channel radio configuration** — independently set frequency, bandwidth, spreading factor (SF), coding rate (CR), TX power, and preamble length for each channel
+- **Per-channel Listen Before Talk (LBT)** — enable/disable LBT per channel with configurable RSSI threshold
+- **Hardware CAD before every TX** — mandatory Channel Activity Detection (CAD) on the SX1261 replaces the standard MeshCore airtime + TX delay factor method, providing deterministic collision avoidance with worst-case ~1 second latency
+- **Advanced bridge rules** — flexible rule-based packet routing between channels with per-rule packet type filtering (SSOT model)
+- **3-layer deduplication** — self-echo suppression, multi-demodulator duplicate filtering, and cross-channel hash dedup across all active channels
+- **Spectrum insights with up to 8 days retention** — historical charts for RSSI, SNR, noise floor, CAD checks, LBT measurements, RX and TX activity per channel
+- **Detailed packet tracing** — step-by-step trace of every packet through the entire pipeline (RX → dedup → bridge rules → TX queue → CAD/LBT → TX), for performance analysis and troubleshooting
+- **Web management UI** — real-time status dashboard, channel configuration, bridge rules editor, spectrum charts, dedup visualization, and packet trace viewer
+- **REST API + WebSocket** — full programmatic control with real-time event streaming
+- **SSOT configuration** — single source of truth model for all settings (`wm1303_ui.json`)
+- **One-command install** — automated installation and upgrade via a single bootstrap command
+- **Optimized for Raspberry Pi** — SPI tuning (4 MHz clock, 16 KB burst transfers), memory-efficient SQLite storage, systemd service integration, and careful resource management
 
 ## 5-Channel Architecture
 
@@ -19,26 +39,12 @@ This project transforms a **SenseCAP M1** (Raspberry Pi 4 + WM1303 LoRa concentr
 Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel E uses the SX1261 companion chip, enabling sub-125 kHz bandwidths that the concentrator cannot handle.
 
 > **Tip:** Fewer active channels = more stable operation. 4 channels maximum is recommended.
-## Key Features
-
-- **Multi-channel bridging** — Route packets between channels with configurable rules
-- **Origin-channel-first TX priority** — Repeated packets are sent to the originating channel first
-- **Channel E / SX1261** — Full RX/TX on the companion radio with 62.5 kHz bandwidth support
-- **Per-channel TX queues** — FIFO with fair round-robin scheduling and mandatory CAD
-- **3-layer deduplication** — Self-echo, multi-demod, and cross-channel hash dedup
-- **Single-layer hardware CAD** — Mandatory C-level CAD before every TX with optimized retry delays (worst-case 1.05s)
-- **Spectral scan & noise floor** — Continuous monitoring via SX1261 without blocking TX
-- **Web management UI** — Real-time status, channel config, bridge rules, spectrum charts
-- **REST API + WebSocket** — Full programmatic control with real-time event streaming
-- **SSOT configuration** — Single source of truth model (`wm1303_ui.json`)
-- **One-command install** — Automated installation and upgrade scripts
-- **SPI optimized** — 16 MHz clock, 16 KB burst transfers for low-latency radio I/O
 
 ## Quick Start
 
 ### Prerequisites
 
-- SenseCAP M1 (or Raspberry Pi 4 with WM1303 HAT)
+- SenseCAP M1 (or Raspberry Pi 4 with WM1302/WM1303 HAT)
 - Raspberry Pi OS Lite (Bookworm or newer)
 - SSH access and internet connectivity
 

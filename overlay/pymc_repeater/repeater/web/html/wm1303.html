@@ -4216,35 +4216,35 @@ function renderPmCrcChart(channels) {
   // ---------------------------------------------------------------------
   // Packet-trace step metadata (v2.3.3+):
   // Each step_name maps to {icon, color, phase, label}. Phases group
-  // events visually: RX -> Routing -> Guard -> TX -> (TX again for
-  // multi-target forwards).
+  // events visually: Processing -> TX (includes guard + all TX cycles).
   // ---------------------------------------------------------------------
   var _STEP_META = {
-    received:          {icon:'\uD83D\uDCF6', color:'#3b82f6', phase:'RX',      label:'RX received'},
-    dedup_check:       {icon:'\uD83D\uDD0E', color:'#3b82f6', phase:'RX',      label:'Dedup check'},
-    dedup_skip:        {icon:'\u23ED',       color:'#3b82f6', phase:'RX',      label:'Dedup skip'},
-    echo_dedup:        {icon:'\u267B',       color:'#94a3b8', phase:'RX',      label:'Self-echo dedup'},
-    dedup_drop:        {icon:'\uD83D\uDED1', color:'#ef4444', phase:'RX',      label:'Dedup drop'},
-    bridge_inject:     {icon:'\uD83D\uDC89', color:'#a78bfa', phase:'Routing', label:'Bridge inject'},
-    bridge_forward:    {icon:'\uD83D\uDD00', color:'#a78bfa', phase:'Routing', label:'Forward'},
-    tx_enqueue:        {icon:'\uD83D\uDCE5', color:'#a78bfa', phase:'Routing', label:'TX enqueue'},
-    filter_drop:       {icon:'\uD83D\uDED1', color:'#ef4444', phase:'Routing', label:'Filter drop'},
-    rf_guard:          {icon:'\u23F3',       color:'#f59e0b', phase:'Guard',   label:'RF-chain guard'},
-    tx_noisefloor:     {icon:'\uD83D\uDCCA', color:'#06b6d4', phase:'TX',      label:'TX noise floor'},
-    cad_start:         {icon:'\uD83D\uDD0D', color:'#eab308', phase:'TX',      label:'CAD+LBT scan start'},
-    lbt_check:         {icon:'\u2705',       color:'#22c55e', phase:'TX',      label:'LBT result'},
-    cad_check:         {icon:'\u2705',       color:'#22c55e', phase:'TX',      label:'CAD result'},
-    cad_retry:         {icon:'\u26A0',       color:'#f59e0b', phase:'TX',      label:'CAD retry'},
-    rf_tx_start:       {icon:'\uD83D\uDCE1', color:'#22c55e', phase:'TX',      label:'RF TX start'},
-    rf_tx_end:         {icon:'\u23F1',       color:'#6b7280', phase:'TX',      label:'RF TX end'},
-    sx1261_rx_restart: {icon:'\u267B',       color:'#6b7280', phase:'TX',      label:'SX1261 RX restart'},
-    tx_ack:            {icon:'\uD83C\uDFAF', color:'#22c55e', phase:'TX',      label:'TX acknowledged'},
-    tx_send:           {icon:'\u2714',       color:'#64748b', phase:'TX',      label:'TX complete'}
+    received:          {icon:'\uD83D\uDCF6', color:'#3b82f6', phase:'Processing', label:'RX received'},
+    dedup_check:       {icon:'\uD83D\uDD0E', color:'#3b82f6', phase:'Processing', label:'Dedup check'},
+    dedup_skip:        {icon:'\u23ED',       color:'#3b82f6', phase:'Processing', label:'Dedup skip'},
+    echo_dedup:        {icon:'\u267B',       color:'#94a3b8', phase:'Processing', label:'Self-echo dedup'},
+    dedup_drop:        {icon:'\uD83D\uDED1', color:'#ef4444', phase:'Processing', label:'Dedup drop'},
+    bridge_inject:     {icon:'\uD83D\uDC89', color:'#a78bfa', phase:'Processing', label:'Bridge inject'},
+    bridge_forward:    {icon:'\uD83D\uDD00', color:'#a78bfa', phase:'Processing', label:'Forward'},
+    tx_enqueue:        {icon:'\uD83D\uDCE5', color:'#a78bfa', phase:'Processing', label:'TX enqueue'},
+    filter_drop:       {icon:'\uD83D\uDED1', color:'#ef4444', phase:'Processing', label:'Filter drop'},
+    rf_guard:          {icon:'\u23F3',       color:'#f59e0b', phase:'TX',         label:'RF-chain guard'},
+    tx_noisefloor:     {icon:'\uD83D\uDCCA', color:'#06b6d4', phase:'TX',         label:'TX noise floor'},
+    cad_start:         {icon:'\uD83D\uDD0D', color:'#eab308', phase:'TX',         label:'CAD+LBT scan start'},
+    lbt_check:         {icon:'\u2705',       color:'#22c55e', phase:'TX',         label:'LBT result'},
+    cad_check:         {icon:'\u2705',       color:'#22c55e', phase:'TX',         label:'CAD result'},
+    cad_retry:         {icon:'\u26A0',       color:'#f59e0b', phase:'TX',         label:'CAD retry'},
+    rf_tx_start:       {icon:'\uD83D\uDCE1', color:'#22c55e', phase:'TX',         label:'RF TX start'},
+    rf_tx_end:         {icon:'\u23F1',       color:'#6b7280', phase:'TX',         label:'RF TX end'},
+    sx1261_rx_restart: {icon:'\u267B',       color:'#6b7280', phase:'TX',         label:'SX1261 RX restart'},
+    tx_ack:            {icon:'\uD83C\uDFAF', color:'#22c55e', phase:'TX',         label:'TX acknowledged'},
+    tx_send:           {icon:'\u2714',       color:'#64748b', phase:'TX',         label:'TX complete'}
   };
   function _stepMeta(name) {
-    return _STEP_META[name] || {icon:'\u2022', color:'#9ca3af', phase:'Other', label:(name || 'unknown')};
+    return _STEP_META[name] || {icon:'\u2022', color:'#9ca3af', phase:'Processing', label:(name || 'unknown')};
   }
   function _phaseColor(phase) {
+    if (phase === 'Processing') return '#8b5cf6';
     if (phase === 'RX') return '#3b82f6';
     if (phase === 'Routing') return '#a78bfa';
     if (phase === 'Guard') return '#f59e0b';
@@ -4252,6 +4252,7 @@ function renderPmCrcChart(channels) {
     return '#9ca3af';
   }
   function _phaseIcon(phase) {
+    if (phase === 'Processing') return '\uD83D\uDCF6';
     if (phase === 'RX') return '\uD83D\uDCF6';
     if (phase === 'Routing') return '\uD83D\uDD00';
     if (phase === 'Guard') return '\u23F3';
@@ -4311,8 +4312,8 @@ function renderPmCrcChart(channels) {
   // Backward-compat shims used elsewhere in file (e.g. _extractTxTarget logic)
   function _stepDirection(name) {
     var m = _stepMeta(name);
-    if (m.phase === 'RX') return 'rx';
-    if (m.phase === 'TX' || m.phase === 'Routing' || m.phase === 'Guard') return 'tx';
+    if (m.phase === 'Processing') return 'rx';
+    if (m.phase === 'TX') return 'tx';
     return 'other';
   }
   function _dirColor(d) {
@@ -4523,10 +4524,12 @@ function renderPmCrcChart(channels) {
         });
         // -----------------------------------------------------------
         // Phase-grouped rendering (v2.3.3+):
-        //   RX -> Routing -> [TX cycle 1] -> [TX cycle 2] -> ...
-        // A new TX cycle begins whenever we encounter an rf_guard or a
-        // TX-phase step after a non-TX step (e.g. after tx_send of a
-        // previous target, routing events for a new target).
+        //   Processing -> [TX cycle 1] -> [TX cycle 2] -> ...
+        // All RX/routing/dedup steps are 'Processing' phase.
+        // Guard (rf_guard) is part of the TX phase.
+        // A new TX cycle begins whenever we encounter a TX-phase step
+        // after a non-TX step (e.g. after tx_send of a previous
+        // target, or after Processing events for a new target).
         // -----------------------------------------------------------
         var _WAIT_THRESHOLD_MS = 10;
         var _phases = []; // [{ phase, startIdx, endIdx, color, icon, label, targetChannel }]
@@ -4537,10 +4540,10 @@ function renderPmCrcChart(channels) {
             var ss = t.steps[i2];
             var mm = _stepMeta(ss.name);
             var curPhase = mm.phase;
-            // TX cycle boundary: when TX or Guard step appears AFTER a
-            // non-TX step (RX/Routing), open a fresh TX phase block.
+            // TX cycle boundary: when a TX-phase step appears AFTER a
+            // non-TX step (Processing), open a fresh TX phase block.
             var phaseLabel = curPhase;
-            if (curPhase === 'Guard' || curPhase === 'TX') {
+            if (curPhase === 'TX') {
               if (!prevWasTx) {
                 // Start of a fresh TX cycle. Try to determine target
                 // channel from the step itself.
@@ -4656,7 +4659,7 @@ function renderPmCrcChart(channels) {
             // Step row (action)
             var _deltaText = '\u0394 ' + _stepDelta.toFixed(1) + ' ms';
             var _cumText = '@ ' + _stepElapsed.toFixed(1) + ' ms';
-            var txTarget = (_meta.phase === 'TX' || _meta.phase === 'Routing') ? _extractTxTarget(s) : null;
+            var txTarget = (_meta.phase === 'TX' || _meta.phase === 'Processing') ? _extractTxTarget(s) : null;
             var txTargetPill = '';
             if (txTarget) {
               var _pillName = _traceFriendlyName(txTarget);

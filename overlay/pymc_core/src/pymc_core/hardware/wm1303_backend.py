@@ -315,6 +315,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
         lbt_key = (ch_freq, ch_bw)
         if lbt_key not in _lbt_seen:
             _lbt_channels.append({
+                'enable': ch_lbt_on,
                 'freq_hz': ch_freq,
                 'bandwidth': ch_bw,
                 'scan_time_us': 128,       # minimal RX disruption
@@ -345,6 +346,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 _che_key = (_che_freq, _che_bw)
                 if _che_key not in _lbt_seen:
                     _lbt_channels.append({
+                        'enable': _che_lbt_on,
                         'freq_hz': _che_freq,
                         'bandwidth': _che_bw,
                         'scan_time_us': 128,
@@ -3509,15 +3511,21 @@ class WM1303Backend:
                 # Scan events anchored to the hardware-grounded rf_tx_start
                 # so they appear immediately before TX (physically correct:
                 # HAL performs LBT/CAD right before firing the TX).
-                _pre_rf_span_ms = float(_PRE_RF_TX_MS - _PRE_NOISEFLOOR_MS)
+                # Use actual HAL-measured CAD duration when available;
+                # fall back to the estimated constant if not reported.
+                _hal_cad_dur = result.get('cad', {}).get('duration_ms')
+                if _hal_cad_dur and float(_hal_cad_dur) > 0:
+                    _pre_rf_span_ms = float(_hal_cad_dur)
+                else:
+                    _pre_rf_span_ms = float(_PRE_RF_TX_MS - _PRE_NOISEFLOOR_MS)
                 _offset_scan_start = _offset_start + _pre_rf_span_ms
                 _offset_scan_result = _offset_start + 1.0
                 # Cap scan offsets so they never predate pull_resp_sent.
                 # This matters in the "short-wait" case where the HAL fires
-                # TX almost immediately after pull_resp and the assumed
-                # 72 ms CAD span (_PRE_RF_TX_MS - _PRE_NOISEFLOOR_MS) would
-                # otherwise back-date cad_start before pull_resp_sent and
-                # break chronological ordering with upstream RX/enqueue steps.
+                # TX almost immediately after pull_resp and the actual scan
+                # duration would otherwise back-date cad_start before
+                # pull_resp_sent and break chronological ordering with
+                # upstream RX/enqueue steps.
                 _scan_cap = max(0.0, _elapsed_total_ms - 1.0)
                 _offset_scan_start = min(_offset_scan_start, _scan_cap)
                 _offset_scan_result = min(_offset_scan_result,
@@ -3578,6 +3586,15 @@ class WM1303Backend:
                 if _cad_reason:
                     _cad_parts.append('  Reason: %s' % _cad_reason)
                 _cad_parts.append('  Retries: %d' % _cad_retries)
+                # CAD scan duration: use actual HAL-measured value when
+                # available, fall back to computed offset difference.
+                _hal_cad_dur_ms = result.get('cad', {}).get('duration_ms')
+                if _hal_cad_dur_ms and float(_hal_cad_dur_ms) > 0:
+                    _cad_duration_ms = float(_hal_cad_dur_ms)
+                else:
+                    _cad_duration_ms = _offset_scan_start - _offset_scan_result
+                if _cad_duration_ms > 0:
+                    _cad_parts.append('  Duration: %.1f ms' % _cad_duration_ms)
                 _cad_status = ('filtered' if _cad_detected else
                                ('ok' if _cad_retries == 0 else 'partial'))
                 _trace(trace_hash, 'cad_check', channel=channel_id,

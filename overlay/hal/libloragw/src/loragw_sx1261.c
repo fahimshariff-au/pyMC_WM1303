@@ -958,13 +958,16 @@ int sx1261_spectral_scan_abort(void) {
  *
  * The caller is responsible for holding mx_concent during the entire call.
  *
- * @param freq_hz  Channel center frequency in Hz
- * @param sf       Spreading factor (7-12)
- * @param bw       Bandwidth: 0=125kHz, 1=250kHz, 2=500kHz
- * @param result   Pointer to result struct (filled on return)
+ * @param freq_hz         Channel center frequency in Hz
+ * @param sf              Spreading factor (7-12)
+ * @param bw              Bandwidth: 0=125kHz, 1=250kHz, 2=500kHz
+ * @param result          Pointer to result struct (filled on return)
+ * @param skip_noisefloor When true, skip Phase 2 (FSK RX noisefloor measurement).
+ *                        Phase 1 and Phase 3 always run.
+ *                        result->rssi_dbm will be left at -128 (no measurement).
  * @return LGW_REG_SUCCESS on success, LGW_REG_ERROR on failure
  */
-int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_t *result) {
+int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_t *result, bool skip_noisefloor) {
     int err;
     uint8_t buff[16];
     int32_t freq_reg;
@@ -1044,130 +1047,138 @@ int sx1261_cad_scan(uint32_t freq_hz, uint8_t sf, uint8_t bw, sx1261_cad_result_
     ms_abort = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
 
     /* ============ Phase 2: Pre-TX noise floor measurement via FSK RX ============ */
-    /* The SX1261 GetRssiInst command only returns valid RSSI when the radio
-     * is actively receiving.  In STDBY_RC (post-CAD) it always reads -128.
-     * Solution: briefly enter FSK continuous-RX on the target frequency,
-     * read the instantaneous RSSI, then return to standby before
-     * configuring LoRa for the actual CAD scan.
-     * This mirrors the FSK-RX pattern used by sx1261_set_rx_params(). */
-    gettimeofday(&t0, NULL);
-    {
-        int16_t _tx_noisefloor = -128;
-        uint8_t fsk_bw_reg;
+    /* When skip_noisefloor is true, skip this ~15ms measurement entirely.
+     * result->rssi_dbm stays at the init value (-128) so the caller can detect
+     * that no measurement was taken and use the value from the first scan. */
+    if (!skip_noisefloor) {
+        /* The SX1261 GetRssiInst command only returns valid RSSI when the radio
+         * is actively receiving.  In STDBY_RC (post-CAD) it always reads -128.
+         * Solution: briefly enter FSK continuous-RX on the target frequency,
+         * read the instantaneous RSSI, then return to standby before
+         * configuring LoRa for the actual CAD scan.
+         * This mirrors the FSK-RX pattern used by sx1261_set_rx_params(). */
+        gettimeofday(&t0, NULL);
+        {
+            int16_t _tx_noisefloor = -128;
+            uint8_t fsk_bw_reg;
 
-        /* Map CAD BW to FSK RX bandwidth (~2x LoRa BW for full coverage) */
-        switch (bw) {
-            case 3:  fsk_bw_reg = 0x0B; break; /* 62.5 kHz LoRa -> 117.3 kHz FSK */
-            case 0:  fsk_bw_reg = 0x0A; break; /* 125 kHz LoRa  -> 234.3 kHz FSK */
-            case 1:  fsk_bw_reg = 0x09; break; /* 250 kHz LoRa  -> 467.0 kHz FSK */
-            case 2:  fsk_bw_reg = 0x09; break; /* 500 kHz LoRa  -> 467.0 kHz FSK */
-            default: fsk_bw_reg = 0x0A; break;
+            /* Map CAD BW to FSK RX bandwidth (~2x LoRa BW for full coverage) */
+            switch (bw) {
+                case 3:  fsk_bw_reg = 0x0B; break; /* 62.5 kHz LoRa -> 117.3 kHz FSK */
+                case 0:  fsk_bw_reg = 0x0A; break; /* 125 kHz LoRa  -> 234.3 kHz FSK */
+                case 1:  fsk_bw_reg = 0x09; break; /* 250 kHz LoRa  -> 467.0 kHz FSK */
+                case 2:  fsk_bw_reg = 0x09; break; /* 500 kHz LoRa  -> 467.0 kHz FSK */
+                default: fsk_bw_reg = 0x0A; break;
+            }
+
+            /* 1. Set frequency synthesis mode */
+            err = sx1261_reg_w(SX1261_SET_FS, buff, 0);
+            if (err != LGW_REG_SUCCESS) {
+                printf("WARNING: [CAD] TX noisefloor FSK: SetFS failed\n");
+                goto skip_fsk_rssi;
+            }
+
+            /* 2. Set RF frequency (same as the CAD target) */
+            freq_reg = SX1261_FREQ_TO_REG(freq_hz);
+            buff[0] = (uint8_t)(freq_reg >> 24);
+            buff[1] = (uint8_t)(freq_reg >> 16);
+            buff[2] = (uint8_t)(freq_reg >> 8);
+            buff[3] = (uint8_t)(freq_reg >> 0);
+            err = sx1261_reg_w(SX1261_SET_RF_FREQUENCY, buff, 4);
+            if (err != LGW_REG_SUCCESS) {
+                printf("WARNING: [CAD] TX noisefloor FSK: SetRfFrequency failed\n");
+                goto skip_fsk_rssi;
+            }
+
+            /* 3. Configure RSSI averaging window (same as LBT) */
+            buff[0] = 0x08;
+            buff[1] = 0x9B;
+            buff[2] = 0x05 << 2;
+            err = sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 3);
+            if (err != LGW_REG_SUCCESS) {
+                printf("WARNING: [CAD] TX noisefloor FSK: WriteRegister (RSSI avg) failed\n");
+                goto skip_fsk_rssi;
+            }
+
+            /* 4. Set packet type to FSK */
+            buff[0] = 0x00; /* PACKET_TYPE_GFSK */
+            err = sx1261_reg_w(SX1261_SET_PACKET_TYPE, buff, 1);
+            if (err != LGW_REG_SUCCESS) {
+                printf("WARNING: [CAD] TX noisefloor FSK: SetPacketType failed\n");
+                goto skip_fsk_rssi;
+            }
+
+            /* 5. Set FSK modulation parameters (same as LBT) */
+            buff[0] = 0x00;        /* BR MSB */
+            buff[1] = 0x14;        /* BR */
+            buff[2] = 0x00;        /* BR LSB */
+            buff[3] = 0x00;        /* Gaussian BT disabled */
+            buff[4] = fsk_bw_reg;  /* RX bandwidth */
+            buff[5] = 0x02;        /* FDEV MSB */
+            buff[6] = 0xE9;        /* FDEV */
+            buff[7] = 0x0F;        /* FDEV LSB */
+            err = sx1261_reg_w(SX1261_SET_MODULATION_PARAMS, buff, 8);
+            if (err != LGW_REG_SUCCESS) {
+                printf("WARNING: [CAD] TX noisefloor FSK: SetModulationParams failed\n");
+                goto skip_fsk_rssi;
+            }
+
+            /* 6. Set FSK packet parameters (same as LBT) */
+            buff[0] = 0x00;  /* Preamble length MSB */
+            buff[1] = 0x20;  /* Preamble length LSB: 32 bits */
+            buff[2] = 0x05;  /* Preamble detector length: 16 bits */
+            buff[3] = 0x20;  /* SyncWord length: 32 bits */
+            buff[4] = 0x00;  /* AddrComp: disabled */
+            buff[5] = 0x01;  /* PacketType: variable size */
+            buff[6] = 0xFF;  /* PayloadLength: 255 bytes */
+            buff[7] = 0x00;  /* CRCType: 1 byte */
+            buff[8] = 0x00;  /* Whitening: disabled */
+            err = sx1261_reg_w(SX1261_SET_PACKET_PARAMS, buff, 9);
+            if (err != LGW_REG_SUCCESS) {
+                printf("WARNING: [CAD] TX noisefloor FSK: SetPacketParams failed\n");
+                goto skip_fsk_rssi;
+            }
+
+            /* 7. Enter continuous RX mode */
+            buff[0] = 0xFF;
+            buff[1] = 0xFF;
+            buff[2] = 0xFF;
+            err = sx1261_reg_w(SX1261_SET_RX, buff, 3);
+            if (err != LGW_REG_SUCCESS) {
+                printf("WARNING: [CAD] TX noisefloor FSK: SetRx failed\n");
+                goto skip_fsk_rssi;
+            }
+
+            /* 8. Wait for RSSI to settle (1ms is sufficient per datasheet) */
+            wait_ms(1);
+
+            /* 9. Read instantaneous RSSI */
+            err = sx1261_get_rssi_inst(&_tx_noisefloor);
+            if (err == LGW_REG_SUCCESS && _tx_noisefloor > -128) {
+                result->rssi_dbm = _tx_noisefloor;
+                printf("INFO: [CAD] TX noisefloor: %d dBm (FSK-RX)\n", _tx_noisefloor);
+            } else {
+                printf("WARNING: [CAD] TX noisefloor FSK RSSI read returned %d dBm (err=%d)\n",
+                       _tx_noisefloor, err);
+            }
+
+    skip_fsk_rssi:
+            /* 10. Return to standby before LoRa CAD configuration */
+            buff[0] = SX1261_STDBY_RC;
+            sx1261_reg_w(SX1261_SET_STANDBY, buff, 1);
         }
 
-        /* 1. Set frequency synthesis mode */
-        err = sx1261_reg_w(SX1261_SET_FS, buff, 0);
-        if (err != LGW_REG_SUCCESS) {
-            printf("WARNING: [CAD] TX noisefloor FSK: SetFS failed\n");
-            goto skip_fsk_rssi;
-        }
-
-        /* 2. Set RF frequency (same as the CAD target) */
-        freq_reg = SX1261_FREQ_TO_REG(freq_hz);
-        buff[0] = (uint8_t)(freq_reg >> 24);
-        buff[1] = (uint8_t)(freq_reg >> 16);
-        buff[2] = (uint8_t)(freq_reg >> 8);
-        buff[3] = (uint8_t)(freq_reg >> 0);
-        err = sx1261_reg_w(SX1261_SET_RF_FREQUENCY, buff, 4);
-        if (err != LGW_REG_SUCCESS) {
-            printf("WARNING: [CAD] TX noisefloor FSK: SetRfFrequency failed\n");
-            goto skip_fsk_rssi;
-        }
-
-        /* 3. Configure RSSI averaging window (same as LBT) */
-        buff[0] = 0x08;
-        buff[1] = 0x9B;
-        buff[2] = 0x05 << 2;
-        err = sx1261_reg_w(SX1261_WRITE_REGISTER, buff, 3);
-        if (err != LGW_REG_SUCCESS) {
-            printf("WARNING: [CAD] TX noisefloor FSK: WriteRegister (RSSI avg) failed\n");
-            goto skip_fsk_rssi;
-        }
-
-        /* 4. Set packet type to FSK */
-        buff[0] = 0x00; /* PACKET_TYPE_GFSK */
-        err = sx1261_reg_w(SX1261_SET_PACKET_TYPE, buff, 1);
-        if (err != LGW_REG_SUCCESS) {
-            printf("WARNING: [CAD] TX noisefloor FSK: SetPacketType failed\n");
-            goto skip_fsk_rssi;
-        }
-
-        /* 5. Set FSK modulation parameters (same as LBT) */
-        buff[0] = 0x00;        /* BR MSB */
-        buff[1] = 0x14;        /* BR */
-        buff[2] = 0x00;        /* BR LSB */
-        buff[3] = 0x00;        /* Gaussian BT disabled */
-        buff[4] = fsk_bw_reg;  /* RX bandwidth */
-        buff[5] = 0x02;        /* FDEV MSB */
-        buff[6] = 0xE9;        /* FDEV */
-        buff[7] = 0x0F;        /* FDEV LSB */
-        err = sx1261_reg_w(SX1261_SET_MODULATION_PARAMS, buff, 8);
-        if (err != LGW_REG_SUCCESS) {
-            printf("WARNING: [CAD] TX noisefloor FSK: SetModulationParams failed\n");
-            goto skip_fsk_rssi;
-        }
-
-        /* 6. Set FSK packet parameters (same as LBT) */
-        buff[0] = 0x00;  /* Preamble length MSB */
-        buff[1] = 0x20;  /* Preamble length LSB: 32 bits */
-        buff[2] = 0x05;  /* Preamble detector length: 16 bits */
-        buff[3] = 0x20;  /* SyncWord length: 32 bits */
-        buff[4] = 0x00;  /* AddrComp: disabled */
-        buff[5] = 0x01;  /* PacketType: variable size */
-        buff[6] = 0xFF;  /* PayloadLength: 255 bytes */
-        buff[7] = 0x00;  /* CRCType: 1 byte */
-        buff[8] = 0x00;  /* Whitening: disabled */
-        err = sx1261_reg_w(SX1261_SET_PACKET_PARAMS, buff, 9);
-        if (err != LGW_REG_SUCCESS) {
-            printf("WARNING: [CAD] TX noisefloor FSK: SetPacketParams failed\n");
-            goto skip_fsk_rssi;
-        }
-
-        /* 7. Enter continuous RX mode */
-        buff[0] = 0xFF;
-        buff[1] = 0xFF;
-        buff[2] = 0xFF;
-        err = sx1261_reg_w(SX1261_SET_RX, buff, 3);
-        if (err != LGW_REG_SUCCESS) {
-            printf("WARNING: [CAD] TX noisefloor FSK: SetRx failed\n");
-            goto skip_fsk_rssi;
-        }
-
-        /* 8. Wait for RSSI to settle (1ms is sufficient per datasheet) */
-        wait_ms(1);
-
-        /* 9. Read instantaneous RSSI */
-        err = sx1261_get_rssi_inst(&_tx_noisefloor);
-        if (err == LGW_REG_SUCCESS && _tx_noisefloor > -128) {
-            result->rssi_dbm = _tx_noisefloor;
-            printf("INFO: [CAD] TX noisefloor: %d dBm (FSK-RX)\n", _tx_noisefloor);
-        } else {
-            printf("WARNING: [CAD] TX noisefloor FSK RSSI read returned %d dBm (err=%d)\n",
-                   _tx_noisefloor, err);
-        }
-
-skip_fsk_rssi:
-        /* 10. Return to standby before LoRa CAD configuration */
-        buff[0] = SX1261_STDBY_RC;
-        sx1261_reg_w(SX1261_SET_STANDBY, buff, 1);
+        gettimeofday(&t1, NULL);
+        ms_fsk_rssi = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
+    } else {
+        /* Noisefloor skipped (skip_noisefloor=true) — result->rssi_dbm remains at -128 */
+        ms_fsk_rssi = 0.0;
     }
-
-    gettimeofday(&t1, NULL);
-    ms_fsk_rssi = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_usec - t0.tv_usec) / 1000.0;
 
     /* ============ Phase 3: Configure LoRa registers for CAD ============ */
     gettimeofday(&t0, NULL);
 
-    /* Set LoRa packet type */
+    /* Step 1: Set LoRa packet type */
     buff[0] = 0x01; /* PACKET_TYPE_LORA */
     err = sx1261_reg_w(SX1261_SET_PACKET_TYPE, buff, 1);
     if (err != LGW_REG_SUCCESS) {
@@ -1176,7 +1187,7 @@ skip_fsk_rssi:
         goto cad_done;
     }
 
-    /* Set RF frequency */
+    /* Step 2: Set RF frequency */
     freq_reg = SX1261_FREQ_TO_REG(freq_hz);
     buff[0] = (uint8_t)(freq_reg >> 24);
     buff[1] = (uint8_t)(freq_reg >> 16);
@@ -1189,7 +1200,7 @@ skip_fsk_rssi:
         goto cad_done;
     }
 
-    /* Set modulation parameters */
+    /* Step 3: Set modulation parameters */
     buff[0] = sf;      /* SF */
     buff[1] = bw_reg;  /* BW */
     buff[2] = 0x01;    /* CR 4/5 */
@@ -1201,7 +1212,7 @@ skip_fsk_rssi:
         goto cad_done;
     }
 
-    /* Set CAD parameters */
+    /* Step 4: Set CAD parameters */
     buff[0] = 0x02;            /* cadSymbolNum: 2 symbols */
     buff[1] = cad_det_peak;    /* cadDetPeak */
     buff[2] = 10;              /* cadDetMin */
@@ -1216,7 +1227,7 @@ skip_fsk_rssi:
         goto cad_done;
     }
 
-    /* Clear IRQ and configure DIO for CAD */
+    /* Step 5: Clear IRQ status (always — need clean IRQ state) */
     buff[0] = (SX1261_IRQ_ALL >> 8) & 0xFF;
     buff[1] = (SX1261_IRQ_ALL >> 0) & 0xFF;
     err = sx1261_reg_w(SX1261_CLR_IRQ_STATUS, buff, 2);
@@ -1226,6 +1237,7 @@ skip_fsk_rssi:
         goto cad_done;
     }
 
+    /* Step 6: Set DIO IRQ params (always — need IRQ configured) */
     buff[0] = ((SX1261_IRQ_CAD_DONE | SX1261_IRQ_CAD_DETECTED) >> 8) & 0xFF;
     buff[1] = ((SX1261_IRQ_CAD_DONE | SX1261_IRQ_CAD_DETECTED) >> 0) & 0xFF;
     buff[2] = 0x00; buff[3] = 0x00;

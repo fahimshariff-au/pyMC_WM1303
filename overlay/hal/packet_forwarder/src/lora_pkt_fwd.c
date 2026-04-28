@@ -447,6 +447,7 @@ static int custom_lbt_nb_channels = 0;
 static struct {
     uint32_t freq_hz;
     int8_t   rssi_target_dbm;
+    bool     enable;           /* per-channel LBT enable */
 } hal_lbt_channels[HAL_LBT_MAX_CHANNELS];
 static int  hal_lbt_nb_channels = 0;
 static bool hal_lbt_enabled_global = false;
@@ -569,7 +570,7 @@ static void hal_lbt_lookup(uint32_t freq_hz, bool *enabled, int8_t *threshold_db
                       ? (freq_hz - hal_lbt_channels[i].freq_hz)
                       : (hal_lbt_channels[i].freq_hz - freq_hz);
         if (diff <= 100000) {
-            *enabled = true;
+            *enabled = hal_lbt_channels[i].enable;  /* Use per-channel setting */
             *threshold_dbm = hal_lbt_channels[i].rssi_target_dbm;
             return;
         }
@@ -962,6 +963,16 @@ static int parse_SX130x_configuration(const char * conf_file) {
                     /* Get LBT channel configuration object from array */
                     conf_lbtchan_obj = json_array_get_object(conf_lbtchan_array, i);
 
+                    /* Per-channel LBT enable (default: true for backward compatibility) */
+                    val = json_object_dotget_value(conf_lbtchan_obj, "enable");
+                    if (val != NULL && json_value_get_type(val) == JSONBoolean) {
+                        sx1261conf.lbt_conf.channels[i].enable = (bool)json_value_get_boolean(val);
+                    } else {
+                        sx1261conf.lbt_conf.channels[i].enable = true; /* default enabled */
+                    }
+                    MSG("INFO: sx1261_conf.lbt.channels[%d].enable:%s\n", i,
+                        sx1261conf.lbt_conf.channels[i].enable ? "true" : "false");
+
                     /* Channel frequency */
                     val = json_object_dotget_value(conf_lbtchan_obj, "freq_hz"); /* fetch value (if possible) */
                     if (val != NULL) {
@@ -1051,6 +1062,7 @@ static int parse_SX130x_configuration(const char * conf_file) {
                 hal_lbt_nb_channels = 0;
                 for (i = 0; i < (int)sx1261conf.lbt_conf.nb_channel && i < HAL_LBT_MAX_CHANNELS; i++) {
                     hal_lbt_channels[i].freq_hz = sx1261conf.lbt_conf.channels[i].freq_hz;
+                    hal_lbt_channels[i].enable = sx1261conf.lbt_conf.channels[i].enable;
                     int8_t per_ch = sx1261conf.lbt_conf.channels[i].rssi_target_dbm;
                     hal_lbt_channels[i].rssi_target_dbm = (per_ch != 0) ? per_ch : sx1261conf.lbt_conf.rssi_target;
                     hal_lbt_nb_channels++;
@@ -1059,8 +1071,9 @@ static int parse_SX130x_configuration(const char * conf_file) {
                     hal_lbt_enabled_global ? "true" : "false",
                     hal_lbt_global_target_dbm, hal_lbt_nb_channels);
                 for (i = 0; i < hal_lbt_nb_channels; i++) {
-                    MSG("INFO: [HAL LBT snapshot] ch%d: freq=%u Hz, thr=%d dBm\n",
-                        i, hal_lbt_channels[i].freq_hz, hal_lbt_channels[i].rssi_target_dbm);
+                    MSG("INFO: [HAL LBT snapshot] ch%d: freq=%u Hz, thr=%d dBm, enable=%s\n",
+                        i, hal_lbt_channels[i].freq_hz, hal_lbt_channels[i].rssi_target_dbm,
+                        hal_lbt_channels[i].enable ? "true" : "false");
                 }
             }
         }
@@ -3909,14 +3922,16 @@ void thread_down(void) {
                             gettimeofday(&cad_t0, NULL);
                             int cad_retry = 0;
                             bool cad_clear = false;
+                            int16_t first_noisefloor = -128; /* saved from first CAD scan */
 
                             while (cad_retry <= CAD_MAX_RETRIES) {
-                                /* Inhibit SX1261 LoRa RX before CAD scan */
+                                /* Inhibit SX1261 LoRa RX before each CAD scan */
                                 sx1261_set_tx_inhibit_rx(true);
 
                                 sx1261_cad_result_t cad_result;
                                 int cad_err = sx1261_cad_scan(txpkt.freq_hz, txpkt.datarate,
-                                                              (uint8_t)cad_bw, &cad_result);
+                                                              (uint8_t)cad_bw, &cad_result,
+                                                              cad_retry > 0); /* skip_noisefloor on retries */
                                 if (cad_err != 0) {
                                     MSG("WARNING: [imme] CAD scan failed (err=%d) — proceeding with TX\n", cad_err);
                                     cad_clear = true;
@@ -3926,6 +3941,9 @@ void thread_down(void) {
                                     break;
                                 }
 
+                                /* Save noisefloor from first scan */
+                                if (cad_retry == 0) first_noisefloor = cad_result.rssi_dbm;
+
                                 /* CAD activity check */
                                 if (!cad_result.detected) {
                                     /* Channel clear */
@@ -3934,38 +3952,36 @@ void thread_down(void) {
                                             txpkt.freq_hz, cad_result.rssi_dbm);
                                     } else {
                                         MSG("INFO: [imme] CAD clear after %d retries (freq=%u, tx_nf=%d)\n",
-                                            cad_retry, txpkt.freq_hz, cad_result.rssi_dbm);
+                                            cad_retry, txpkt.freq_hz, first_noisefloor);
                                     }
                                     cad_clear = true;
                                     imme_extra.cad_detected  = false;
                                     imme_extra.cad_retries   = (uint8_t)cad_retry;
-                                    imme_extra.tx_noisefloor = cad_result.rssi_dbm;
+                                    imme_extra.tx_noisefloor = (cad_result.rssi_dbm > -128) ? cad_result.rssi_dbm : first_noisefloor;
                                     imme_extra.cad_reason    = (cad_retry == 0) ? "clear" : "cleared_after_retries";
                                     /* Keep inhibit ON — proceeding to lgw_send */
                                     break;
                                 }
 
                                 /* CAD detected activity — restore RX during wait */
-                                sx1261_set_tx_inhibit_rx(false);
-                                sx1261_lora_rx_restart_light();
-
                                 if (cad_retry < CAD_MAX_RETRIES) {
                                     MSG("INFO: [imme] CAD DETECTED (freq=%u, SF%u, tx_nf=%d) — retry %d/%d, wait %d ms\n",
-                                        txpkt.freq_hz, txpkt.datarate, cad_result.rssi_dbm,
+                                        txpkt.freq_hz, txpkt.datarate, first_noisefloor,
                                         cad_retry + 1, CAD_MAX_RETRIES, cad_delays_ms[cad_retry]);
+                                    sx1261_set_tx_inhibit_rx(false);
+                                    sx1261_lora_rx_restart_light();
                                     pthread_mutex_unlock(&mx_concent);
                                     wait_ms(cad_delays_ms[cad_retry]);
                                     pthread_mutex_lock(&mx_concent);
                                     cad_retry++;
                                 } else {
-                                    /* Max retries — force TX */
+                                    /* Max retries — force TX, inhibit stays ON */
                                     MSG("WARNING: [imme] CAD still active after %d retries (freq=%u, tx_nf=%d) — FORCING TX\n",
-                                        CAD_MAX_RETRIES, txpkt.freq_hz, cad_result.rssi_dbm);
-                                    sx1261_set_tx_inhibit_rx(true);
+                                        CAD_MAX_RETRIES, txpkt.freq_hz, first_noisefloor);
                                     cad_clear = true;
                                     imme_extra.cad_detected  = true;
                                     imme_extra.cad_retries   = (uint8_t)cad_retry;
-                                    imme_extra.tx_noisefloor = cad_result.rssi_dbm;
+                                    imme_extra.tx_noisefloor = (cad_result.rssi_dbm > -128) ? cad_result.rssi_dbm : first_noisefloor;
                                     imme_extra.cad_reason    = "forced_after_retries";
                                     break;
                                 }
@@ -4332,18 +4348,17 @@ void thread_jit(void) {
                                     int cad_retry = 0;
                                     int cad_wait_ms __attribute__((unused)) = 0;
                                     bool cad_clear = false;
+                                    int16_t first_noisefloor = -128; /* saved from first CAD scan */
                                     uint8_t lbt_retries_in_cad = 0;
 
                                     while (cad_retry <= CAD_MAX_RETRIES) {
-                                        /* Inhibit LoRa RX restart before CAD scan.
-                                           cad_scan() calls spectral_scan_abort() which
-                                           normally restarts LoRa RX — we must prevent that
-                                           so the FEM stays neutral for the upcoming TX. */
+                                        /* Inhibit SX1261 LoRa RX before each CAD scan */
                                         sx1261_set_tx_inhibit_rx(true);
 
                                         sx1261_cad_result_t cad_result;
                                         int cad_err = sx1261_cad_scan(pkt.freq_hz, pkt.datarate,
-                                                                      (uint8_t)cad_bw, &cad_result);
+                                                                      (uint8_t)cad_bw, &cad_result,
+                                                                      cad_retry > 0); /* skip_noisefloor on retries */
                                         if (cad_err != 0) {
                                             MSG("WARNING: [jit] CAD scan failed on rf_chain %d "
                                                 "(err=%d) — proceeding with TX\n", i, cad_err);
@@ -4354,6 +4369,9 @@ void thread_jit(void) {
                                             /* Keep inhibit ON — going to lgw_send */
                                             break;
                                         }
+                                        /* Save noisefloor from first scan */
+                                        if (cad_retry == 0) first_noisefloor = cad_result.rssi_dbm;
+
                                         if (!cad_result.detected) {
                                             if (cad_retry == 0) {
                                                 MSG("INFO: [jit] CAD clear on rf_chain %d "
@@ -4362,48 +4380,44 @@ void thread_jit(void) {
                                             } else {
                                                 MSG("INFO: [jit] CAD clear on rf_chain %d after %d "
                                                     "retries (freq=%u Hz, tx_nf=%d dBm)\n",
-                                                    i, cad_retry, pkt.freq_hz, cad_result.rssi_dbm);
+                                                    i, cad_retry, pkt.freq_hz, first_noisefloor);
                                             }
                                             cad_clear = true;
                                             extra.cad_detected = false;
                                             extra.cad_retries = (uint8_t)cad_retry;
-                                            extra.tx_noisefloor = cad_result.rssi_dbm;
+                                            extra.tx_noisefloor = (cad_result.rssi_dbm > -128) ? cad_result.rssi_dbm : first_noisefloor;
                                             extra.cad_reason = (cad_retry == 0) ? "clear" : "cleared_after_retries";
                                             /* Keep inhibit ON — going to lgw_send */
                                             break;
                                         }
-                                        /* CAD detected activity — restore Channel E RX
-                                           immediately so we don't miss incoming packets
-                                           during the retry wait period. */
-                                        sx1261_set_tx_inhibit_rx(false);
-                                        sx1261_lora_rx_restart_light();
 
+                                        /* CAD detected activity — restore RX during wait */
                                         if (cad_retry < CAD_MAX_RETRIES) {
                                             MSG("INFO: [jit] CAD DETECTED on rf_chain %d "
                                                 "(freq=%u Hz, SF%u, tx_nf=%d dBm) — retry %d/%d, "
-                                                "waiting %d ms (RX restored)\n",
+                                                "waiting %d ms\n",
                                                 i, pkt.freq_hz, pkt.datarate,
-                                                cad_result.rssi_dbm,
+                                                first_noisefloor,
                                                 cad_retry + 1, CAD_MAX_RETRIES, cad_delays_ms[cad_retry]);
-                                            /* Release mutex during wait — RX is active */
+                                            sx1261_set_tx_inhibit_rx(false);
+                                            sx1261_lora_rx_restart_light();
+                                            /* Release mutex during wait */
                                             pthread_mutex_unlock(&mx_concent);
                                             wait_ms(cad_delays_ms[cad_retry]);
                                             pthread_mutex_lock(&mx_concent);
                                             cad_wait_ms = cad_delays_ms[cad_retry];
                                             cad_retry++;
                                         } else {
-                                            /* Max retries exhausted — force TX */
+                                            /* Max retries exhausted — force TX, inhibit stays ON */
                                             MSG("WARNING: [jit] CAD still active after %d retries "
                                                 "on rf_chain %d (freq=%u Hz, SF%u, tx_nf=%d dBm) "
                                                 "— FORCING TX\n",
                                                 CAD_MAX_RETRIES, i, pkt.freq_hz,
-                                                pkt.datarate, cad_result.rssi_dbm);
-                                            /* Re-inhibit for forced TX */
-                                            sx1261_set_tx_inhibit_rx(true);
+                                                pkt.datarate, first_noisefloor);
                                             cad_clear = true; /* force through */
                                             extra.cad_detected = true;
                                             extra.cad_retries = (uint8_t)cad_retry;
-                                            extra.tx_noisefloor = cad_result.rssi_dbm;
+                                            extra.tx_noisefloor = (cad_result.rssi_dbm > -128) ? cad_result.rssi_dbm : first_noisefloor;
                                             extra.cad_reason = "forced_after_retries";
                                             break;
                                         }
@@ -5213,7 +5227,8 @@ void thread_spectral_scan(void) {
                             cad_config.channels[i].freq_hz,
                             cad_config.channels[i].sf,
                             cad_config.channels[i].bw,
-                            &cad_results[i]);
+                            &cad_results[i],
+                            false); /* not a retry — always do full scan with noisefloor */
 
                         pthread_mutex_unlock(&mx_concent);
 

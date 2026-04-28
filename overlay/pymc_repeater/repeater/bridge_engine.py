@@ -1334,12 +1334,17 @@ class BridgeEngine:
 
             # Dedup check passed — packet is new
             _pass_hash8 = _stable_hash(data, 8)
-            _trace(_pass_hash8, 'dedup_check', channel=cid, detail='Dedup check passed on %s' % self._dn(cid), status='ok')
-
             pkt_hash = _stable_hash(data)
             pkt_hash8 = _stable_hash(data, 8)
             pkt_type_name = self._get_packet_type_name(data)
+
+            # Emit `received` BEFORE `dedup_check` to match channel_e ordering
             self.emit_received_trace(pkt_hash8, cid, pkt_type_name, len(data), rssi=_rx_rssi, snr=_rx_snr, noise_floor=_rx_nf)
+            _trace(_pass_hash8, 'dedup_check', channel=cid, detail='Dedup check passed on %s' % self._dn(cid), status='ok')
+
+            # Emit `bridge_inject` to match channel_e trace flow (received -> dedup_check -> bridge_inject)
+            _trace(pkt_hash8, 'bridge_inject', channel=cid, pkt_type=pkt_type_name, detail='Injected %d bytes from %s' % (len(data), self._dn(cid)))
+
             logger.info('BridgeEngine: RX %d bytes on %s (type=%s, hash=%s)',
                        len(data), cid, pkt_type_name, pkt_hash)
             logger.info('[HEXDUMP] dir=RX ch=%s sz=%d hdr=%s hex=%s', cid, len(data), _mc_hdr(data), _hexdump(data))
