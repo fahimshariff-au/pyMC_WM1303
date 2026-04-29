@@ -36,10 +36,9 @@ This project targets Raspberry Pi–based systems with an SX1302 or SX1303 conce
 - **Channel E (SX1261)** — full RX/TX on the onboard SX1261 radio, enabling sub-125 kHz bandwidths that the SX1302 concentrator cannot demodulate
 
 ### Collision Avoidance
-- **Hardware CAD (Channel Activity Detection)** — SX1261-based hardware CAD scan before every TX, implemented in C for minimal latency. Detects LoRa preambles on the target frequency and defers transmission when activity is detected
+- **Hardware CAD (Channel Activity Detection)** — SX1261-based hardware CAD scan before every TX, implemented in C for minimal latency. Replaces the traditional MeshCore airtime × delay factor method with a more efficient and reliable mechanism for collision avoidance
 - **HAL-level LBT (Listen Before Talk)** — AGC-based RSSI measurement per channel with user-configurable threshold. Independently enable/disable LBT per channel via the UI
-- **Airtime-proportional random TX delay** — additional collision avoidance between multiple repeaters, using the MeshCore-style airtime × delay factor method
-- **CAD calibration engine** — interactive per-SF CAD parameter tuning directly from the web UI
+- **CAD calibration engine** — per-SF CAD parameter tuning (det_peak, det_min) via API, enabling fine-tuning of detection sensitivity per spreading factor
 
 ### TX Pipeline
 - **Per-channel TX queues** — dedicated FIFO queue per channel with configurable TTL and overflow management
@@ -233,7 +232,6 @@ With slower LoRa settings, the same message takes **much** longer:
 ├──────────────────────────────────────────────────┤
 │  Per-Channel TX Queues                           │
 │  ├── Fair round-robin scheduling                 │
-│  ├── Airtime-proportional random TX delay        │
 │  └── TTL + overflow management                   │
 ├──────────────────────────────────────────────────┤
 │  Data & Monitoring                               │
