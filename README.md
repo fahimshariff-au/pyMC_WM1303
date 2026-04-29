@@ -187,14 +187,18 @@ With slower LoRa settings, the same message takes **much** longer:
 
 ## Screenshots
 
-| Screenshot | Description |
-|-----------|-------------|
-| ![Status](screenshots/status.jpg) | Status tab — channel overview and system health |
-| ![Channels](screenshots/channels-1.jpg) | Channel configuration — IF channels (A–D) |
-| ![Channel E](screenshots/channels-2.jpg) | Channel configuration — SX1261 channel (E) |
-| ![Bridge](screenshots/bridge-rules.jpg) | Bridge rules management |
-| ![Spectrum](screenshots/spectrum-1.jpg) | Spectrum tab — noise floor, CAD, LBT charts |
-| ![Dedup](screenshots/dedup.jpg) | Deduplication event visualization |
+<table>
+  <tr>
+    <td align="center"><b>Status</b><br><img src="screenshots/status.png" width="320"></td>
+    <td align="center"><b>Channels</b><br><img src="screenshots/channels.png" width="320"></td>
+    <td align="center"><b>Bridge Rules</b><br><img src="screenshots/bridge-rules.png" width="320"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Spectrum</b><br><img src="screenshots/spectrum.png" width="320"></td>
+    <td align="center"><b>Deduplication</b><br><img src="screenshots/dedup.png" width="320"></td>
+    <td align="center"><b>Tracing</b><br><img src="screenshots/tracing.png" width="320"></td>
+  </tr>
+</table>
 
 ## Architecture Overview
 
