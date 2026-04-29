@@ -129,9 +129,9 @@ The TX scheduler uses fair round-robin: each channel transmits in sequence. The 
 
   Time ──────────────────────────────────────────────────────────────►
 
-  ┌─ RX ─┐┌── TX Ch.B ──┐┌── TX Ch.C ──┐┌── TX Ch.D ──┐┌──── TX Ch.E ────┐┌─ RX ─
-  │listen ││  183 ms     ││  183 ms     ││  183 ms     ││    366 ms       ││listen
-  └───────┘└─────────────┘└─────────────┘└─────────────┘└─────────────────┘└──────
+  ┌─ RX ─┐┌── TX Ch.B ──┐┌── TX Ch.C ──┐┌── TX Ch.D ──┐┌──── TX Ch.E ────┐┌─ RX ───┐
+  │listen ││  183 ms     ││  183 ms     ││  183 ms     ││    366 ms       ││listen │
+  └───────┘└─────────────┘└─────────────┘└─────────────┘└─────────────────┘└───────┘
            ├──────────────── Total TX: 915 ms ──────────────────────────────┤
                           NO RX possible during this window
 ```
@@ -143,9 +143,9 @@ With slower LoRa settings, the same message takes **much** longer:
 
   Time ──────────────────────────────────────────────────────────────────────────────────────────►
 
-  ┌─ RX ─┐┌─────── TX Ch.B ───────┐┌─────── TX Ch.C ───────┐┌─────── TX Ch.D ───────┐┌──────── TX Ch.E ────────┐┌─ RX ─
-  │listen ││       920 ms          ││       920 ms          ││       920 ms          ││       1051 ms          ││listen
-  └───────┘└───────────────────────┘└───────────────────────┘└───────────────────────┘└────────────────────────┘└──────
+  ┌─ RX ─┐┌─────── TX Ch.B ───────┐┌─────── TX Ch.C ───────┐┌─────── TX Ch.D ───────┐┌──────── TX Ch.E ────────┐┌─ RX ──┐
+  │listen ││       920 ms          ││       920 ms          ││       920 ms          ││       1051 ms          ││listen │
+  └───────┘└───────────────────────┘└───────────────────────┘└───────────────────────┘└────────────────────────┘└───────┘
            ├─────────────────────────── Total TX: 3.8 seconds ─────────────────────────────────────┤
                                     RX blocked 4× longer than fast settings!
 ```
@@ -200,60 +200,41 @@ With slower LoRa settings, the same message takes **much** longer:
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  WM1303 HAT: SX1302 + 2× SX1250 + SX1261        │
+│  WM1303 HAT: SX1302 + 2× SX1250 + SX1261         │
 └───────────────────────┬──────────────────────────┘
                         │ SPI (/dev/spidev0.0 + 0.1)
 ┌───────────────────────┴──────────────────────────┐
 │  libloragw (HAL v2.10) + lora_pkt_fwd            │
-│  ├── SX1261 LoRa RX → UDP :1733 (Channel E)     │
+│  ├── SX1261 LoRa RX → UDP :1733 (Channel E)      │
 │  ├── Spectral scan thread (SX1261)               │
 │  ├── HW CAD scan (SX1261, per-channel config)    │
 │  └── HAL LBT (AGC-based, per-channel threshold)  │
 └───────────────────────┬──────────────────────────┘
                         │ UDP :1780/:1782
 ┌───────────────────────┴──────────────────────────┐
-│  WM1303 Backend                                   │
-│  ├── VirtualLoRaRadio (per channel A–D)           │
+│  WM1303 Backend                                  │
+│  ├── VirtualLoRaRadio (per channel A–D)          │
 │  ├── Channel E Bridge (SX1261 RX / SX1302 TX)    │
 │  ├── NoiseFloorMonitor (LBT RSSI + RX-based)     │
-│  └── 3-layer dedup (echo + multi-demod + hash)    │
+│  └── 3-layer dedup (echo + multi-demod + hash)   │
 ├──────────────────────────────────────────────────┤
-│  Bridge Engine                                    │
-│  ├── Rule-based routing (source → target)         │
-│  ├── Packet type filtering                        │
-│  └── TX hold (configurable RX batch window)       │
+│  Bridge Engine                                   │
+│  ├── Rule-based routing (source → target)        │
+│  ├── Packet type filtering                       │
+│  └── TX hold (configurable RX batch window)      │
 ├──────────────────────────────────────────────────┤
-│  Per-Channel TX Queues                            │
-│  ├── Fair round-robin scheduling                  │
-│  ├── Airtime-proportional random TX delay         │
-│  └── TTL + overflow management                    │
+│  Per-Channel TX Queues                           │
+│  ├── Fair round-robin scheduling                 │
+│  ├── Airtime-proportional random TX delay        │
+│  └── TTL + overflow management                   │
 ├──────────────────────────────────────────────────┤
-│  Data & Monitoring                                │
-│  ├── Packet trace (in-memory ring buffer)         │
-│  ├── SQLite data acquisition + spectrum history   │
-│  └── Metrics retention (automatic cleanup)        │
+│  Data & Monitoring                               │
+│  ├── Packet trace (in-memory ring buffer)        │
+│  ├── SQLite data acquisition + spectrum history  │
+│  └── Metrics retention (automatic cleanup)       │
 ├──────────────────────────────────────────────────┤
-│  WM1303 Manager UI + REST API + WebSocket         │
+│  WM1303 Manager UI + REST API + WebSocket        │
 └──────────────────────────────────────────────────┘
-```
-
-
-## Repository Structure
-
-```
-pyMC_WM1303/
-├── overlay/              # Source overlays for upstream repos
-│   ├── hal/              # SX1302 HAL + packet forwarder modifications
-│   ├── pymc_core/        # WM1303 backend, VirtualLoRaRadio, TX queue
-│   └── pymc_repeater/    # Bridge engine, API, UI, Channel E bridge
-├── config/               # Configuration templates
-├── docs/                 # Comprehensive documentation
-├── release_notes/        # Release notes per version
-├── screenshots/          # UI screenshots
-├── install.sh            # Fresh installation script
-├── upgrade.sh            # Upgrade script
-├── bootstrap.sh          # Bootstrap (install + upgrade entry point)
-└── VERSION               # Current version
 ```
 
 ## Documentation
@@ -282,14 +263,6 @@ pyMC_WM1303/
 | [HansvanMeer/pyMC_Repeater](https://github.com/HansvanMeer/pyMC_Repeater) | MeshCore repeater application (fork, dev branch) |
 
 > These are forks of the original projects. They are not modified directly — all WM1303-specific changes are applied as overlays from this repository.
-
-## Design Principles
-
-1. **RX availability is the #1 priority** — RX must be available as much of the time as possible
-2. **TX duration must be as short as possible** — minimize time spent transmitting
-3. **TX must be sent ASAP** — no unnecessary delays after a message enters the TX queue
-4. **Deterministic collision avoidance** — mandatory hardware CAD (37–56 ms) replaces random TX delays
-5. **Monitoring must not block** — spectral scan and noise floor measurement never pause TX
 
 ## Disclaimer
 
