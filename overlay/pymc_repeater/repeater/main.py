@@ -10,6 +10,7 @@ import time
 from repeater.companion.utils import validate_companion_node_name, normalize_companion_identity_key
 from repeater.config import get_radio_for_board, load_config, save_config
 from repeater.config_manager import ConfigManager
+from repeater.data_acquisition.glass_handler import GlassHandler
 from repeater.engine import RepeaterHandler
 from repeater.handler_helpers import (
     AdvertHelper,
@@ -70,11 +71,14 @@ class RepeaterDaemon:
         self.text_helper = None
         self.path_helper = None
         self.protocol_request_helper = None
+        self.glass_handler = None
         self.acl = None
         self.router = None
         self.companion_bridges: dict[int, object] = {}
         self.companion_frame_servers: list = []
         self.bridge_engine = None
+        self._shutdown_started = False
+        self._main_task = None
 
         log_level = config.get("logging", {}).get("level", "INFO")
         logging.basicConfig(
@@ -133,13 +137,7 @@ class RepeaterDaemon:
                         f"CAD thresholds set from config: peak={peak_threshold}, min={min_threshold}"
                     )
                 else:
-                    # For WM1303, CAD is handled at the C-level by pkt_fwd,
-                    # so VirtualLoRaRadio not supporting CAD is expected.
-                    radio_type = self.config.get("radio_type", "sx1262")
-                    if radio_type.lower() == "wm1303":
-                        logger.debug("Radio does not support CAD configuration (expected for WM1303 - handled by pkt_fwd)")
-                    else:
-                        logger.warning("Radio does not support CAD configuration")
+                    logger.warning("Radio does not support CAD configuration")
 
                 if hasattr(self.radio, "get_frequency"):
                     logger.info(f"Radio config - Freq: {self.radio.get_frequency():.1f}MHz")
@@ -304,6 +302,7 @@ class RepeaterDaemon:
                 ),  # For room server database
                 send_advert_callback=self.send_advert,  # For CLI advert command
             )
+            self.text_helper._loop = asyncio.get_running_loop()
 
             # Register default repeater identity for text messages
             self.text_helper.register_identity(
@@ -341,6 +340,7 @@ class RepeaterDaemon:
                 radio=self.radio,
                 engine=self.repeater_handler,
                 neighbor_tracker=self.advert_helper,
+                config=self.config,
             )
             # Register repeater identity for protocol requests
             self.protocol_request_helper.register_identity(
@@ -365,6 +365,20 @@ class RepeaterDaemon:
 
             # When trace reaches final node, push PUSH_CODE_TRACE_DATA (0x89) to companion clients (firmware onTraceRecv)
             self.trace_helper.on_trace_complete = self._on_trace_complete_for_companions
+
+            # Optional pyMC_Glass integration loop (inform/control plane)
+            self.glass_handler = GlassHandler(
+                config=self.config,
+                daemon_instance=self,
+                config_manager=self.config_manager,
+            )
+            await self.glass_handler.start()
+            if (
+                self.repeater_handler
+                and self.repeater_handler.storage
+                and hasattr(self.repeater_handler.storage, "set_glass_publisher")
+            ):
+                self.repeater_handler.storage.set_glass_publisher(self.glass_handler.publish_telemetry)
 
         except Exception as e:
             logger.error(f"Failed to initialize dispatcher: {e}")
@@ -914,7 +928,6 @@ class RepeaterDaemon:
             logger.error(f"Failed to register text handler for '{name}': {e}")
             return False
 
-
     async def _bridge_repeater_handler(self, data: bytes,
                                         origin_channel: str | None = None,
                                         rssi: float | None = None,
@@ -953,8 +966,6 @@ class RepeaterDaemon:
         # Attach RSSI/SNR from bridge metadata to the parsed Packet so
         # downstream handlers (advert processing, neighbor tracking) can
         # access signal quality even though it's not in the wire format.
-        # NOTE: rssi and snr are read-only @property on Packet, so we only
-        # set the private attributes (_rssi, _snr) which the properties read.
         if rssi is not None:
             pkt._rssi = int(rssi)
         if snr is not None:
@@ -966,10 +977,6 @@ class RepeaterDaemon:
         )
 
         # Process ADVERT packets for neighbor tracking
-        # The PacketRouter handles this for radio-received packets, but
-        # bridge-forwarded packets bypass the PacketRouter entirely.
-        # We must call process_advert_packet here so that adverts received
-        # via the WM1303 concentrator are parsed and neighbors are tracked.
         payload_type = pkt.get_payload_type() if hasattr(pkt, 'get_payload_type') else None
         if payload_type == AdvertHandler.payload_type() and self.advert_helper:
             try:
@@ -981,12 +988,7 @@ class RepeaterDaemon:
             except Exception as e:
                 logger.warning("BridgeRepeaterHandler: advert processing error: %s", e)
 
-        # Run repeater forwarding logic (modifies path, calculates delay)
-        # process_packet -> flood_forward/direct_forward will:
-        #   1. Check is_duplicate (should be false for new packets)
-        #   2. Call mark_seen (prevents echo re-processing)
-        #   3. Append our hash to the path
-        #   4. Return (fwd_pkt, delay) or None
+        # Run repeater forwarding logic
         result = self.repeater_handler.process_packet(pkt)
         if result is None:
             drop_reason = getattr(pkt, 'drop_reason', 'unknown')
@@ -1005,8 +1007,6 @@ class RepeaterDaemon:
         )
 
         # Re-inject into bridge engine as 'repeater' source
-        # This triggers rules: repeater -> channel_a, channel_b, channel_d
-        # Pass origin_channel so the TX serializer prioritizes the original RX channel
         if self.bridge_engine:
             await self.bridge_engine.inject_packet('repeater', fwd_bytes,
                                                    origin_channel=origin_channel)
@@ -1017,17 +1017,15 @@ class RepeaterDaemon:
 
         cfg_bridge = self.config.get("bridge", {})
 
-        # Load rules from SSOT (wm1303_ui.json) — this is authoritative,
-        # config.yaml bridge_rules is kept only for legacy/fallback.
+        # Load rules from SSOT (wm1303_ui.json)
         rules = self._load_bridge_rules_from_ui()
         if not rules:
-            # Fallback: try config.yaml bridge_rules
             rules_yaml = cfg_bridge.get("bridge_rules", [])
             if rules_yaml:
-                logger.info("No SSOT bridge rules – falling back to config.yaml bridge_rules")
+                logger.info("No SSOT bridge rules -- falling back to config.yaml bridge_rules")
                 rules = rules_yaml
             else:
-                logger.info("No bridge rules in SSOT or config.yaml – skipping bridge init")
+                logger.info("No bridge rules in SSOT or config.yaml -- skipping bridge init")
                 return
 
         # Get radios from WM1303Backend
@@ -1035,7 +1033,7 @@ class RepeaterDaemon:
         if hasattr(self, "radio") and isinstance(self.radio, WM1303Backend):
             backend = self.radio
         else:
-            logger.warning("Radio is not WM1303Backend – bridge not available")
+            logger.warning("Radio is not WM1303Backend -- bridge not available")
             return
 
         radios = backend.get_radios()
@@ -1043,11 +1041,6 @@ class RepeaterDaemon:
             logger.warning(f"Need >= 1 radio for bridge, got {len(radios)}")
             return
 
-        # Rules already loaded above from SSOT or config.yaml fallback
-
-        # Read Adv. Config Dedup TTL. SSOT key is `bridge.dedup_ttl_seconds`
-        # (written by the Adv. Config UI). Legacy `bridge.dedup_ttl` is kept
-        # as a backward-compatible fallback for older configs.
         dedup_ttl = cfg_bridge.get("dedup_ttl_seconds",
                                     cfg_bridge.get("dedup_ttl", 300.0))
 
@@ -1106,7 +1099,6 @@ class RepeaterDaemon:
             rules = []
             for r in raw_rules:
                 rule = dict(r)
-                # Convert UI format (from/to) to engine format (source/target)
                 if "from" in rule:
                     rule["source"] = rule.pop("from")
                 if "to" in rule:
@@ -1185,7 +1177,7 @@ class RepeaterDaemon:
                 "queue_len": min(255, queue_len),
             }
         if stats_type == STATS_TYPE_RADIO:
-            noise_floor = int(engine.get_noise_floor() or 0)
+            noise_floor = int(engine.get_cached_noise_floor() or 0)
             radio = getattr(self, "dispatcher", None) and getattr(self.dispatcher, "radio", None)
             if radio:
                 _r = getattr(radio, "get_last_rssi", lambda: 0)
@@ -1271,11 +1263,17 @@ class RepeaterDaemon:
 
     def _signal_shutdown(self, sig, loop):
         """Handle SIGTERM/SIGINT by setting the stop event for cooperative exit."""
+        if self._shutdown_started:
+            logger.info(f"Received signal {sig.name}, shutdown already in progress")
+            return
         logger.info(f"Received signal {sig.name}, shutting down...")
         self._stop_event.set()
 
     async def _shutdown(self):
         """Best-effort shutdown: stop background services and release hardware."""
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
 
         # Stop WM1303 bridge engine
         if getattr(self, "bridge_engine", None):
@@ -1284,6 +1282,22 @@ class RepeaterDaemon:
                 logger.info("Bridge engine stopped")
             except Exception as e:
                 logger.warning(f"Error stopping bridge engine: {e}")
+
+        # Stop companion frame servers first to close client sockets and child workers.
+        for frame_server in getattr(self, "companion_frame_servers", []):
+            try:
+                await frame_server.stop()
+            except Exception as e:
+                logger.warning(f"Companion frame server stop error: {e}")
+
+        # Stop companion bridges to flush/persist state.
+        if hasattr(self, "companion_bridges"):
+            for bridge in self.companion_bridges.values():
+                if hasattr(bridge, "stop"):
+                    try:
+                        await bridge.stop()
+                    except Exception as e:
+                        logger.warning(f"Companion bridge stop error: {e}")
 
         # Stop router
         if self.router:
@@ -1295,9 +1309,29 @@ class RepeaterDaemon:
         # Stop HTTP server
         if self.http_server:
             try:
-                self.http_server.stop()
+                await asyncio.wait_for(asyncio.to_thread(self.http_server.stop), timeout=3)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout stopping HTTP server")
             except Exception as e:
                 logger.warning(f"Error stopping HTTP server: {e}")
+
+        # Stop Glass inform loop
+        if self.glass_handler:
+            try:
+                await self.glass_handler.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping Glass handler: {e}")
+
+        # Close storage publishers (MQTT/LetsMesh) to stop their worker threads.
+        try:
+            if self.repeater_handler and self.repeater_handler.storage:
+                await asyncio.wait_for(
+                    asyncio.to_thread(self.repeater_handler.storage.close), timeout=5
+                )
+        except asyncio.TimeoutError:
+            logger.warning("Timeout closing storage publishers")
+        except Exception as e:
+            logger.warning(f"Error closing storage: {e}")
 
         # Release radio resources
         if self.radio and hasattr(self.radio, "cleanup"):
@@ -1315,7 +1349,7 @@ class RepeaterDaemon:
         except Exception as e:
             logger.debug(f"CH341 reset skipped/failed: {e}")
 
-        logger.info("Shutdown complete")
+        # Do not force-stop the event loop here; asyncio.run() owns loop lifecycle.
 
     @staticmethod
     def _detect_container() -> bool:
@@ -1331,6 +1365,7 @@ class RepeaterDaemon:
     async def run(self):
 
         logger.info("Repeater daemon started")
+        self._main_task = asyncio.current_task()
 
         # Shutdown event — set by signal handler to unblock the main wait
         self._stop_event = asyncio.Event()
@@ -1376,21 +1411,10 @@ class RepeaterDaemon:
             except Exception as e:
                 logger.warning("WM1303 TX scheduler init failed (non-fatal): %s", e)
 
-
-
             # --- Start BridgeEngine RX loops (CRITICAL for cross-channel forwarding) ---
             if self.bridge_engine:
                 asyncio.create_task(self.bridge_engine.run())
                 logger.info("BridgeEngine: RX loops started (cross-channel forwarding active)")
-
-                # --- Channel E (BW62.5 kHz software-decoded) ---
-                try:
-#E62K# # E62K_OFF #                     from repeater.channel_e_bridge import ChannelEBridge
-#E62K# # E62K_OFF #                     self._channel_e = ChannelEBridge(self.bridge_engine, backend=self.radio)
-#E62K# # E62K_OFF #                     asyncio.create_task(self._channel_e.run())
-                    logger.info("Channel E (BW62.5 kHz): bridge listener started")
-                except Exception as e:
-                    logger.warning("Channel E init failed: %s", e)
 
                 # --- Channel E (native LoRa) ---
                 try:
@@ -1415,9 +1439,7 @@ class RepeaterDaemon:
                     logger.warning("WM1303: safety-net registration failed - no process_packet")
 
             # --- FIX: Unregister Dispatcher direct RX callback ---
-            # The Dispatcher auto-registers _on_packet_received as RX callback (dispatcher.py:128).
-            # This causes ALL packets to be processed by Dispatcher directly (TX only on channel_a).
-            # Bridge engine handles ALL RX via VirtualLoRaRadio queues, so unregister.
+            # Bridge engine handles ALL RX via VirtualLoRaRadio queues.
             if hasattr(self, "radio") and hasattr(self.radio, "set_rx_callback"):
                 self.radio.set_rx_callback(None)
                 logger.info("Unregistered Dispatcher direct RX callback (bridge engine handles RX)")
@@ -1438,13 +1460,6 @@ class RepeaterDaemon:
                 else:
                     pub_key_formatted = pub_key_hex
 
-            # Centralized metrics retention (8-day default, hourly cleanup, weekly VACUUM)
-            try:
-                from repeater.metrics_retention import start as _start_retention
-                _start_retention()
-            except Exception as _e:
-                logger.warning(f"metrics_retention start failed: {_e}")
-
             current_loop = asyncio.get_event_loop()
 
             self.http_server = HTTPStatsServer(
@@ -1464,6 +1479,13 @@ class RepeaterDaemon:
                 self.http_server.start()
             except Exception as e:
                 logger.error(f"Failed to start HTTP server: {e}")
+
+            # Centralized metrics retention (8-day default, hourly cleanup, weekly VACUUM)
+            try:
+                from repeater.metrics_retention import start as _start_retention
+                _start_retention()
+            except Exception as _e:
+                logger.warning(f"metrics_retention start failed: {_e}")
 
             # Keep the daemon alive until a shutdown signal is received.
             # The dispatcher RX/TX processing happens via callbacks and
@@ -1529,7 +1551,6 @@ def main():
         logger.info("Repeater stopped (clean shutdown)")
     except RuntimeError as e:
         # 'Event loop stopped before Future completed' may still occur
-        # in edge cases on Python 3.13+.
         if "Event loop stopped" in str(e) or "cannot schedule" in str(e).lower():
             logger.info("Repeater stopped (clean shutdown)")
         else:

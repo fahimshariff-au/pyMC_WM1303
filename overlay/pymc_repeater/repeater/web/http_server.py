@@ -432,10 +432,17 @@ class HTTPStatsServer:
                     config["/_next"]["cors.expose.on"] = True
                 config["/favicon.ico"]["cors.expose.on"] = True
 
+            http_cfg = self.config.get("http", {}) if isinstance(self.config, dict) else {}
+            thread_pool = max(2, int(http_cfg.get("thread_pool", 8)))
+            thread_pool_max = max(thread_pool, int(http_cfg.get("thread_pool_max", 16)))
+            socket_timeout = max(15, int(http_cfg.get("socket_timeout", 65)))
+            socket_queue_size = max(10, int(http_cfg.get("socket_queue_size", 100)))
+
             cherrypy.config.update(
                 {
                     "server.socket_host": self.host,
                     "server.socket_port": self.port,
+                    "server.socket_queue_size": socket_queue_size,
                     "engine.autoreload.on": False,
                     "log.screen": False,
                     "log.access_file": "",  # Disable access log file
@@ -447,10 +454,22 @@ class HTTPStatsServer:
                     # Add auth handlers to config so they're accessible in endpoints
                     "jwt_handler": self.jwt_handler,
                     "token_manager": self.token_manager,
+                    # Bound the thread pool to prevent unbounded growth.
+                    # SSE streams each hold one thread; allow headroom for concurrent
+                    # SSE clients plus normal API polling without growing unboundedly.
+                    "server.thread_pool": thread_pool,
+                    "server.thread_pool_max": thread_pool_max,
+                    # Close idle/stale connections so their threads return to the pool.
+                    "server.socket_timeout": socket_timeout,
                 }
             )
-
-            # Mount main app
+            logger.info(
+                "HTTP worker config: thread_pool=%s, thread_pool_max=%s, socket_timeout=%ss, socket_queue_size=%s",
+                thread_pool,
+                thread_pool_max,
+                socket_timeout,
+                socket_queue_size,
+            )
 
             # Serve wm1303.html as static file (WM1303 Manager dashboard)
             wm1303_html_path = os.path.join(html_dir, "wm1303.html")
@@ -462,6 +481,7 @@ class HTTPStatsServer:
                 }
                 logger.info(f"WM1303 dashboard available at /wm1303.html")
 
+            # Mount main app
             cherrypy.tree.mount(self.app, "/", config)
 
             # Mount auth endpoints
@@ -531,7 +551,6 @@ class HTTPStatsServer:
                 logger.info("WM1303 API not available (wm1303_api module not found)")
             except Exception as e:
                 logger.warning(f"WM1303 API mount failed: {e}")
-
 
             # Store auth handlers in cherrypy config for middleware access
             cherrypy.config.update(

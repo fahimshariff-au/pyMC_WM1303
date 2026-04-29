@@ -11,13 +11,13 @@ logger = logging.getLogger("Config")
 
 def get_node_info(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Extract node name, radio configuration, and LetsMesh settings from config.
+    Extract node name, radio configuration, and MQTT settings from config.
     
     Args:
         config: Configuration dictionary
         
     Returns:
-        Dictionary with node_name, radio_config, and LetsMesh configuration
+        Dictionary with node_name, radio_config, and MQTT configuration
     """
     node_name = config.get("repeater", {}).get("node_name", "PyMC-Repeater")
     radio_config = config.get("radio", {})
@@ -30,26 +30,17 @@ def get_node_info(config: Dict[str, Any]) -> Dict[str, Any]:
     radio_bw_khz = radio_bw / 1_000
     radio_config_str = f"{radio_freq_mhz},{radio_bw_khz},{radio_sf},{radio_cr}"
     
-    letsmesh_config = config.get("letsmesh", {})
-    
-    from pymc_core.protocol.utils import PAYLOAD_TYPES
-    
-    disallowed_types = letsmesh_config.get("disallowed_packet_types", [])
-    type_name_map = {name: code for code, name in PAYLOAD_TYPES.items()}
-    
-    disallowed_hex = [type_name_map.get(name.upper(), None) for name in disallowed_types]
-    disallowed_hex = [val for val in disallowed_hex if val is not None]  # Filter out invalid names
+    # Handle getting the config from mqtt brokers, falling back to letsmesh if it doesn't exist
+    mqtt_config = config.get("mqtt_brokers", config.get("letsmesh", {}))
     
     return {
         "node_name": node_name,
         "radio_config": radio_config_str,
-        "iata_code": letsmesh_config.get("iata_code", "TEST"),
-        "broker_index": letsmesh_config.get("broker_index", 0),
-        "status_interval": letsmesh_config.get("status_interval", 60),
-        "model": letsmesh_config.get("model", "PyMC-Repeater"),
-        "disallowed_packet_types": disallowed_hex,
-        "email": letsmesh_config.get("email", ""),
-        "owner": letsmesh_config.get("owner", ""),
+        "iata_code": mqtt_config.get("iata_code", "TEST"),
+        "status_interval": mqtt_config.get("status_interval", 60),
+        "model": mqtt_config.get("model", "PyMC-Repeater"),
+        "email": mqtt_config.get("email", ""),
+        "owner": mqtt_config.get("owner", ""),
     }
 
 
@@ -76,6 +67,17 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
     if "mesh" not in config:
         config["mesh"] = {}
+
+    if "glass" not in config:
+        config["glass"] = {
+            "enabled": False,
+            "base_url": "http://localhost:8080",
+            "inform_interval_seconds": 30,
+            "request_timeout_seconds": 10,
+            "verify_tls": True,
+            "api_token": "",
+            "cert_store_dir": "/etc/pymc_repeater/glass",
+        }
 
     # Ensure repeater.security exists with defaults for upgrades from older configs
     if "repeater" not in config:
@@ -173,6 +175,7 @@ def update_global_flood_policy(allow: bool, config_path: Optional[str] = None) -
         
         # Set global flood policy
         config["mesh"]["global_flood_allow"] = allow
+        config["mesh"]["unscoped_flood_allow"] = allow
         
         # Save updated config
         return save_config(config, config_path)
@@ -240,6 +243,20 @@ def get_radio_for_board(board_config: dict):
             return int(value.strip().rstrip(','), 0)
         raise ValueError(f"Invalid int value type: {type(value)}")
 
+    def _parse_int_list(value):
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            return [_parse_int(item) for item in value]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped[0] == "[" and stripped[-1] == "]":
+                stripped = stripped[1:-1]
+            return [_parse_int(item) for item in stripped.split(",") if item.strip()]
+        raise ValueError(f"Invalid int list value type: {type(value)}")
+
     radio_type = board_config.get("radio_type", "sx1262").lower().strip()
     if radio_type == "kiss-modem":
         radio_type = "kiss"
@@ -283,7 +300,6 @@ def get_radio_for_board(board_config: dict):
             "rxen_pin": _parse_int(spi_config["rxen_pin"]),
             "txled_pin": _parse_int(spi_config.get("txled_pin", -1), default=-1),
             "rxled_pin": _parse_int(spi_config.get("rxled_pin", -1), default=-1),
-            "en_pin": _parse_int(spi_config.get("en_pin", -1), default=-1),
             "use_dio3_tcxo": spi_config.get("use_dio3_tcxo", False),
             "dio3_tcxo_voltage": float(spi_config.get("dio3_tcxo_voltage", 1.8)),
             "use_dio2_rf": spi_config.get("use_dio2_rf", False),
@@ -296,6 +312,13 @@ def get_radio_for_board(board_config: dict):
             "preamble_length": radio_config["preamble_length"],
             "sync_word": radio_config["sync_word"],
         }
+
+        en_pin = _parse_int(spi_config.get("en_pin"), default=None)
+        en_pins = _parse_int_list(spi_config.get("en_pins"))
+        if en_pin is not None:
+            combined_config["en_pin"] = en_pin
+        if en_pins is not None:
+            combined_config["en_pins"] = en_pins
 
         # Add optional GPIO parameters if specified in config
         # These wont be supported by older versions of pymc_core
