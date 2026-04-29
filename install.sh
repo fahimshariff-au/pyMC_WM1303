@@ -341,6 +341,33 @@ else
     warn "Boot config not found — please add core_freq_min=500 manually"
 fi
 
+step "Configuring gpu_mem=16 (headless optimisation)"
+BOOT_CONFIG="/boot/firmware/config.txt"
+[ ! -f "$BOOT_CONFIG" ] && BOOT_CONFIG="/boot/config.txt"
+if [ -f "$BOOT_CONFIG" ]; then
+    if grep -q "^gpu_mem=16" "$BOOT_CONFIG"; then
+        ok "Already configured"
+    elif grep -q "^gpu_mem=" "$BOOT_CONFIG"; then
+        # Replace existing value
+        sed -i 's/^gpu_mem=.*/gpu_mem=16/' "$BOOT_CONFIG"
+        ok "Updated to 16 (was different)"
+        REBOOT_REQUIRED=true
+    else
+        # Add before any [section] or at end
+        if grep -q '^\[' "$BOOT_CONFIG"; then
+            sed -i '0,/^\[/{s/^\[/# Minimise GPU memory for headless operation\ngpu_mem=16\n\n[/}' "$BOOT_CONFIG"
+        else
+            echo "" >> "$BOOT_CONFIG"
+            echo "# Minimise GPU memory for headless operation" >> "$BOOT_CONFIG"
+            echo "gpu_mem=16" >> "$BOOT_CONFIG"
+        fi
+        ok "Added to config.txt"
+        REBOOT_REQUIRED=true
+    fi
+else
+    warn "Boot config not found — please add gpu_mem=16 manually"
+fi
+
 step "Configuring SPI polling_limit_us=250 (persistent)"
 SPI_BCM_CONF="/etc/modprobe.d/spi-bcm2835-opts.conf"
 if [ -f "$SPI_BCM_CONF" ] && grep -q "polling_limit_us=250" "$SPI_BCM_CONF"; then
