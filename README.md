@@ -26,19 +26,51 @@ This project targets Raspberry Pi–based systems with an SX1302 or SX1303 conce
 
 ## Key Features
 
-- **5 simultaneous LoRa channels** — 4 channels at 125 kHz bandwidth via the SX1302 concentrator + 1 channel at 62.5 kHz via the onboard SX1261 radio (future: 250 kHz and possibly 500 kHz support)
+### Radio & Channels
+- **5 simultaneous LoRa channels** — 4 channels at 125 kHz bandwidth via the SX1302 concentrator + 1 channel at 62.5 kHz via the onboard SX1261 (future: 250 kHz and possibly 500 kHz support)
 - **Per-channel radio configuration** — independently set frequency, bandwidth, spreading factor (SF), coding rate (CR), TX power, and preamble length for each channel
-- **Per-channel Listen Before Talk (LBT)** — enable/disable LBT per channel with configurable RSSI threshold
-- **Hardware CAD before every TX** — mandatory Channel Activity Detection (CAD) on the SX1261 replaces the standard MeshCore airtime + TX delay factor method, providing deterministic collision avoidance with worst-case ~1 second latency
-- **Advanced bridge rules** — flexible rule-based packet routing between channels with per-rule packet type filtering (SSOT model)
+- **Channel E (SX1261)** — full RX/TX on the onboard SX1261 radio, enabling sub-125 kHz bandwidths that the SX1302 concentrator cannot demodulate
+
+### Collision Avoidance
+- **Hardware CAD (Channel Activity Detection)** — SX1261-based hardware CAD scan before every TX, implemented in C for minimal latency. Detects LoRa preambles on the target frequency and defers transmission when activity is detected
+- **HAL-level LBT (Listen Before Talk)** — AGC-based RSSI measurement per channel with user-configurable threshold. Independently enable/disable LBT per channel via the UI
+- **Airtime-proportional random TX delay** — additional collision avoidance between multiple repeaters, using the MeshCore-style airtime × delay factor method
+- **CAD calibration engine** — interactive per-SF CAD parameter tuning directly from the web UI
+
+### TX Pipeline
+- **Per-channel TX queues** — dedicated FIFO queue per channel with configurable TTL and overflow management
+- **Fair round-robin scheduling** — the global TX scheduler cycles through all channel queues fairly
+- **Origin-channel-first TX priority** — repeated packets are sent to the originating channel first, then to other targets
+- **Direct-send mode** — bypasses the JIT timing queue for minimum TX latency
+- **TX hold (RX batch window)** — configurable delay after RX to collect related packets before starting TX, maximizing RX availability
+
+### Deduplication
 - **3-layer deduplication** — self-echo suppression, multi-demodulator duplicate filtering, and cross-channel hash dedup across all active channels
+
+### Bridge Engine
+- **Advanced bridge rules** — flexible rule-based packet routing between channels with per-rule packet type filtering (SSOT model)
+
+### Monitoring & Diagnostics
 - **Spectrum insights with up to 8 days retention** — historical charts for RSSI, SNR, noise floor, CAD checks, LBT measurements, RX and TX activity per channel
+- **Continuous noise floor monitoring** — derived from LBT RSSI and RX signal data per channel, without pausing TX or RX
+- **CRC error tracking** — per-channel per-minute CRC error rate monitoring with historical data
 - **Detailed packet tracing** — step-by-step trace of every packet through the entire pipeline (RX → dedup → bridge rules → TX queue → CAD/LBT → TX), for performance analysis and troubleshooting
+
+### Reliability & Self-Healing
+- **HAL recovery & escalation** — automatic SX1302 correlator reinit, SX1261 recovery, and process respawn when hardware anomalies are detected
+- **AGC periodic reload** — prevents SX1302 correlator stall by periodically refreshing the AGC configuration
+- **Spectral scan self-recovery** — automatic SX1261 reinit when the spectral scan thread detects stuck or timeout conditions
+
+### Management
 - **Web management UI** — real-time status dashboard, channel configuration, bridge rules editor, spectrum charts, dedup visualization, and packet trace viewer
 - **REST API + WebSocket** — full programmatic control with real-time event streaming
 - **SSOT configuration** — single source of truth model for all settings (`wm1303_ui.json`)
+
+### Infrastructure
 - **One-command install** — automated installation and upgrade via a single bootstrap command
-- **Optimized for Raspberry Pi** — SPI tuning (4 MHz clock, 16 KB burst transfers), memory-efficient SQLite storage, systemd service integration, and careful resource management
+- **Optimized for Raspberry Pi** — SPI bus stability tuning (4 MHz clock, 16 KB burst transfers, CPU governor pinning, RT scheduling for SPI thread), memory-efficient SQLite storage, systemd service integration
+- **SQLite database logging** — persistent storage for metrics, packets, noise floor history, CRC errors, and spectrum data
+- **Automatic metrics retention** — configurable cleanup (default 8 days) with periodic vacuum
 
 ## 5-Channel Architecture
 
@@ -168,33 +200,43 @@ With slower LoRa settings, the same message takes **much** longer:
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  WM1303 HAT: SX1302 + 2x SX1250 + SX1261        │
+│  WM1303 HAT: SX1302 + 2× SX1250 + SX1261        │
 └───────────────────────┬──────────────────────────┘
                         │ SPI (/dev/spidev0.0 + 0.1)
 ┌───────────────────────┴──────────────────────────┐
-│  libloragw (HAL) + lora_pkt_fwd                   │
+│  libloragw (HAL v2.10) + lora_pkt_fwd            │
+│  ├── SX1261 LoRa RX → UDP :1733 (Channel E)     │
+│  ├── Spectral scan thread (SX1261)               │
+│  ├── HW CAD scan (SX1261, per-channel config)    │
+│  └── HAL LBT (AGC-based, per-channel threshold)  │
 └───────────────────────┬──────────────────────────┘
-                        │ UDP :1730
+                        │ UDP :1780/:1782
 ┌───────────────────────┴──────────────────────────┐
 │  WM1303 Backend                                   │
 │  ├── VirtualLoRaRadio (per channel A–D)           │
-│  ├── Channel E Bridge (SX1261 path)               │
-│  ├── NoiseFloorMonitor (30s, no TX pause)         │
+│  ├── Channel E Bridge (SX1261 RX / SX1302 TX)    │
+│  ├── NoiseFloorMonitor (LBT RSSI + RX-based)     │
 │  └── 3-layer dedup (echo + multi-demod + hash)    │
 ├──────────────────────────────────────────────────┤
 │  Bridge Engine                                    │
 │  ├── Rule-based routing (source → target)         │
 │  ├── Packet type filtering                        │
-│  └── TX batch window (2s)                         │
+│  └── TX hold (configurable RX batch window)       │
 ├──────────────────────────────────────────────────┤
 │  Per-Channel TX Queues                            │
 │  ├── Fair round-robin scheduling                  │
-│  ├── Mandatory CAD + optional LBT (C layer)       │
+│  ├── Airtime-proportional random TX delay         │
 │  └── TTL + overflow management                    │
+├──────────────────────────────────────────────────┤
+│  Data & Monitoring                                │
+│  ├── Packet trace (in-memory ring buffer)         │
+│  ├── SQLite data acquisition + spectrum history   │
+│  └── Metrics retention (automatic cleanup)        │
 ├──────────────────────────────────────────────────┤
 │  WM1303 Manager UI + REST API + WebSocket         │
 └──────────────────────────────────────────────────┘
 ```
+
 
 ## Repository Structure
 
