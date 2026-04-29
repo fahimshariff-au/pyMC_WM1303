@@ -20,10 +20,10 @@ This project targets Raspberry Pi–based systems with an SX1302 or SX1303 conce
 | **Raspberry Pi 4 + Seeed PiHAT + WM1302** | 🔜 Testing soon | Standalone Pi 4 with separate Seeed WM1302 (incl. SX1262) HAT |
 | **RAK5146 (SPI variant)** | ⬜ Not yet tested | SX1303 + SX1261 on mPCIe — requires mPCIe-to-Pi adapter; SPI interface, minimal HAL pin-mapping changes expected |
 | **RAK5166** | ⬜ Not yet tested | SX1303 + SX126X on M.2 3042 — USB interface (STM32 bridge), requires HAL adaptation for USB mode |
-| **RAK Hotspot Miner V2** | ⬜ Not yet tested | Raspberry Pi–based with SX1302 concentrator |
+| **RAK Hotspot Miner V2** | ❌ Incompatible | Uses RAK2287 internally (no SX1261/SX1262) — see below |
 | **Other SX1302/SX1303 Pi HATs** | ⬜ Not yet tested | Any Raspberry Pi (3B+, 4, 5) with a compatible concentrator HAT — the module **must** include an integrated SX1261 or SX1262 (see warning below) |
 
-> ❌ **Known incompatible:** The **RAK2287** does NOT include an SX1261/SX1262 (only SX1302 + 2× SX1250). Despite having reserved SX1261 pins on its mPCIe connector, the chip is not populated. This module **cannot** be used with this project.
+> ❌ **Known incompatible:** The **RAK2287** does NOT include an SX1261/SX1262 (only SX1302 + 2× SX1250). Despite having reserved SX1261 pins on its mPCIe connector, the chip is not populated. This module **cannot** be used with this project. All RAK Hotspot Miners (V1, V2, Lite) use the RAK2287 or older RAK2245 — none include an SX1261/SX1262.
 
 > ⚠️ **The SX1261/SX1262 is a hard requirement.** This system relies on the SX1261/SX1262 for mandatory hardware CAD before every transmission, which is deeply integrated into the entire TX pipeline. Without it, the system **will not function**. Other essential features like LBT, spectral scanning, noise floor monitoring, and Channel E also depend on this radio. Always verify your concentrator module includes an onboard SX1261 or SX1262 before attempting installation.
 
