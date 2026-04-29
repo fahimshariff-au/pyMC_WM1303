@@ -10,6 +10,20 @@ Built on top of [pyMC_core](https://github.com/HansvanMeer/pyMC_core) (dev) and 
 
 ---
 
+## Hardware Compatibility
+
+This project targets Raspberry Pi–based systems with an SX1302 or SX1303 concentrator that has an onboard SX1261 or SX1262 radio. The following devices have been tested or are expected to be compatible:
+
+| Device | Status | Notes |
+|--------|--------|-------|
+| **SenseCAP M1** | ✅ Tested | Raspberry Pi 4 with built-in PiHAT and WM1302/WM1303 module |
+| **Raspberry Pi 4 + Seeed PiHAT + WM1302** | 🔜 Testing soon | Standalone Pi 4 with separate Seeed WM1302 (incl. SX1262) HAT |
+| **RAK Hotspot Miner V2** | ⬜ Not yet tested | Raspberry Pi–based with SX1302 concentrator |
+| **Other SX1302/SX1303 Pi HATs** | ⬜ Not yet tested | Any Raspberry Pi (3B+, 4, 5) with a compatible concentrator HAT — the module **must** include an integrated SX1261 or SX1262 (see warning below) |
+
+> ⚠️ **The SX1261/SX1262 is a hard requirement.** This system relies on the SX1261/SX1262 for mandatory hardware CAD before every transmission, which is deeply integrated into the entire TX pipeline. Without it, the system **will not function**. Other essential features like LBT, spectral scanning, noise floor monitoring, and Channel E also depend on this radio. Always verify your concentrator module includes an onboard SX1261 or SX1262 before attempting installation.
+
+
 ## Key Features
 
 - **5 simultaneous LoRa channels** — 4 channels at 125 kHz bandwidth via the SX1302 concentrator + 1 channel at 62.5 kHz via the onboard SX1261 radio (future: 250 kHz and possibly 500 kHz support)
