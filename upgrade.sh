@@ -97,6 +97,7 @@ BACKUP_DIR="/home/pi/backups"
 
 PI_USER="pi"
 REBOOT_REQUIRED=false
+VENV_REBUILD_NEEDED=false
 
 # Branch configuration
 HAL_BRANCH="master"
@@ -251,6 +252,21 @@ fi
 step "Ensuring ${PI_USER} in hardware access groups"
 usermod -aG spi,i2c,gpio,dialout ${PI_USER} 2>/dev/null || true
 ok "Done"
+
+step "Checking venv health"
+if [ -d "${VENV_DIR}" ]; then
+    if ! "${VENV_DIR}/bin/python3" --version &>/dev/null; then
+        warn "Venv Python broken (system Python upgraded?) — will rebuild venv"
+        VENV_REBUILD_NEEDED=true
+    else
+        ok "Venv Python is healthy"
+    fi
+else
+    warn "Venv not found at ${VENV_DIR} — will be created"
+    VENV_REBUILD_NEEDED=true
+fi
+
+
 
 step "Checking required packages"
 PKGS_NEEDED=""
@@ -585,29 +601,94 @@ fi
 # =============================================================================
 phase "Update Python Packages"
 
-if [ "$CORE_UPDATED" = true ] || [ "$FORCE_REBUILD" = true ]; then
-    step "Reinstalling pyMC_core"
+# ---------------------------------------------------------------------------
+# Venv rebuild: if system Python was upgraded, recreate the venv from scratch
+# ---------------------------------------------------------------------------
+if [ "$VENV_REBUILD_NEEDED" = true ]; then
+    step "Removing broken/missing venv"
+    rm -rf "${VENV_DIR}"
+    ok "Removed"
+
+    step "Creating new Python virtual environment"
+    if ! sudo -u ${PI_USER} python3 -m venv "${VENV_DIR}" >> "${LOG_FILE}" 2>&1; then
+        fail "venv creation failed"
+    fi
+    ok "Created with $(python3 --version)"
+
+    step "Upgrading pip and setuptools"
+    if ! sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel >> "${LOG_FILE}" 2>&1; then
+        fail "pip upgrade failed"
+    fi
+    ok "Done"
+
+    step "Reinstalling pyMC_core (venv rebuild)"
     cd "${REPO_DIR}/pyMC_core"
     if ! sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install -e . >> "${LOG_FILE}" 2>&1; then
         fail "pyMC_core install failed"
     fi
     ok "Reinstalled"
-else
-    step "Skipping pyMC_core reinstall (no changes)"
-    ok "Skipped"
-fi
 
-if [ "$REPEATER_UPDATED" = true ] || [ "$FORCE_REBUILD" = true ]; then
-    step "Reinstalling pyMC_Repeater"
+    step "Reinstalling pyMC_Repeater (venv rebuild)"
     cd "${REPO_DIR}/pyMC_Repeater"
     if ! sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install -e . >> "${LOG_FILE}" 2>&1; then
         fail "pyMC_Repeater install failed"
     fi
     ok "Reinstalled"
+
+    step "Reinstalling additional Python dependencies (venv rebuild)"
+    if ! sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install \
+        spidev \
+        RPi.GPIO \
+        pyyaml \
+        cherrypy \
+        pyjwt \
+        cryptography \
+        aiohttp \
+        >> "${LOG_FILE}" 2>&1; then
+        fail "Additional dependencies install failed"
+    fi
+    ok "Done"
+
+    # Re-symlink system rrdtool into new venv
+    step "Re-symlinking rrdtool into new venv"
+    VENV_SITE=$(sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
+    SYS_RRD=$(python3 -c "import rrdtool; print(rrdtool.__file__)" 2>/dev/null || true)
+    if [ -n "${SYS_RRD}" ] && [ -f "${SYS_RRD}" ] && [ -n "${VENV_SITE}" ]; then
+        sudo -u ${PI_USER} ln -sf "${SYS_RRD}" "${VENV_SITE}/"
+        if sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import rrdtool" 2>/dev/null; then
+            ok "Symlinked $(basename ${SYS_RRD})"
+        else
+            warn "Symlink created but import failed"
+        fi
+    else
+        warn "System rrdtool module not found"
+    fi
 else
-    step "Skipping pyMC_Repeater reinstall (no changes)"
-    ok "Skipped"
-fi
+    # Normal path: only reinstall packages that changed
+    if [ "$CORE_UPDATED" = true ] || [ "$FORCE_REBUILD" = true ]; then
+        step "Reinstalling pyMC_core"
+        cd "${REPO_DIR}/pyMC_core"
+        if ! sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install -e . >> "${LOG_FILE}" 2>&1; then
+            fail "pyMC_core install failed"
+        fi
+        ok "Reinstalled"
+    else
+        step "Skipping pyMC_core reinstall (no changes)"
+        ok "Skipped"
+    fi
+
+    if [ "$REPEATER_UPDATED" = true ] || [ "$FORCE_REBUILD" = true ]; then
+        step "Reinstalling pyMC_Repeater"
+        cd "${REPO_DIR}/pyMC_Repeater"
+        if ! sudo -u ${PI_USER} "${VENV_DIR}/bin/pip" install -e . >> "${LOG_FILE}" 2>&1; then
+            fail "pyMC_Repeater install failed"
+        fi
+        ok "Reinstalled"
+    else
+        step "Skipping pyMC_Repeater reinstall (no changes)"
+        ok "Skipped"
+    fi
+fi  # end VENV_REBUILD_NEEDED
 
 # Verify overlays are accessible after all pip installs
 step "Verifying pyMC_core overlay is accessible"

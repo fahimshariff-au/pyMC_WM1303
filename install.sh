@@ -621,6 +621,25 @@ fi
 # =============================================================================
 phase "Python Virtual Environment & Package Installation"
 
+step "Checking existing venv health"
+VENV_REBUILD_NEEDED=false
+if [ -d "${VENV_DIR}" ]; then
+    if ! "${VENV_DIR}/bin/python3" --version &>/dev/null; then
+        warn "Venv Python broken (system Python upgraded?) — will rebuild venv"
+        VENV_REBUILD_NEEDED=true
+    else
+        ok "Existing venv is healthy"
+    fi
+else
+    ok "No existing venv (fresh install)"
+fi
+
+if [ "$VENV_REBUILD_NEEDED" = true ]; then
+    step "Removing broken venv"
+    rm -rf "${VENV_DIR}"
+    ok "Removed"
+fi
+
 step "Creating Python virtual environment"
 if [ ! -d "${VENV_DIR}" ]; then
     if ! sudo -u ${PI_USER} python3 -m venv "${VENV_DIR}" >> "${LOG_FILE}" 2>&1; then
