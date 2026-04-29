@@ -497,6 +497,13 @@ for f in __init__.py wm1303_backend.py sx1302_hal.py tx_queue.py sx1261_driver.p
         cp "${OVERLAY_DIR}/pymc_core/src/pymc_core/hardware/${f}" "${CORE_HW_DIR}/" >> "${LOG_FILE}" 2>&1
     fi
 done
+# companion/ overlay files (Contact model with RSSI/SNR support)
+CORE_COMPANION_DIR="${REPO_DIR}/pyMC_core/src/pymc_core/companion"
+for f in models.py contact_store.py; do
+    if [ -f "${OVERLAY_DIR}/pymc_core/src/pymc_core/companion/${f}" ]; then
+        cp "${OVERLAY_DIR}/pymc_core/src/pymc_core/companion/${f}" "${CORE_COMPANION_DIR}/" >> "${LOG_FILE}" 2>&1
+    fi
+done
 ok "pyMC_core overlay applied"
 
 step "Applying pyMC_Repeater overlay"
@@ -696,7 +703,17 @@ PYMC_CORE_IMPORT_PATH=$(sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import 
 if echo "$PYMC_CORE_IMPORT_PATH" | grep -q "site-packages"; then
     SITE_HW_DIR=$(dirname "$PYMC_CORE_IMPORT_PATH")
     cp "${OVERLAY_DIR}/pymc_core/src/pymc_core/hardware/"*.py "${SITE_HW_DIR}/" >> "${LOG_FILE}" 2>&1
+    # Also re-apply companion overlay to site-packages
+    SITE_COMPANION_DIR=$(dirname "$SITE_HW_DIR")/companion
+    if [ -d "${SITE_COMPANION_DIR}" ]; then
+        for f in models.py contact_store.py; do
+            if [ -f "${OVERLAY_DIR}/pymc_core/src/pymc_core/companion/${f}" ]; then
+                cp "${OVERLAY_DIR}/pymc_core/src/pymc_core/companion/${f}" "${SITE_COMPANION_DIR}/" >> "${LOG_FILE}" 2>&1
+            fi
+        done
+    fi
     chown -R ${PI_USER}:${PI_USER} "${SITE_HW_DIR}"
+    chown -R ${PI_USER}:${PI_USER} "${SITE_COMPANION_DIR}" 2>/dev/null || true
     ok "Re-applied overlay to site-packages"
 else
     ok "Editable install active"

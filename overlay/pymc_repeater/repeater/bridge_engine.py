@@ -647,7 +647,9 @@ class BridgeEngine:
         logger.info('BridgeEngine: MQTT handler registered')
 
     async def inject_packet(self, source_name: str, data: bytes,
-                            origin_channel: str | None = None) -> None:
+                            origin_channel: str | None = None,
+                            rssi: float | None = None,
+                            snr: float | None = None) -> None:
         """Inject a packet into the bridge as if received from the given source.
 
         Allows external components (MQTT, repeater) to feed packets into
@@ -659,6 +661,8 @@ class BridgeEngine:
             origin_channel: Optional channel_id where the packet was originally
                 received. When set, radio TX for this channel is prioritized
                 (sent first) so the origin channel gets the fastest repeat.
+            rssi: Optional RSSI value from the receiving radio (dBm).
+            snr: Optional SNR value from the receiving radio (dB).
         """
         if not self._running:
             logger.warning('BridgeEngine: inject_packet called but bridge not running')
@@ -680,7 +684,9 @@ class BridgeEngine:
             self._update_repeater_counters(
                 data, source_name, pkt_type_name=self._get_packet_type_name(data),
                 pkt_hash=_stable_hash(data), was_echo=True,
-                drop_reason="tx_echo")
+                drop_reason="tx_echo",
+                rssi=int(rssi) if rssi is not None else -120,
+                snr=float(snr) if snr is not None else 0.0)
             return
 
         # Dedup check: only apply to RF/channel sources, skip for internal sources
@@ -702,7 +708,9 @@ class BridgeEngine:
             self._update_repeater_counters(
                 data, source_name, pkt_type_name=self._get_packet_type_name(data),
                 pkt_hash=_dup_hash, was_duplicate=True,
-                drop_reason="duplicate")
+                drop_reason="duplicate",
+                rssi=int(rssi) if rssi is not None else -120,
+                snr=float(snr) if snr is not None else 0.0)
             return
         else:
             # Dedup check passed — packet is not a duplicate
@@ -739,8 +747,8 @@ class BridgeEngine:
                         'length': int(len(data)),
                         'hop_count': int(_hop) if _hop is not None else None,
                         'crc_ok': True,
-                        'rssi': None,
-                        'snr': None,
+                        'rssi': float(rssi) if rssi is not None else None,
+                        'snr': float(snr) if snr is not None else None,
                         'pkt_hash': (pkt_hash[:16] if isinstance(pkt_hash, str) else None),
                     })
             except Exception as _pm_e:
@@ -751,7 +759,8 @@ class BridgeEngine:
         # rule actually dispatched TX for this packet (matches _rx_loop logic).
         _fwd_before = self.forwarded_packets
         await self._forward_by_rules(source_name, data, pkt_hash, pkt_type_name,
-                                     origin_channel=origin_channel)
+                                     origin_channel=origin_channel,
+                                     rssi=rssi, snr=snr)
         _fwd_after = self.forwarded_packets
         _was_forwarded = (_fwd_after > _fwd_before)
 
@@ -765,11 +774,15 @@ class BridgeEngine:
             self._update_repeater_counters(
                 data, source_name, pkt_type_name=pkt_type_name,
                 pkt_hash=pkt_hash, was_forwarded=_was_forwarded,
-                drop_reason=None if _was_forwarded else "no_rule_match")
+                drop_reason=None if _was_forwarded else "no_rule_match",
+                rssi=int(rssi) if rssi is not None else -120,
+                snr=float(snr) if snr is not None else 0.0)
 
     async def _forward_by_rules(self, source_cid: str, data: bytes,
                                  pkt_hash: str, pkt_type_name: str,
-                                 origin_channel: str | None = None) -> None:
+                                 origin_channel: str | None = None,
+                                 rssi: float | None = None,
+                                 snr: float | None = None) -> None:
         """Apply bridge rules to forward a packet from the given source.
 
         Uses bidirectional alias matching via _source_matches() so that
@@ -869,7 +882,8 @@ class BridgeEngine:
                     # step to the bottom of the timeline).
                     _trace(pkt_hash8, 'bridge_forward', channel=source_cid, pkt_type=pkt_type_name, detail='Forwarded to %s (rule: %s)' % (self._dn(rule_target), rule_display))
                     if rule_target == 'repeater':
-                        result = handler(data, origin_channel=source_cid)
+                        result = handler(data, origin_channel=source_cid,
+                                         rssi=rssi, snr=snr)
                     else:
                         result = handler(data)
                     if asyncio.iscoroutine(result):
@@ -1196,6 +1210,74 @@ class BridgeEngine:
             events = [e for e in events if e['ts'] >= since]
         return events[-limit:]
 
+    @staticmethod
+    def _parse_path_info(data: bytes) -> dict:
+        """Extract path hashes, src_hash, dst_hash from raw MeshCore packet bytes.
+
+        Returns a dict with keys: path_hashes (list[str]), path_hash_size (int),
+        path_hash (str|None), src_hash (str|None), dst_hash (str|None),
+        original_path (list[str]|None).
+        """
+        result = {
+            'path_hashes': [],
+            'path_hash_size': 0,
+            'path_hash': None,
+            'src_hash': None,
+            'dst_hash': None,
+            'original_path': None,
+        }
+        if not data or len(data) < 2:
+            return result
+
+        hdr = data[0]
+        rt = hdr & 0x03
+        pt = (hdr >> 2) & 0x0F
+        has_tc = rt in (0x00, 0x03)  # TFLOOD/TDIRECT have transport codes
+        idx = 5 if has_tc else 1  # offset to path_raw byte
+        if idx >= len(data):
+            return result
+
+        path_raw = data[idx]
+        hops = path_raw & 0x3F
+        hsz = ((path_raw >> 6) & 0x03) + 1  # hash size 1-3 bytes
+        result['path_hash_size'] = hsz
+
+        # Extract individual path hashes
+        path_hashes = []
+        for i in range(hops):
+            start = idx + 1 + i * hsz
+            end = start + hsz
+            if end <= len(data):
+                path_hashes.append(data[start:end].hex().upper())
+        result['path_hashes'] = path_hashes
+        result['original_path'] = path_hashes if path_hashes else None
+
+        # Build display string like engine.py _path_hash_display
+        if path_hashes:
+            display = path_hashes[:8]
+            if len(path_hashes) > 8:
+                display = list(display) + ['...']
+            result['path_hash'] = '[' + ', '.join(display) + ']'
+
+        # Extract src_hash and dst_hash from payload
+        pbytes = hops * hsz
+        payload_start = idx + 1 + pbytes
+        if payload_start < len(data):
+            payload = data[payload_start:]
+            if pt in (0x00, 0x01, 0x02, 0x08):  # REQ, RESP, TXT, PATH
+                if len(payload) >= 2:
+                    result['dst_hash'] = f'{payload[0]:02X}'
+                    result['src_hash'] = f'{payload[1]:02X}'
+            elif pt == 0x04:  # ADVERT
+                if len(payload) >= 1:
+                    result['src_hash'] = f'{payload[0]:02X}'
+            elif pt == 0x07:  # ANON_REQ
+                if len(payload) >= 1:
+                    result['dst_hash'] = f'{payload[0]:02X}'
+
+        return result
+
+
     def _update_repeater_counters(self, data: bytes, channel_id: str,
                                     rssi: int = -120, snr: float = 0.0,
                                     pkt_type_name: str = 'UNKNOWN',
@@ -1232,16 +1314,19 @@ class BridgeEngine:
                 'is_duplicate': was_duplicate,
                 'packet_hash': pkt_hash[:16] if pkt_hash else '',
                 'drop_reason': drop_reason,
-                'path_hash': None,
-                'src_hash': None,
-                'dst_hash': None,
-                'original_path': None,
-                'forwarded_path': None,
-                'path_hash_size': 0,
                 'raw_packet': data.hex() if data else None,
                 'bridge_source': channel_id,
                 'bridge_pkt_type': pkt_type_name,
             }
+
+            # Parse path hashes from raw packet data
+            _pi = self._parse_path_info(data)
+            packet_record['path_hash'] = _pi['path_hash']
+            packet_record['src_hash'] = _pi['src_hash']
+            packet_record['dst_hash'] = _pi['dst_hash']
+            packet_record['original_path'] = _pi['original_path']
+            packet_record['forwarded_path'] = None
+            packet_record['path_hash_size'] = _pi['path_hash_size']
 
             # Handle duplicates: attach to original if found
             if was_duplicate and len(eng.recent_packets) > 0:
@@ -1313,7 +1398,9 @@ class BridgeEngine:
                 self._update_repeater_counters(
                     data, cid, pkt_type_name=self._get_packet_type_name(data),
                     pkt_hash=_stable_hash(data), was_echo=True,
-                    drop_reason="tx_echo")
+                    drop_reason="tx_echo",
+                    rssi=int(_rx_rssi) if _rx_rssi is not None else -120,
+                    snr=float(_rx_snr) if _rx_snr is not None else 0.0)
                 continue
 
             if self._is_duplicate(data):
@@ -1329,7 +1416,9 @@ class BridgeEngine:
                 self._update_repeater_counters(
                     data, cid, pkt_type_name=self._get_packet_type_name(data),
                     pkt_hash=_dup_hash, was_duplicate=True,
-                    drop_reason="duplicate")
+                    drop_reason="duplicate",
+                    rssi=int(_rx_rssi) if _rx_rssi is not None else -120,
+                    snr=float(_rx_snr) if _rx_snr is not None else 0.0)
                 continue
 
             # Dedup check passed — packet is new
@@ -1384,7 +1473,8 @@ class BridgeEngine:
 
             # --- Rule-based forwarding ---
             if self.rules:
-                await self._forward_by_rules(cid, data, pkt_hash, pkt_type_name)
+                await self._forward_by_rules(cid, data, pkt_hash, pkt_type_name,
+                                             rssi=_rx_rssi, snr=_rx_snr)
             else:
                 # Fallback: no rules configured -> forward to all other radios
                 for target in self.radios:
@@ -1408,7 +1498,9 @@ class BridgeEngine:
             self._update_repeater_counters(
                 data, cid, pkt_type_name=pkt_type_name,
                 pkt_hash=pkt_hash, was_forwarded=_was_forwarded,
-                drop_reason=None if _was_forwarded else "no_rule_match")
+                drop_reason=None if _was_forwarded else "no_rule_match",
+                rssi=int(_rx_rssi) if _rx_rssi is not None else -120,
+                snr=float(_rx_snr) if _rx_snr is not None else 0.0)
 
     async def run(self) -> None:
         self._running = True

@@ -916,7 +916,9 @@ class RepeaterDaemon:
 
 
     async def _bridge_repeater_handler(self, data: bytes,
-                                        origin_channel: str | None = None) -> None:
+                                        origin_channel: str | None = None,
+                                        rssi: float | None = None,
+                                        snr: float | None = None) -> None:
         """Bridge-to-repeater handler: parse raw bytes, run repeater logic, re-inject result.
 
         Called by BridgeEngine when a rule forwards to 'repeater' endpoint.
@@ -930,6 +932,8 @@ class RepeaterDaemon:
             origin_channel: Optional channel_id where the packet was originally
                 received (e.g. 'channel_a'). Passed through to inject_packet
                 so the TX serializer can prioritize the origin channel.
+            rssi: Optional RSSI value (dBm) from the receiving radio.
+            snr: Optional SNR value (dB) from the receiving radio.
 
         NOTE: Do NOT call mark_seen() before process_packet()! The
         flood_forward/direct_forward methods inside process_packet check
@@ -946,9 +950,19 @@ class RepeaterDaemon:
             logger.warning("BridgeRepeaterHandler: failed to parse %d bytes", len(data))
             return
 
+        # Attach RSSI/SNR from bridge metadata to the parsed Packet so
+        # downstream handlers (advert processing, neighbor tracking) can
+        # access signal quality even though it's not in the wire format.
+        # NOTE: rssi and snr are read-only @property on Packet, so we only
+        # set the private attributes (_rssi, _snr) which the properties read.
+        if rssi is not None:
+            pkt._rssi = int(rssi)
+        if snr is not None:
+            pkt._snr = float(snr)
+
         logger.info(
-            "BridgeRepeaterHandler: parsed %d bytes, header=0x%02x, origin_channel=%s",
-            len(data), pkt.header, origin_channel
+            "BridgeRepeaterHandler: parsed %d bytes, header=0x%02x, origin_channel=%s, rssi=%s, snr=%s",
+            len(data), pkt.header, origin_channel, rssi, snr
         )
 
         # Process ADVERT packets for neighbor tracking
@@ -959,10 +973,11 @@ class RepeaterDaemon:
         payload_type = pkt.get_payload_type() if hasattr(pkt, 'get_payload_type') else None
         if payload_type == AdvertHandler.payload_type() and self.advert_helper:
             try:
-                rssi = getattr(pkt, 'rssi', 0) or 0
-                snr = getattr(pkt, 'snr', 0.0) or 0.0
-                await self.advert_helper.process_advert_packet(pkt, rssi, snr)
-                logger.info("BridgeRepeaterHandler: processed ADVERT for neighbor tracking")
+                _rssi = int(rssi) if rssi is not None else 0
+                _snr = float(snr) if snr is not None else 0.0
+                await self.advert_helper.process_advert_packet(pkt, _rssi, _snr)
+                logger.info("BridgeRepeaterHandler: processed ADVERT for neighbor tracking (rssi=%s, snr=%s)",
+                            _rssi, _snr)
             except Exception as e:
                 logger.warning("BridgeRepeaterHandler: advert processing error: %s", e)
 

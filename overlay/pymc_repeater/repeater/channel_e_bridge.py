@@ -205,7 +205,8 @@ class ChannelEBridge:
             if self._loop is not None:
                 self._loop.call_soon_threadsafe(
                     self._loop.create_task,
-                    self.bridge.inject_packet(CHANNEL_E_NAME, payload, origin_channel='channel_e')
+                    self.bridge.inject_packet(CHANNEL_E_NAME, payload, origin_channel='channel_e',
+                                              rssi=rssi, snr=snr)
                 )
                 self.packets_injected += 1
             else:

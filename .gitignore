@@ -30,3 +30,4 @@ Thumbs.db
 *.so
 *.promptinclude.md
 upgrade_bootstrap.sh
+node_modules/
