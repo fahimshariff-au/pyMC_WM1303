@@ -144,13 +144,27 @@ PATH, ACK, etc.).
 
 ### Expected headroom on a 512 MB device
 
+Realistic estimate based on measured data from a 4 GB test unit
+(`free -m` reports ~350 MB used at idle with a few SSH sessions).
+The biggest items easily overlooked are the **kernel Slab allocator
+(~100 MB)** and the combined overhead of **systemd, journald,
+NetworkManager, wpa_supplicant, sshd and dbus (~80–120 MB)**.
+
 | Component | RAM |
 |---|---|
-| Raspberry Pi OS + kernel | ~60 MB |
+| Raspberry Pi OS Lite + kernel + Slab | ~120–150 MB |
 | **pymc-repeater** | **~85–90 MB** |
-| `lora_pkt_fwd` + other services | ~40 MB |
-| **Total** | **~185–190 MB** |
-| **Free on 512 MB Pi** | **~320 MB (63 %)** |
+| `lora_pkt_fwd` (if run as separate process) | ~10–20 MB |
+| systemd, journald, NetworkManager, sshd, dbus, etc. | ~40–60 MB |
+| **Total** | **~260–320 MB** |
+| **Free on 512 MB Pi** | **~190–250 MB (37–49 %)** |
+
+A 512 MB device has less buffer/cache pressure and a smaller Slab
+footprint than a 4 GB device, so actual headroom typically lands at the
+higher end of that range.  Prior to v2.4.6 the unbounded Python heap
+growth (up to ~200 MB RSS) could easily push a 512 MB device into swap;
+with the v2.4.6 stability fixes, `pymc-repeater` holds steady around
+85–90 MB, leaving sufficient headroom for robust operation.
 
 ---
 
