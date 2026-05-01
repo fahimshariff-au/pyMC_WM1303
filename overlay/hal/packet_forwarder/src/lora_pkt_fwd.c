@@ -2098,6 +2098,8 @@ int main(int argc, char ** argv)
 
     /* Force line-buffered stdout for piped output */
     setvbuf(stdout, NULL, _IOLBF, 0);
+    /* Seed random number generator for CAD retry jitter */
+    srand((unsigned int)time(NULL));
     /* Parse command line options */
     while( (i = getopt( argc, argv, "hc:" )) != -1 )
     {
@@ -3917,7 +3919,6 @@ void thread_down(void) {
                         if (cad_bw >= 0) {
                             imme_extra.cad_enabled = true;
                             const int CAD_MAX_RETRIES = 15;
-                            const int cad_delays_ms[] = {5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5};
                             struct timeval cad_t0, cad_t1;
                             gettimeofday(&cad_t0, NULL);
                             int cad_retry = 0;
@@ -3965,13 +3966,14 @@ void thread_down(void) {
 
                                 /* CAD detected activity — restore RX during wait */
                                 if (cad_retry < CAD_MAX_RETRIES) {
+                                    int cad_wait = 1 + (rand() % 10); /* random 1-10 ms */
                                     MSG("INFO: [imme] CAD DETECTED (freq=%u, SF%u, tx_nf=%d) — retry %d/%d, wait %d ms\n",
                                         txpkt.freq_hz, txpkt.datarate, first_noisefloor,
-                                        cad_retry + 1, CAD_MAX_RETRIES, cad_delays_ms[cad_retry]);
+                                        cad_retry + 1, CAD_MAX_RETRIES, cad_wait);
                                     sx1261_set_tx_inhibit_rx(false);
                                     sx1261_lora_rx_restart_light();
                                     pthread_mutex_unlock(&mx_concent);
-                                    wait_ms(cad_delays_ms[cad_retry]);
+                                    wait_ms(cad_wait);
                                     pthread_mutex_lock(&mx_concent);
                                     cad_retry++;
                                 } else {
@@ -4342,7 +4344,6 @@ void thread_jit(void) {
                                 if (cad_bw >= 0) {
                                     extra.cad_enabled = true;
                                     const int CAD_MAX_RETRIES = 15;
-                                    const int cad_delays_ms[] = {5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5};
                                     struct timeval cad_t0, cad_t1;
                                     gettimeofday(&cad_t0, NULL);
                                     int cad_retry = 0;
@@ -4393,19 +4394,20 @@ void thread_jit(void) {
 
                                         /* CAD detected activity — restore RX during wait */
                                         if (cad_retry < CAD_MAX_RETRIES) {
+                                            int cad_wait = 1 + (rand() % 10); /* random 1-10 ms */
                                             MSG("INFO: [jit] CAD DETECTED on rf_chain %d "
                                                 "(freq=%u Hz, SF%u, tx_nf=%d dBm) — retry %d/%d, "
                                                 "waiting %d ms\n",
                                                 i, pkt.freq_hz, pkt.datarate,
                                                 first_noisefloor,
-                                                cad_retry + 1, CAD_MAX_RETRIES, cad_delays_ms[cad_retry]);
+                                                cad_retry + 1, CAD_MAX_RETRIES, cad_wait);
                                             sx1261_set_tx_inhibit_rx(false);
                                             sx1261_lora_rx_restart_light();
                                             /* Release mutex during wait */
                                             pthread_mutex_unlock(&mx_concent);
-                                            wait_ms(cad_delays_ms[cad_retry]);
+                                            wait_ms(cad_wait);
                                             pthread_mutex_lock(&mx_concent);
-                                            cad_wait_ms = cad_delays_ms[cad_retry];
+                                            cad_wait_ms = cad_wait;
                                             cad_retry++;
                                         } else {
                                             /* Max retries exhausted — force TX, inhibit stays ON */

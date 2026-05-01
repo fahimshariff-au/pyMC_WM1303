@@ -10,6 +10,70 @@ from .mqtt_handler import MeshCoreToMqttPusher
 from .rrdtool_handler import RRDToolHandler
 from .sqlite_handler import SQLiteHandler
 from .storage_utils import PacketRecord
+import threading
+import sqlite3
+from contextlib import contextmanager as _contextmanager
+
+@_contextmanager
+class _SharedConn:
+    """Module-level shared SQLite connection with thread-safe access."""
+
+    def __init__(self, path):
+        self._path = str(path)
+        self._conn = None
+        self._lock = threading.RLock()
+
+    def _ensure_conn(self):
+        if self._conn is None:
+            self._conn = sqlite3.connect(
+                self._path, timeout=10, check_same_thread=False,
+            )
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA cache_size=-512")
+            self._conn.execute("PRAGMA mmap_size=0")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+        return self._conn
+
+    def __enter__(self):
+        self._lock.acquire()
+        return self._ensure_conn()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if self._conn:
+                if exc_type is None:
+                    self._conn.commit()
+                else:
+                    self._conn.rollback()
+        finally:
+            self._lock.release()
+        return False
+
+
+# Module-level shared connection registry (Python 3.13 compatible)
+_shared_conn_instances = {}  # path -> _SharedConn
+_shared_conn_lock = threading.Lock()
+
+
+def _get_shared_conn(path):
+    """Get or create a shared connection for the given DB path."""
+    key = str(path)
+    if key not in _shared_conn_instances:
+        with _shared_conn_lock:
+            if key not in _shared_conn_instances:
+                _shared_conn_instances[key] = _SharedConn(path)
+    return _shared_conn_instances[key]
+
+
+@_contextmanager
+def _db_conn(path, timeout=5):
+    """Thread-safe access to a shared persistent SQLite connection."""
+    shared = _get_shared_conn(path)
+    with shared as conn:
+        yield conn
+
 
 logger = logging.getLogger("StorageCollector")
 
@@ -386,9 +450,9 @@ class StorageCollector:
             Node name if found, None otherwise
         """
         try:
-            import sqlite3
 
-            with sqlite3.connect(self.sqlite_handler.sqlite_path) as conn:
+
+            with _db_conn(self.sqlite_handler.sqlite_path) as conn:
                 result = conn.execute(
                     "SELECT node_name FROM adverts WHERE pubkey = ? AND node_name IS NOT NULL ORDER BY last_seen DESC LIMIT 1",
                     (pubkey,),

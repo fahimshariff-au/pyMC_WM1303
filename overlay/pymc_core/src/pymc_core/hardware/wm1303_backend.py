@@ -26,6 +26,76 @@ import threading
 import time
 import hashlib
 import sqlite3
+
+from contextlib import contextmanager as _contextmanager
+
+@_contextmanager
+class _SharedConn:
+    """Module-level shared SQLite connection with thread-safe access.
+
+    Instead of creating/closing a connection on every DB call (which causes FD
+    churn and memory overhead), we maintain a single persistent connection per
+    database path.  Thread safety is ensured via RLock + WAL mode + busy_timeout.
+    """
+
+    def __init__(self, path):
+        self._path = str(path)
+        self._conn = None
+        self._lock = threading.RLock()
+
+    def _ensure_conn(self):
+        if self._conn is None:
+            self._conn = sqlite3.connect(
+                self._path,
+                timeout=10,
+                check_same_thread=False,
+            )
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA cache_size=-512")
+            self._conn.execute("PRAGMA mmap_size=0")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+        return self._conn
+
+    def __enter__(self):
+        self._lock.acquire()
+        return self._ensure_conn()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if self._conn:
+                if exc_type is None:
+                    self._conn.commit()
+                else:
+                    self._conn.rollback()
+        finally:
+            self._lock.release()
+        return False
+
+
+# Module-level shared connection registry (Python 3.13 compatible)
+_shared_conn_instances = {}  # path -> _SharedConn
+_shared_conn_lock = threading.Lock()
+
+
+def _get_shared_conn(path):
+    """Get or create a shared connection for the given DB path."""
+    key = str(path)
+    if key not in _shared_conn_instances:
+        with _shared_conn_lock:
+            if key not in _shared_conn_instances:
+                _shared_conn_instances[key] = _SharedConn(path)
+    return _shared_conn_instances[key]
+
+
+@_contextmanager
+def _db_conn(path, timeout=5):
+    """Thread-safe access to a shared persistent SQLite connection."""
+    shared = _get_shared_conn(path)
+    with shared as conn:
+        yield conn
+
 import math
 from pathlib import Path
 from typing import Any
@@ -1399,7 +1469,7 @@ class WM1303Backend:
             if not os.path.exists(db_path):
                 return {}
             since_ts = time.time() - max_age
-            with sqlite3.connect(db_path) as conn:
+            with _db_conn(db_path) as conn:
                 rows = conn.execute(
                     'SELECT freq_mhz, AVG(rssi_dbm) '
                     'FROM spectrum_scans WHERE timestamp > ? '
@@ -1656,7 +1726,7 @@ class WM1303Backend:
             with self._nf_lock:
                 db_ch_id = self._ui_name_to_ch_id.get(ch_name, ch_name)
             try:
-                with sqlite3.connect(_DB_PATH) as conn:
+                with _db_conn(_DB_PATH) as conn:
                     conn.execute(
                         """INSERT INTO noise_floor_history
                         (timestamp, channel_id, noise_floor_dbm,
@@ -1718,7 +1788,7 @@ class WM1303Backend:
                 continue
             lbt_min = queue.stats.get('noise_floor_lbt_min')
             try:
-                with sqlite3.connect(_DB_PATH) as conn:
+                with _db_conn(_DB_PATH) as conn:
                     conn.execute(
                         """INSERT INTO noise_floor_history
                         (timestamp, channel_id, noise_floor_dbm,
@@ -1790,7 +1860,7 @@ class WM1303Backend:
 
                 # Write to noise_floor_history DB (use position-based channel_id directly)
                 try:
-                    with sqlite3.connect(_DB_PATH) as conn:
+                    with _db_conn(_DB_PATH) as conn:
                         conn.execute(
                             """INSERT INTO noise_floor_history
                             (timestamp, channel_id, noise_floor_dbm,
@@ -1943,7 +2013,7 @@ class WM1303Backend:
         """Store a CAD event in the database (fire-and-forget)."""
         try:
             _DB_PATH = '/var/lib/pymc_repeater/repeater.db'
-            with sqlite3.connect(_DB_PATH) as conn:
+            with _db_conn(_DB_PATH) as conn:
                 conn.execute(
                     "INSERT INTO cad_events (timestamp, channel_id, result, rssi_at_time, context) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -2360,7 +2430,7 @@ class WM1303Backend:
         """
         try:
             _db = '/var/lib/pymc_repeater/repeater.db'
-            with sqlite3.connect(_db, timeout=2.0) as conn:
+            with _db_conn(_db, timeout=2.0) as conn:
                 conn.execute(
                     "INSERT INTO sx1261_health_events "
                     "(timestamp, event_type, freq_hz, rssi_dbm, threshold_dbm, sf, duration_ms, details) "
@@ -3919,7 +3989,7 @@ class WM1303Backend:
     def _init_channel_stats_db(self) -> None:
         """Create channel_stats_history table if it doesn't exist."""
         try:
-            with sqlite3.connect(_DB_PATH) as conn:
+            with _db_conn(_DB_PATH) as conn:
                 conn.execute("""CREATE TABLE IF NOT EXISTS channel_stats_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp REAL NOT NULL,
@@ -3952,7 +4022,7 @@ class WM1303Backend:
 
         # Create noise_floor_history table for per-channel noise floor tracking
         try:
-            with sqlite3.connect(_DB_PATH) as conn:
+            with _db_conn(_DB_PATH) as conn:
                 conn.execute("""CREATE TABLE IF NOT EXISTS noise_floor_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp REAL NOT NULL,
@@ -4000,7 +4070,7 @@ class WM1303Backend:
                     if nf_val is not None:
                         _nf_by_ch_id[_cid] = nf_val
 
-            with sqlite3.connect(_DB_PATH) as conn:
+            with _db_conn(_DB_PATH) as conn:
                 # Load LBT thresholds from UI config as fallback
                 _lbt_thresholds = {}
                 try:
@@ -4079,7 +4149,7 @@ class WM1303Backend:
                 # Cleanup moved to metrics_retention.py
                 # cutoff = time.time() - (7 * 86400)
                 # try:
-                #     with sqlite3.connect(_DB_PATH) as conn:
+                #     with _db_conn(_DB_PATH) as conn:
                 #         conn.execute(
                 #             "DELETE FROM channel_stats_history WHERE timestamp < ?",
                 #             (cutoff,))

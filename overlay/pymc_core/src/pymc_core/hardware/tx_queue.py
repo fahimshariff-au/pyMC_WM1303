@@ -669,33 +669,6 @@ class GlobalTXScheduler:
                           channel_id, result.get('error', _tx_result or 'unknown'),
                           send_ms, queue_wait_ms, _retry_count)
 
-        # --- HAL LBT stats update (from post-TX TX_ACK) ---
-        # The backend's _send_pull_resp merges post-TX ACK fields into `result`.
-        # Here we translate them into per-channel queue stats so that the
-        # existing UI / metrics DB / debug_collector keep receiving numbers.
-        try:
-            if isinstance(result, dict):
-                _lbt_enabled = bool(result.get('lbt_enabled', False))
-                _lbt_pass = result.get('lbt_pass', None)
-                _lbt_rssi = result.get('lbt_rssi_dbm', None)
-                _lbt_thr = result.get('lbt_threshold_dbm', None)
-                if _lbt_enabled:
-                    if _lbt_pass is True:
-                        queue.stats['lbt_passed'] = queue.stats.get('lbt_passed', 0) + 1
-                    elif _lbt_pass is False:
-                        queue.stats['lbt_blocked'] = queue.stats.get('lbt_blocked', 0) + 1
-                        queue.stats['lbt_last_blocked_at'] = time.time()
-                else:
-                    queue.stats['lbt_skipped'] = queue.stats.get('lbt_skipped', 0) + 1
-                if _lbt_thr is not None:
-                    queue.stats['lbt_last_threshold'] = _lbt_thr
-                # lbt_rssi_dbm is a sentinel (-127) until HAL exposes it;
-                # only record if it looks like a real measurement.
-                if _lbt_rssi is not None and _lbt_rssi > -127:
-                    queue.record_lbt_rssi(_lbt_rssi)
-        except Exception as _lbt_stat_err:
-            logger.debug("GlobalTXScheduler: HAL LBT stats update error: %s", _lbt_stat_err)
-
         # --- TX noisefloor stats update (from post-TX TX_ACK CAD section) ---
         try:
             if isinstance(result, dict):
