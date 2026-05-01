@@ -71,4 +71,4 @@ Major upstream synchronization bringing 18 commits from pyMC_core and ~140 commi
 
 ### Tested On
 
-- **pi03** (192.168.101.80) — Full pipeline verified: service active, MQTT connected (Europe + US West), Channel E RX/TX, Bridge forwarding, database storage with RSSI/SNR/path hashes, WM1303 API HTTP 200
+- **Test unit** — Full pipeline verified: service active, MQTT connected (Europe + US West), Channel E RX/TX, Bridge forwarding, database storage with RSSI/SNR/path hashes, WM1303 API HTTP 200

@@ -2,7 +2,10 @@ const puppeteer = require('puppeteer-core');
 const path = require('path');
 
 const OUT = path.join(process.cwd(), 'screenshots');
-const URL = 'http://192.168.101.80:8000/wm1303.html';
+// Set TEST_UNIT_HOST env var to the hostname or IP of your test unit,
+// e.g. `TEST_UNIT_HOST=my-pi.local node capture_clean_screenshots.js`.
+const HOST = process.env.TEST_UNIT_HOST || 'TEST_UNIT_HOST';
+const URL = `http://${HOST}:8000/wm1303.html`;
 
 const shots = [
   { name: 'status', selector: 'button, a, [role="tab"]', text: 'Status', wait: 2500 },

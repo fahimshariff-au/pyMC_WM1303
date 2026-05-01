@@ -2586,7 +2586,7 @@ int main(int argc, char ** argv)
 /* restart / L2b semi-dead detection) were removed after empirical            */
 /* investigation (2026-04-22) proved the root cause to be the custom post-TX  */
 /* AGC reload block in loragw_hal.c.  Removing that block eliminated the      */
-/* "snap" events entirely, and 24h+ of stable operation on pi03 without      */
+/* "snap" events entirely, and 24h+ of stable operation on a test unit       */
 /* monitoring confirmed no residual issues.                                   */
 /*                                                                            */
 /* If problems reappear in the future, the monitoring code can be restored    */

@@ -340,7 +340,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
     # --- HAL-level LBT: DYNAMICALLY GENERATED from UI config ---
     # HAL LBT (AGC-based sx1261_lbt_start) is the PRIMARY LBT mechanism.
     # Per-channel enable/disable and threshold come from wm1303_ui.json.
-    # AGC handshake verified working on WM1303 (test on pi03, 2026-04-25).
+    # AGC handshake verified working on WM1303 (tested on a test unit).
     #
     # IMPORTANT: When HAL LBT is enabled (lbt.enable=true), the HAL runs LBT
     # on EVERY TX. Any TX frequency NOT listed in lbt.channels[] is rejected

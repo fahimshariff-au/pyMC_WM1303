@@ -3,7 +3,8 @@
 **Release date:** 2026-05-01
 
 This release dramatically reduces long-running memory usage and integrates the
-latest upstream changes from pyMC_core and pyMC_Repeater.  On pi03 (4 GB Pi)
+latest upstream changes from pyMC_core and pyMC_Repeater.  On the reference
+test unit (4 GB Pi)
 the `pymc-repeater` process now stabilizes at **~85 MB RSS** after 30+ minutes
 of uptime — a **~60% reduction** versus v2.4.5 and fully suitable for 512 MB
 devices.
@@ -129,7 +130,7 @@ PATH, ACK, etc.).
 
 ---
 
-## 📊 Measured impact (pi03, 4 GB Pi, 33 min uptime)
+## 📊 Measured impact (test unit, 4 GB Pi, 33 min uptime)
 
 | Metric | v2.4.5 (trending) | v2.4.6 |
 |---|---|---|
@@ -171,7 +172,7 @@ PATH, ACK, etc.).
 
 ## 🧪 Verified on
 
-- **pi03** (reference): clean bootstrap install, 33 min stability test, all
+- **Reference test unit**: clean bootstrap install, 33 min stability test, all
   services active, UI functional, memory stable.
 
 ## 📝 Upgrade path

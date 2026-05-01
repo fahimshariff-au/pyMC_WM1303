@@ -63,7 +63,7 @@ Source/destination extraction rules (matching engine.py behavior):
 
 ## Verification
 
-Confirmed on test device (pi02):
+Confirmed on test unit:
 - RSSI values: -71 to -78 dBm (previously always -120)
 - SNR values: 4.5 to 11.0 dB (previously always 0.0)
 - Path hashes: `[12, 7B, 43, 07, 7C]` (previously `????`)
