@@ -3831,19 +3831,26 @@ class WM1303API:
             logger.error("_channel_e_post: %s", ex)
             return _j({"status": "error", "reason": str(ex)})
 
-# --- Background packet activity recorder (every 60s) ---
+# --- Background unified 60s recorder (packet_activity + cad + origin + crc) ---
+# Memory optimization (v2.4.6): Previously two separate daemon threads ran
+# identical 60s loops for packet_activity and crc_error_rate recording. They
+# have been merged into a single unified thread to reduce thread count and
+# SQLite connection overhead. All DB access now uses _db_conn() which
+# properly closes connections (preventing the connection leak that was
+# present in the old raw sqlite3.connect() pattern).
 _pkt_act_last_counts = {}  # {channel_id: {"rx": N, "tx": N}} cumulative from previous interval
 _cad_last_counts = {}  # {channel_id: {"cad_clear": N, ...}}
+import threading as _thr_pkt
 
-def _packet_activity_recorder():
-    """Periodically record per-channel RX/TX deltas to packet_activity table.
-    Reads live stats from the WM1303 backend via _get_backend().get_channel_stats()."""
-    import sqlite3 as _sq3r
-    global _pkt_act_last_counts, _cad_last_counts
+
+def _init_unified_recorder_tables():
+    """Create all tables used by the unified 60s recorder (idempotent)."""
     _db = "/var/lib/pymc_repeater/repeater.db"
-    # Ensure table exists on first run
     try:
-        with _sq3r.connect(_db) as conn:
+        with _db_conn(_db) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            # packet_activity table
             conn.execute("""CREATE TABLE IF NOT EXISTS packet_activity (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -3851,6 +3858,7 @@ def _packet_activity_recorder():
                 rx_count INTEGER DEFAULT 0,
                 tx_count INTEGER DEFAULT 0)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_pktact_ts ON packet_activity(timestamp)")
+            # cad_events table (HW/SW split)
             conn.execute("""CREATE TABLE IF NOT EXISTS cad_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -3863,13 +3871,12 @@ def _packet_activity_recorder():
                 cad_sw_clear INTEGER DEFAULT 0,
                 cad_sw_detected INTEGER DEFAULT 0)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_cadevt_ts ON cad_events(timestamp)")
-            # Add hw/sw columns to existing tables (idempotent)
             for _col in ('cad_hw_clear', 'cad_hw_detected', 'cad_sw_clear', 'cad_sw_detected'):
                 try:
                     conn.execute(f"ALTER TABLE cad_events ADD COLUMN {_col} INTEGER DEFAULT 0")
                 except Exception:
-                    pass  # Column already exists
-            # Origin channel stats table (tracks which channels source packets for the repeater)
+                    pass  # column already exists
+            # origin_channel_stats table
             conn.execute("""CREATE TABLE IF NOT EXISTS origin_channel_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -3877,144 +3884,7 @@ def _packet_activity_recorder():
                 count INTEGER DEFAULT 0)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_origin_ch_ts ON origin_channel_stats(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_origin_ch_id ON origin_channel_stats(channel_id)")
-            conn.commit()
-    except Exception as _init_e:
-        logger.debug("packet_activity_recorder init: %s", _init_e)
-    while True:
-        try:
-            time.sleep(60)
-            # Get live per-channel stats from the backend
-            _bk = _get_backend()
-            if not _bk:
-                continue
-            try:
-                ch_stats = _bk.get_channel_stats()
-            except Exception:
-                continue
-            if not ch_stats:
-                continue
-            now = time.time()
-            inserts = []
-            for ch_id, stats in ch_stats.items():
-                cur_rx = stats.get("rx_count", 0) or 0
-                cur_tx = stats.get("tx_count", 0) or 0
-                prev = _pkt_act_last_counts.get(ch_id)
-                if prev is not None:
-                    # Compute delta since last interval
-                    delta_rx = max(0, cur_rx - prev["rx"])
-                    delta_tx = max(0, cur_tx - prev["tx"])
-                    # Only insert if there was any activity
-                    if delta_rx > 0 or delta_tx > 0:
-                        inserts.append((now, ch_id, delta_rx, delta_tx))
-                    else:
-                        # Insert zero row to keep timeline continuous
-                        inserts.append((now, ch_id, 0, 0))
-                else:
-                    # First reading for this channel - insert zeros, establish baseline
-                    inserts.append((now, ch_id, 0, 0))
-                # Update last counts
-                _pkt_act_last_counts[ch_id] = {"rx": cur_rx, "tx": cur_tx}
-            # Write to DB
-            if inserts:
-                with _sq3r.connect(_db) as conn:
-                    conn.executemany(
-                        "INSERT INTO packet_activity (timestamp, channel_id, rx_count, tx_count) VALUES (?,?,?,?)",
-                        inserts
-                    )
-                    conn.commit()
-            # --- CAD delta tracking ---
-            try:
-                cad_inserts = []
-                if _bk and hasattr(_bk, '_tx_queue_manager') and _bk._tx_queue_manager:
-                    for ch_id, q in _bk._tx_queue_manager.queues.items():
-                        cur_clear = q.stats.get("cad_clear", 0) or 0
-                        cur_det = q.stats.get("cad_detected", 0) or 0
-                        # Fix (Bug 1 / HW CAD counters): read HW/SW-specific
-                        # counters from queue.stats so cad_events persists them
-                        # accurately. Prior code double-counted all CAD as HW.
-                        cur_hw_clear = q.stats.get("cad_hw_clear", 0) or 0
-                        cur_hw_det = q.stats.get("cad_hw_detected", 0) or 0
-                        cur_sw_clear = q.stats.get("cad_sw_clear", 0) or 0
-                        cur_sw_det = q.stats.get("cad_sw_detected", 0) or 0
-                        prev_cad = _cad_last_counts.get(ch_id)
-                        if prev_cad is not None:
-                            d_clear = max(0, cur_clear - prev_cad.get("cad_clear", 0))
-                            d_det = max(0, cur_det - prev_cad.get("cad_detected", 0))
-                            d_hw_clear = max(0, cur_hw_clear - prev_cad.get("cad_hw_clear", 0))
-                            d_hw_det = max(0, cur_hw_det - prev_cad.get("cad_hw_detected", 0))
-                            d_sw_clear = max(0, cur_sw_clear - prev_cad.get("cad_sw_clear", 0))
-                            d_sw_det = max(0, cur_sw_det - prev_cad.get("cad_sw_detected", 0))
-                            cad_inserts.append((now, ch_id, d_clear, d_det, 0,
-                                                d_hw_clear, d_hw_det,
-                                                d_sw_clear, d_sw_det))
-                        else:
-                            cad_inserts.append((now, ch_id, 0, 0, 0, 0, 0, 0, 0))
-                        _cad_last_counts[ch_id] = {
-                            "cad_clear": cur_clear,
-                            "cad_detected": cur_det,
-                            "cad_hw_clear": cur_hw_clear,
-                            "cad_hw_detected": cur_hw_det,
-                            "cad_sw_clear": cur_sw_clear,
-                            "cad_sw_detected": cur_sw_det,
-                        }
-                if cad_inserts:
-                    with _sq3r.connect(_db) as conn:
-                        conn.executemany(
-                            "INSERT INTO cad_events (timestamp, channel_id, cad_clear, cad_detected, cad_skipped, cad_hw_clear, cad_hw_detected, cad_sw_clear, cad_sw_detected) VALUES (?,?,?,?,?,?,?,?,?)",
-                            cad_inserts
-                        )
-                        conn.commit()
-            except Exception as _cad_e:
-                logger.debug("cad_events recorder: %s", _cad_e)
-            # --- Origin channel stats recording ---
-            try:
-                from repeater.bridge_engine import _active_bridge
-                if _active_bridge:
-                    origin_counts = _active_bridge.get_and_reset_origin_counts()
-                    if origin_counts:
-                        origin_inserts = [(now, ch_id, cnt) for ch_id, cnt in origin_counts.items() if cnt > 0]
-                        if origin_inserts:
-                            with _sq3r.connect(_db) as conn:
-                                conn.executemany(
-                                    "INSERT INTO origin_channel_stats (timestamp, channel_id, count) VALUES (?,?,?)",
-                                    origin_inserts
-                                )
-                                conn.commit()
-            except Exception as _origin_e:
-                logger.debug("origin_channel_stats recorder: %s", _origin_e)
-            # Cleanup moved to metrics_retention.py
-            # cutoff = now - 8 * 86400
-            # with _sq3r.connect(_db) as conn:
-            #     conn.execute("DELETE FROM packet_activity WHERE timestamp < ?", (cutoff,))
-            #     conn.execute("DELETE FROM dedup_events WHERE ts < ?", (cutoff,))
-            #     conn.execute("DELETE FROM noise_floor WHERE timestamp < ?", (cutoff,))
-            #     conn.execute("DELETE FROM noise_floor_history WHERE timestamp < ?", (cutoff,))
-            #     conn.execute("DELETE FROM cad_events WHERE timestamp < ?", (cutoff,))
-            #     conn.execute("DELETE FROM origin_channel_stats WHERE timestamp < ?", (cutoff,))
-            #     conn.commit()
-        except Exception as _e:
-            logger.debug("packet_activity_recorder: %s", _e)
-            try:
-                time.sleep(60)
-            except Exception:
-                break
-
-
-import threading as _thr_pkt
-_pkt_rec_thread = _thr_pkt.Thread(target=_packet_activity_recorder, daemon=True)
-_pkt_rec_thread.start()
-
-
-def _crc_error_rate_recorder():
-    """Periodically record per-channel CRC error/disabled counts to crc_error_rate table.
-    Reads live counters from WM1303 backend via get_and_reset_crc_rate_counters()."""
-    import sqlite3 as _sq3c
-    _db = "/var/lib/pymc_repeater/repeater.db"
-    # Ensure table exists on first run
-    try:
-        with _sq3c.connect(_db, timeout=10) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
+            # crc_error_rate table
             conn.execute("""CREATE TABLE IF NOT EXISTS crc_error_rate (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -4023,45 +3893,160 @@ def _crc_error_rate_recorder():
                 crc_disabled_count INTEGER NOT NULL DEFAULT 0)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_crcrate_ts ON crc_error_rate(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_crcrate_ch_ts ON crc_error_rate(channel_id, timestamp)")
-            conn.commit()
     except Exception as _init_e:
-        logger.debug("crc_error_rate_recorder init: %s", _init_e)
+        logger.debug("unified_recorder_tables init: %s", _init_e)
+
+
+def _record_packet_activity_once(now):
+    """Record one 60s sample of per-channel RX/TX + CAD + origin stats."""
+    global _pkt_act_last_counts, _cad_last_counts
+    _db = "/var/lib/pymc_repeater/repeater.db"
+    _bk = _get_backend()
+    if not _bk:
+        return
+    try:
+        ch_stats = _bk.get_channel_stats()
+    except Exception:
+        return
+    if not ch_stats:
+        return
+    # Packet activity deltas
+    inserts = []
+    for ch_id, stats in ch_stats.items():
+        cur_rx = stats.get("rx_count", 0) or 0
+        cur_tx = stats.get("tx_count", 0) or 0
+        prev = _pkt_act_last_counts.get(ch_id)
+        if prev is not None:
+            delta_rx = max(0, cur_rx - prev["rx"])
+            delta_tx = max(0, cur_tx - prev["tx"])
+            if delta_rx > 0 or delta_tx > 0:
+                inserts.append((now, ch_id, delta_rx, delta_tx))
+            else:
+                inserts.append((now, ch_id, 0, 0))  # keep timeline continuous
+        else:
+            inserts.append((now, ch_id, 0, 0))  # baseline
+        _pkt_act_last_counts[ch_id] = {"rx": cur_rx, "tx": cur_tx}
+    # CAD deltas
+    cad_inserts = []
+    try:
+        if hasattr(_bk, '_tx_queue_manager') and _bk._tx_queue_manager:
+            for ch_id, q in _bk._tx_queue_manager.queues.items():
+                cur_clear = q.stats.get("cad_clear", 0) or 0
+                cur_det = q.stats.get("cad_detected", 0) or 0
+                cur_hw_clear = q.stats.get("cad_hw_clear", 0) or 0
+                cur_hw_det = q.stats.get("cad_hw_detected", 0) or 0
+                cur_sw_clear = q.stats.get("cad_sw_clear", 0) or 0
+                cur_sw_det = q.stats.get("cad_sw_detected", 0) or 0
+                prev_cad = _cad_last_counts.get(ch_id)
+                if prev_cad is not None:
+                    d_clear = max(0, cur_clear - prev_cad.get("cad_clear", 0))
+                    d_det = max(0, cur_det - prev_cad.get("cad_detected", 0))
+                    d_hw_clear = max(0, cur_hw_clear - prev_cad.get("cad_hw_clear", 0))
+                    d_hw_det = max(0, cur_hw_det - prev_cad.get("cad_hw_detected", 0))
+                    d_sw_clear = max(0, cur_sw_clear - prev_cad.get("cad_sw_clear", 0))
+                    d_sw_det = max(0, cur_sw_det - prev_cad.get("cad_sw_detected", 0))
+                    cad_inserts.append((now, ch_id, d_clear, d_det, 0,
+                                        d_hw_clear, d_hw_det,
+                                        d_sw_clear, d_sw_det))
+                else:
+                    cad_inserts.append((now, ch_id, 0, 0, 0, 0, 0, 0, 0))
+                _cad_last_counts[ch_id] = {
+                    "cad_clear": cur_clear,
+                    "cad_detected": cur_det,
+                    "cad_hw_clear": cur_hw_clear,
+                    "cad_hw_detected": cur_hw_det,
+                    "cad_sw_clear": cur_sw_clear,
+                    "cad_sw_detected": cur_sw_det,
+                }
+    except Exception as _cad_e:
+        logger.debug("unified_recorder CAD: %s", _cad_e)
+    # Origin channel stats
+    origin_inserts = []
+    try:
+        from repeater.bridge_engine import _active_bridge
+        if _active_bridge:
+            origin_counts = _active_bridge.get_and_reset_origin_counts()
+            if origin_counts:
+                origin_inserts = [(now, ch_id, cnt) for ch_id, cnt in origin_counts.items() if cnt > 0]
+    except Exception as _origin_e:
+        logger.debug("unified_recorder origin: %s", _origin_e)
+    # Single DB write for all packet_activity tables
+    try:
+        with _db_conn(_db) as conn:
+            if inserts:
+                conn.executemany(
+                    "INSERT INTO packet_activity (timestamp, channel_id, rx_count, tx_count) VALUES (?,?,?,?)",
+                    inserts)
+            if cad_inserts:
+                conn.executemany(
+                    "INSERT INTO cad_events (timestamp, channel_id, cad_clear, cad_detected, cad_skipped, cad_hw_clear, cad_hw_detected, cad_sw_clear, cad_sw_detected) VALUES (?,?,?,?,?,?,?,?,?)",
+                    cad_inserts)
+            if origin_inserts:
+                conn.executemany(
+                    "INSERT INTO origin_channel_stats (timestamp, channel_id, count) VALUES (?,?,?)",
+                    origin_inserts)
+    except Exception as _wr_e:
+        logger.debug("unified_recorder write packet_activity: %s", _wr_e)
+
+
+def _record_crc_error_rate_once(now):
+    """Record one 60s sample of per-channel CRC error/disabled counts."""
+    _db = "/var/lib/pymc_repeater/repeater.db"
+    _bk = _get_backend()
+    if not _bk:
+        return
+    try:
+        counters = _bk.get_and_reset_crc_rate_counters()
+    except Exception:
+        return
+    if not counters:
+        return
+    inserts = []
+    for ch_id, counts in counters.items():
+        crc_err = counts.get("crc_error", 0)
+        crc_dis = counts.get("crc_disabled", 0)
+        inserts.append((now, ch_id, crc_err, crc_dis))
+    if not inserts:
+        return
+    try:
+        with _db_conn(_db) as conn:
+            conn.executemany(
+                "INSERT INTO crc_error_rate (timestamp, channel_id, crc_error_count, crc_disabled_count) VALUES (?,?,?,?)",
+                inserts)
+    except Exception as _wr_e:
+        logger.debug("unified_recorder write crc: %s", _wr_e)
+
+
+def _unified_60s_recorder():
+    """Single background thread that runs all 60s periodic recorders.
+    Replaces _packet_activity_recorder and _crc_error_rate_recorder threads."""
+    # Init tables once at startup
+    _init_unified_recorder_tables()
     while True:
         try:
             time.sleep(60)
-            _bk = _get_backend()
-            if not _bk:
-                continue
-            try:
-                counters = _bk.get_and_reset_crc_rate_counters()
-            except Exception:
-                continue
-            if not counters:
-                continue
             now = time.time()
-            inserts = []
-            for ch_id, counts in counters.items():
-                crc_err = counts.get("crc_error", 0)
-                crc_dis = counts.get("crc_disabled", 0)
-                inserts.append((now, ch_id, crc_err, crc_dis))
-            if inserts:
-                with _sq3c.connect(_db, timeout=10) as conn:
-                    conn.execute("PRAGMA busy_timeout=5000")
-                    conn.executemany(
-                        "INSERT INTO crc_error_rate (timestamp, channel_id, crc_error_count, crc_disabled_count) VALUES (?,?,?,?)",
-                        inserts
-                    )
-                    conn.commit()
+            # Each sub-recorder has its own try/except so a failure in one
+            # does not affect the others.
+            try:
+                _record_packet_activity_once(now)
+            except Exception as _e1:
+                logger.debug("unified_recorder: packet_activity failed: %s", _e1)
+            try:
+                _record_crc_error_rate_once(now)
+            except Exception as _e2:
+                logger.debug("unified_recorder: crc_error_rate failed: %s", _e2)
         except Exception as _e:
-            logger.debug("crc_error_rate_recorder: %s", _e)
+            logger.debug("unified_recorder loop: %s", _e)
             try:
                 time.sleep(60)
             except Exception:
                 break
 
 
-_crc_rec_thread = _thr_pkt.Thread(target=_crc_error_rate_recorder, daemon=True)
-_crc_rec_thread.start()
+_unified_rec_thread = _thr_pkt.Thread(target=_unified_60s_recorder,
+                                      daemon=True, name="unified-60s-recorder")
+_unified_rec_thread.start()
 
 
 # Auto-start spectrum collector

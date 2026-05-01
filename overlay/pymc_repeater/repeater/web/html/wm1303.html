@@ -4068,6 +4068,15 @@ function renderPmCrcChart(channels) {
 <!-- TRACING TAB -->
 <div id="tab-tracing" class="tp">
   <div class="gl p-5 mb-4">
+    <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+      <div class="stl mb-0">Packet Duration Timeline</div>
+    </div>
+    <div id="traceDurationNoData" style="display:none;text-align:center;padding:20px 0;color:var(--txm);font-size:12px">
+      No traces with duration between 250 ms and 10 s to display
+    </div>
+    <div style="position:relative;height:260px"><canvas id="traceDurationChart"></canvas></div>
+  </div>
+  <div class="gl p-5 mb-4">
     <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
       <div class="stl mb-0">Packet Tracing</div>
       <div class="flex items-center gap-2 flex-wrap">
@@ -4122,6 +4131,7 @@ function renderPmCrcChart(channels) {
   var _traceTimer = null;
   var _traceActive = false;
   var _traceData = [];
+  var _traceDurChart = null;
   var _expandedTraces = new Set();  // preserve expanded state across refreshes
   window.traceLoad = function() {
     var status = document.getElementById('traceFilterStatus').value;
@@ -4134,6 +4144,7 @@ function renderPmCrcChart(channels) {
       if (data.error) { console.error('Trace API error:', data.error); return; }
       _traceData = data.traces || [];
       _renderTraces(_traceData);
+      _renderTraceDurationChart(_traceData);
     }).catch(function(e){ console.error('Trace fetch error:', e); });
   };
   window.traceToggleAuto = function() {
@@ -4483,6 +4494,139 @@ function renderPmCrcChart(channels) {
     return { delta: defaultDelta, tooltip: tooltip };
   }
   function _renderTraces(traces) {
+    // placeholder — real function below
+    return __renderTraces_real(traces);
+  }
+
+  // Color palette per packet type (consistent with table)
+  var _TRACE_TYPE_COLORS = {
+    'ADVERT':   '#3b82f6', // blue
+    'REQ':      '#8b5cf6', // violet
+    'RESP':     '#10b981', // green
+    'TXT':      '#f59e0b', // amber
+    'PATH':     '#f97316', // orange
+    'ACK':      '#06b6d4', // cyan
+    'GRP_TXT':  '#ec4899', // pink
+    'GRP_DATA': '#d946ef', // fuchsia
+    'TRACE':    '#14b8a6', // teal
+    'ANON_REQ': '#a855f7'  // purple
+  };
+  function _traceTypeColor(type) {
+    if (!type) return '#9ca3af';
+    var up = String(type).toUpperCase();
+    return _TRACE_TYPE_COLORS[up] || '#9ca3af';
+  }
+
+  function _renderTraceDurationChart(traces) {
+    var canvas = document.getElementById('traceDurationChart');
+    var nodata = document.getElementById('traceDurationNoData');
+    if (!canvas) return;
+    // Filter: keep only traces with total_ms >= 250 ms and a valid timestamp
+    var filtered = (traces || []).filter(function(t){
+      return t && typeof t.total_ms === 'number' && t.total_ms >= 250 && t.total_ms <= 10000 && t.first_seen;
+    });
+    if (filtered.length === 0) {
+      if (_traceDurChart) { try { _traceDurChart.destroy(); } catch(e){} _traceDurChart = null; }
+      canvas.style.display = 'none';
+      if (nodata) nodata.style.display = 'block';
+      return;
+    }
+    if (nodata) nodata.style.display = 'none';
+    canvas.style.display = 'block';
+    // Group by type
+    var byType = {};
+    filtered.forEach(function(t){
+      var tp = (t.type || 'unknown').toUpperCase();
+      if (!byType[tp]) byType[tp] = [];
+      var ts = t.first_seen;
+      // Accept ISO string or epoch seconds/ms
+      var x;
+      if (typeof ts === 'number') {
+        x = ts > 1e12 ? ts : ts * 1000;
+      } else {
+        x = new Date(ts).getTime();
+      }
+      if (!isNaN(x)) {
+        byType[tp].push({ x: x, y: Number(t.total_ms.toFixed(1)), hash: t.pkt_hash, channel: t.channel });
+      }
+    });
+    // Build datasets
+    var datasets = Object.keys(byType).sort().map(function(tp){
+      var color = _traceTypeColor(tp);
+      // Sort points by x within each series
+      var pts = byType[tp].sort(function(a,b){ return a.x - b.x; });
+      return {
+        label: tp,
+        data: pts,
+        borderColor: color,
+        backgroundColor: color + '33',
+        pointBackgroundColor: color,
+        pointBorderColor: color,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        borderWidth: 2,
+        tension: 0.25,
+        fill: false,
+        showLine: true
+      };
+    });
+    var cfg = {
+      type: 'line',
+      data: { datasets: datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: { duration: 200 },
+        parsing: false,
+        interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+          legend: {
+            position: 'top',
+            align: 'end',
+            labels: { color: 'rgba(255,255,255,0.75)', font: {size: 11}, boxWidth: 12, padding: 10 }
+          },
+          tooltip: {
+            callbacks: {
+              title: function(items){
+                if (!items || !items.length) return '';
+                var d = new Date(items[0].parsed.x);
+                return d.toLocaleString();
+              },
+              label: function(item){
+                var p = item.raw || {};
+                var s = item.dataset.label + ': ' + item.parsed.y.toFixed(1) + ' ms';
+                if (p.hash) s += '  (' + String(p.hash).toUpperCase() + ')';
+                if (p.channel) s += '  [' + p.channel + ']';
+                return s;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            type: 'time',
+            time: { tooltipFormat: 'HH:mm:ss', displayFormats: { millisecond: 'HH:mm:ss', second: 'HH:mm:ss', minute: 'HH:mm', hour: 'HH:mm' } },
+            ticks: { color: 'rgba(255,255,255,0.55)', maxTicksLimit: 8, font: {size: 10} },
+            grid: { color: 'rgba(255,255,255,0.05)' }
+          },
+          y: {
+            beginAtZero: false,
+            suggestedMin: 250,
+            title: { display: true, text: 'Duration (ms)', color: 'rgba(255,255,255,0.55)', font: {size: 11} },
+            ticks: { color: 'rgba(255,255,255,0.55)', font: {size: 10} },
+            grid: { color: 'rgba(255,255,255,0.05)' }
+          }
+        }
+      }
+    };
+    if (_traceDurChart) {
+      _traceDurChart.data.datasets = datasets;
+      _traceDurChart.update('none');
+    } else {
+      _traceDurChart = new Chart(canvas.getContext('2d'), cfg);
+    }
+  }
+
+  function __renderTraces_real(traces) {
     var box = document.getElementById('traceList');
     var nodata = document.getElementById('traceNoData');
     if (!box) return;

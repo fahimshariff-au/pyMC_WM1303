@@ -15,7 +15,8 @@ from repeater.companion.identity_resolve import (
     find_companion_index,
     heal_companion_empty_names,
 )
-from repeater.config import update_global_flood_policy
+from repeater.config import update_unscoped_flood_policy
+from repeater.service_utils import get_buildroot_image_info
 
 from .auth.middleware import require_auth
 from .auth_endpoints import AuthAPIEndpoints
@@ -41,6 +42,8 @@ logger = logging.getLogger("HTTPServer")
 
 # System
 # GET    /api/stats - Get system statistics
+# GET    /api/gps - Get local GPS diagnostics and parsed NMEA attributes
+# GET    /api/gps_stream - GPS diagnostics SSE stream
 # GET    /api/logs - Get system logs
 # GET    /api/hardware_stats - Get hardware statistics
 # GET    /api/hardware_processes - Get process information
@@ -638,6 +641,12 @@ class APIEndpoints:
                 stats["core_version"] = pymc_core.__version__
             except ImportError:
                 stats["core_version"] = "unknown"
+            image_info = get_buildroot_image_info()
+            if image_info:
+                if image_info.get("image_name"):
+                    stats["image_name"] = image_info["image_name"]
+                if image_info.get("image_version"):
+                    stats["image_version"] = image_info["image_version"]
             return stats
         except Exception as e:
             logger.error(f"Error serving stats: {e}")
@@ -1188,6 +1197,134 @@ class APIEndpoints:
         except Exception as e:
             logger.error(f"Error in restart_service endpoint: {e}", exc_info=True)
             return self._error(e)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def gps(self):
+        """Get full local GPS diagnostics and parsed NMEA attributes."""
+        try:
+            gps_service = getattr(self.daemon_instance, "gps_service", None)
+            if gps_service:
+                return self._success(gps_service.get_snapshot())
+
+            return self._success(
+                {
+                    "enabled": False,
+                    "running": False,
+                    "source": self.config.get("gps", {}),
+                    "status": {
+                        "state": "disabled",
+                        "fix_valid": False,
+                        "stale": True,
+                        "age_seconds": None,
+                        "last_update": None,
+                        "last_error": "GPS service is not initialized",
+                    },
+                    "fix": {
+                        "valid": False,
+                        "status": None,
+                        "quality": None,
+                        "quality_label": "no fix",
+                        "gsa_fix_type": None,
+                        "gsa_fix_type_label": None,
+                    },
+                    "position": {
+                        "latitude": None,
+                        "longitude": None,
+                        "altitude_m": None,
+                        "geoid_separation_m": None,
+                    },
+                    "motion": {
+                        "speed_knots": None,
+                        "speed_kmh": None,
+                        "course_degrees": None,
+                        "magnetic_variation_degrees": None,
+                    },
+                    "accuracy": {"hdop": None, "pdop": None, "vdop": None},
+                    "time": {"utc_time": None, "date": None, "datetime_utc": None},
+                    "location_update": {
+                        "enabled": False,
+                        "state": "disabled",
+                        "last_attempt": None,
+                        "last_success": None,
+                        "last_error": None,
+                        "last_latitude": None,
+                        "last_longitude": None,
+                        "interval_seconds": None,
+                    },
+                    "satellites": {
+                        "used_count": None,
+                        "used_prns": [],
+                        "in_view_count": None,
+                        "in_view": [],
+                        "snr": {"min": None, "max": None, "avg": None},
+                    },
+                    "nmea": {
+                        "last_sentence": None,
+                        "last_sentence_type": None,
+                        "last_talker": None,
+                        "seen_sentence_types": [],
+                        "sentence_counters": {},
+                        "valid_checksum_count": 0,
+                        "invalid_checksum_count": 0,
+                        "missing_checksum_count": 0,
+                        "recent_sentences": [],
+                    },
+                    "raw_attributes": {},
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error serving GPS diagnostics: {e}", exc_info=True)
+            return self._error(e)
+
+    @cherrypy.expose
+    def gps_stream(self):
+        """Server-Sent Events stream for GPS diagnostics snapshots."""
+        cherrypy.response.headers["Content-Type"] = "text/event-stream"
+        cherrypy.response.headers["Cache-Control"] = "no-cache"
+        cherrypy.response.headers["Connection"] = "keep-alive"
+
+        def generate():
+            last_snapshot_json: Optional[str] = None
+            last_keepalive = time.time()
+
+            try:
+                yield (
+                    f"data: {json.dumps({'type': 'connected', 'message': 'Connected to GPS stream'})}"
+                    "\n\n"
+                )
+
+                while True:
+                    response = self.gps()
+                    if response.get("success"):
+                        snapshot = response.get("data")
+                        snapshot_json = json.dumps(snapshot, sort_keys=True, default=str)
+
+                        if snapshot_json != last_snapshot_json:
+                            yield (
+                                f"data: {json.dumps({'type': 'snapshot', 'data': snapshot})}"
+                                "\n\n"
+                            )
+                            last_snapshot_json = snapshot_json
+                            last_keepalive = time.time()
+                        elif (time.time() - last_keepalive) >= 15:
+                            yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                            last_keepalive = time.time()
+                    else:
+                        yield (
+                            f"data: {json.dumps({'type': 'error', 'error': response.get('error', 'GPS stream error')})}"
+                            "\n\n"
+                        )
+
+                    time.sleep(1.0)
+            except GeneratorExit:
+                logger.debug("GPS SSE stream closed by client")
+            except Exception as exc:
+                logger.error(f"GPS SSE stream error: {exc}", exc_info=True)
+
+        return generate()
+
+    gps_stream._cp_config = {"response.stream": True}
 
     @cherrypy.expose
     @cherrypy.tools.json_out()

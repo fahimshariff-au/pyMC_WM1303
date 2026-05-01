@@ -1,4 +1,6 @@
 import base64
+import ctypes
+import ctypes.util
 import json
 import logging
 import secrets
@@ -9,6 +11,28 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("SQLiteHandler")
+
+# Try to resolve glibc malloc_trim for returning freed pages to the OS.
+try:
+    _libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    if hasattr(_libc, "malloc_trim"):
+        _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+        _libc.malloc_trim.restype = ctypes.c_int
+        _HAS_MALLOC_TRIM = True
+    else:
+        _HAS_MALLOC_TRIM = False
+except Exception:  # pragma: no cover - defensive
+    _libc = None
+    _HAS_MALLOC_TRIM = False
+
+
+def _malloc_trim() -> None:
+    """Return freed memory pages to the kernel (glibc only; no-op elsewhere)."""
+    if _HAS_MALLOC_TRIM:
+        try:
+            _libc.malloc_trim(0)
+        except Exception:  # pragma: no cover - defensive
+            pass
 
 
 
@@ -53,8 +77,13 @@ class SQLiteHandler:
         # Using one connection instead of 29 saves ~90 MB on low-RAM devices.
         self._write_conn = None
         self._write_lock = threading.RLock()
+        # Background WAL checkpoint thread state
+        self._wal_checkpoint_thread = None
+        self._wal_checkpoint_stop = threading.Event()
+        self._wal_checkpoint_interval = 300  # 5 minutes
         self._init_database()
         self._run_migrations()
+        self._start_wal_checkpoint_thread()
 
     def _connect(self) -> _ConnWrapper:
         """Return a thread-safe wrapper around the shared SQLite connection.
@@ -79,12 +108,57 @@ class SQLiteHandler:
                     conn.execute("PRAGMA cache_size=-2048")  # 2MB single shared cache
                     conn.execute("PRAGMA mmap_size=0")
                     conn.execute("PRAGMA temp_store=MEMORY")
+                    # WAL management: limit journal size and trigger auto-checkpoints
+                    # more frequently to prevent unbounded WAL growth.
+                    conn.execute("PRAGMA journal_size_limit=8000000")  # 8 MB cap
+                    conn.execute("PRAGMA wal_autocheckpoint=500")  # ~2 MB
                     self._write_conn = conn
         return _ConnWrapper(self._write_conn, self._write_lock)
 
     def _invalidate_hot_caches(self) -> None:
         self._packet_stats_cache.clear()
         self._neighbors_cache = {"timestamp": 0.0, "value": None}
+
+    def _start_wal_checkpoint_thread(self) -> None:
+        """Spawn a background thread that periodically truncates the WAL.
+
+        SQLite's built-in `wal_autocheckpoint` only performs passive checkpoints
+        which silently fail when any persistent reader holds WAL frames.  With
+        multiple long-lived connections (as used here), the WAL can grow
+        unboundedly between cleanups.  This thread runs a full
+        `wal_checkpoint(TRUNCATE)` every `_wal_checkpoint_interval` seconds to
+        keep the WAL file small and reclaim Python heap memory used to cache
+        WAL pages.
+        """
+        if self._wal_checkpoint_thread is not None:
+            return
+
+        def _run():
+            import gc as _gc
+            while not self._wal_checkpoint_stop.wait(self._wal_checkpoint_interval):
+                try:
+                    with self._connect() as conn:
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    _gc.collect()
+                    _malloc_trim()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("WAL checkpoint failed: %s", exc)
+
+        t = threading.Thread(
+            target=_run,
+            name="sqlite-wal-checkpoint",
+            daemon=True,
+        )
+        t.start()
+        self._wal_checkpoint_thread = t
+        logger.info(
+            "SQLite WAL checkpoint thread started (interval=%ds)",
+            self._wal_checkpoint_interval,
+        )
+
+    def stop_wal_checkpoint_thread(self) -> None:
+        """Signal the WAL checkpoint thread to exit (used on shutdown)."""
+        self._wal_checkpoint_stop.set()
 
     def _init_database(self):
         try:

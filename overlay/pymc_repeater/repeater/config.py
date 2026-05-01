@@ -79,6 +79,29 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
             "cert_store_dir": "/etc/pymc_repeater/glass",
         }
 
+    if "gps" not in config:
+        config["gps"] = {
+            "enabled": False,
+            "api_fallback_to_config_location": True,
+            "advertise_gps_location": False,
+            "location_precision_digits": None,
+            "source": "serial",
+            "device": "/dev/serial0",
+            "baud_rate": 9600,
+            "read_timeout_seconds": 1.0,
+            "reconnect_interval_seconds": 5.0,
+            "stale_after_seconds": 10.0,
+            "retain_sentences": 25,
+            "validate_checksum": True,
+            "require_checksum": False,
+            "time_sync_enabled": True,
+            "time_sync_interval_seconds": 3600.0,
+            "time_sync_min_offset_seconds": 1.0,
+            "time_sync_min_valid_year": 2020,
+            "persist_gps_fix_to_config": False,
+            "persist_gps_fix_interval_seconds": 600.0,
+        }
+
     # Ensure repeater.security exists with defaults for upgrades from older configs
     if "repeater" not in config:
         config["repeater"] = {}
@@ -154,12 +177,12 @@ def save_config(config_data: Dict[str, Any], config_path: Optional[str] = None) 
         return False
 
 
-def update_global_flood_policy(allow: bool, config_path: Optional[str] = None) -> bool:
+def update_unscoped_flood_policy(allow: bool, config_path: Optional[str] = None) -> bool:
     """
-    Update the global flood policy in the configuration.
+    Update the unscoped flood policy in the configuration.
     
     Args:
-        allow: True to allow flooding globally, False to deny
+        allow: True to allow unscoped flooding, False to deny
         config_path: Path to config file (uses default if None)
         
     Returns:
@@ -181,7 +204,7 @@ def update_global_flood_policy(allow: bool, config_path: Optional[str] = None) -
         return save_config(config, config_path)
         
     except Exception as e:
-        logger.error(f"Failed to update global flood policy: {e}")
+        logger.error(f"Failed to update unscoped flood policy: {e}")
         return False
 
 
@@ -326,6 +349,8 @@ def get_radio_for_board(board_config: dict):
             combined_config["gpio_chip"] = _parse_int(spi_config["gpio_chip"], default=0)
         if "use_gpiod_backend" in spi_config:
             combined_config["use_gpiod_backend"] = spi_config["use_gpiod_backend"]
+        if "radio_timing_delay" in spi_config:
+            combined_config["radio_timing_delay"] = float(spi_config["radio_timing_delay"])
 
         radio = SX1262Radio.get_instance(**combined_config)
 

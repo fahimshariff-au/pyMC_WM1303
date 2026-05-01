@@ -29,7 +29,6 @@ import sqlite3
 
 from contextlib import contextmanager as _contextmanager
 
-@_contextmanager
 class _SharedConn:
     """Module-level shared SQLite connection with thread-safe access.
 

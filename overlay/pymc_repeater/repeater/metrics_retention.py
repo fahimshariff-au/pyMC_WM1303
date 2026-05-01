@@ -17,10 +17,12 @@ After each cleanup pass, a WAL TRUNCATE checkpoint is performed.
 import logging
 import os
 import sqlite3
+import threading
+import ctypes
+import ctypes.util
 
 from contextlib import contextmanager as _contextmanager
 
-@_contextmanager
 class _SharedConn:
     """Module-level shared SQLite connection with thread-safe access."""
 
@@ -85,6 +87,33 @@ import time
 from typing import List, Tuple, Optional, Dict
 
 logger = logging.getLogger("metrics_retention")
+
+# --- malloc_trim helper ---------------------------------------------------
+# Python's allocator (pymalloc + glibc malloc) holds onto freed memory in
+# per-arena free lists and does not release it to the OS.  After a metrics
+# cleanup or WAL checkpoint (which frees a lot of short-lived objects) we
+# explicitly ask glibc to return released pages to the kernel via
+# malloc_trim(0).  No-op on systems without glibc.
+try:
+    _libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    if hasattr(_libc, "malloc_trim"):
+        _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+        _libc.malloc_trim.restype = ctypes.c_int
+        _HAS_MALLOC_TRIM = True
+    else:
+        _HAS_MALLOC_TRIM = False
+except Exception:  # pragma: no cover - defensive
+    _libc = None
+    _HAS_MALLOC_TRIM = False
+
+
+def malloc_trim() -> None:
+    """Return freed memory pages to the kernel (glibc only)."""
+    if _HAS_MALLOC_TRIM:
+        try:
+            _libc.malloc_trim(0)
+        except Exception:  # pragma: no cover - defensive
+            pass
 
 DEFAULT_RETENTION_DAYS = 8
 DEFAULT_CLEANUP_INTERVAL_S = 3600        # once per hour
@@ -451,7 +480,38 @@ class MetricsRetention:
         self.db_dir = db_dir
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._last_vacuum = 0.0
+        # Persist last VACUUM timestamp so a service restart does not cause
+        # an immediate VACUUM (which briefly uses 2-3x the DB size in RAM).
+        self._vacuum_state_path = os.path.join(self.db_dir, ".last_vacuum")
+        self._last_vacuum = self._load_last_vacuum()
+
+    def _load_last_vacuum(self) -> float:
+        """Load the last VACUUM timestamp from disk, or seed it to now.
+
+        On first startup (no file yet) we seed with `time.time()` so the first
+        VACUUM only runs after a full `vacuum_interval_s` has elapsed, instead
+        of firing on every service restart.
+        """
+        try:
+            with open(self._vacuum_state_path, "r") as fh:
+                ts = float(fh.read().strip())
+                if ts > 0 and ts <= time.time():
+                    return ts
+        except (OSError, ValueError):
+            pass
+        # No valid state found -> seed with now so first VACUUM is delayed.
+        now = time.time()
+        self._save_last_vacuum(now)
+        return now
+
+    def _save_last_vacuum(self, ts: float) -> None:
+        """Persist the last VACUUM timestamp to disk."""
+        try:
+            os.makedirs(os.path.dirname(self._vacuum_state_path), exist_ok=True)
+            with open(self._vacuum_state_path, "w") as fh:
+                fh.write(str(ts))
+        except OSError as exc:
+            logger.debug("Could not persist vacuum timestamp: %s", exc)
 
     @property
     def retention_seconds(self) -> int:
@@ -485,6 +545,9 @@ class MetricsRetention:
                 if time.time() - self._last_vacuum >= self.vacuum_interval_s:
                     self.vacuum_once()
                     self._last_vacuum = time.time()
+                    self._save_last_vacuum(self._last_vacuum)
+                # Return freed pages to the OS to keep RSS low on small devices
+                malloc_trim()
             except Exception as e:
                 logger.error("Retention cycle error: %s", e)
             # Sleep in 5s chunks to allow clean shutdown
