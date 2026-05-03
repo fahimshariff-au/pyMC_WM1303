@@ -79,21 +79,12 @@ wm1303:
     channel_a:
       bandwidth: 125000
       coding_rate: 4/5
-      description: MeshCore local-test (SF7)
+      description: MeshCore local-test (SF10)
       frequency: 869462000
       preamble_length: 17
-      spreading_factor: 7
+      spreading_factor: 10
       tx_enable: true
       tx_power: 27
-    channel_b:
-      bandwidth: 125000
-      coding_rate: 4/5
-      description: MeshCore Channel B (SF7)
-      frequency: 869588000
-      preamble_length: 17
-      spreading_factor: 7
-      tx_enable: true
-      tx_power: 14
   pktfwd_bin: lora_pkt_fwd
   pktfwd_dir: /home/pi/wm1303_pf
   reset_script: reset_lgw.sh
