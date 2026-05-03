@@ -1148,6 +1148,45 @@ else
 fi
 
 # =============================================================================
+# Phase 11b: Low-Memory Device Maintenance
+# =============================================================================
+phase "Low-Memory Device Maintenance"
+
+step "Configuring weekly maintenance reboot (low-memory devices)"
+MEM_TOTAL_MB=$(free -m | awk '/^Mem:/ {print $2}')
+REBOOT_CRON_FILE="/etc/cron.d/pymc-repeater-weekly-reboot"
+NO_REBOOT_MARKER="/etc/pymc_repeater/no-auto-reboot"
+
+if [ -f "${NO_REBOOT_MARKER}" ]; then
+    ok "Opt-out marker present (${NO_REBOOT_MARKER}); skipping auto-reboot cron"
+elif [ "${MEM_TOTAL_MB}" -lt 700 ]; then
+    cat > "${REBOOT_CRON_FILE}" << 'CRON_EOF'
+# pyMC_WM1303 - Weekly maintenance reboot for low-memory devices
+# Auto-installed by install.sh / upgrade.sh on devices with < 700 MB RAM.
+# Rationale: clears kernel Slab caches and Python heap fragmentation that
+# accumulate over days of uptime, keeping memory usage stable on 512 MB Pis.
+#
+# To disable one-off:  sudo rm /etc/cron.d/pymc-repeater-weekly-reboot
+# To prevent re-install on next upgrade:
+#   sudo touch /etc/pymc_repeater/no-auto-reboot
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+0 4 * * 0 root logger -t pymc-repeater "Weekly maintenance reboot" && /sbin/reboot
+CRON_EOF
+    chmod 0644 "${REBOOT_CRON_FILE}"
+    ok "Detected ${MEM_TOTAL_MB} MB RAM; installed ${REBOOT_CRON_FILE} (Sun 04:00)"
+else
+    if [ -f "${REBOOT_CRON_FILE}" ]; then
+        rm -f "${REBOOT_CRON_FILE}"
+        ok "${MEM_TOTAL_MB} MB RAM detected; removed stale ${REBOOT_CRON_FILE}"
+    else
+        ok "${MEM_TOTAL_MB} MB RAM detected; skipping auto-reboot cron (not needed)"
+    fi
+fi
+
+# =============================================================================
 # Phase 12: Start and Verify Service
 # =============================================================================
 phase "Start and Verify Service"
