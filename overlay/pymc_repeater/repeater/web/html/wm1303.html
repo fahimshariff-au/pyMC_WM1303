@@ -4498,6 +4498,346 @@ function renderPmCrcChart(channels) {
     return __renderTraces_real(traces);
   }
 
+  // ===========================================================
+  // v2.4.7+: Tracing tab - packet metadata panel helpers.
+  // Parses MeshCore packet bytes into labelled blocks and renders
+  // a hex/ASCII dump with per-block colours + copy buttons.
+  // Supports 1-byte / 2-byte / 3-byte path hash sizes.
+  // ===========================================================
+
+  // Global store of copy buffers, keyed by a generated id.
+  // Keeps DOM onclick handlers simple and avoids quoting issues.
+  window._tracingCopyBuf = window._tracingCopyBuf || {};
+  window._tracingCopyTo = function(id, btn) {
+    var text = window._tracingCopyBuf[id];
+    if (!text) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text);
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select(); document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      if (btn) {
+        var orig = btn.innerHTML;
+        btn.innerHTML = '\u2713';
+        btn.style.color = '#10b981';
+        setTimeout(function(){ btn.innerHTML = orig; btn.style.color=''; }, 900);
+      }
+    } catch(e) { console.warn('Copy failed:', e); }
+  };
+
+  // Small helper: register a copy buffer and return an onclick handler snippet.
+  function _tracingCopyBtn(text, tooltip) {
+    var id = 'cp_' + Math.random().toString(36).substring(2, 10);
+    window._tracingCopyBuf[id] = String(text || '');
+    var tip = tooltip || 'Copy to clipboard';
+    return '<button class="btn sec sm" style="padding:2px 8px;font-size:10px;margin-left:6px" '
+         + 'onclick="window._tracingCopyTo(\'' + id + '\',this);event.stopPropagation();" '
+         + 'title="' + tip + '">\u2398 copy</button>';
+  }
+
+  // Parse a hex string into labelled blocks based on MeshCore header layout.
+  // Inputs:
+  //   hexUpper       - full payload hex (uppercase, no spaces)
+  //   pathHashSize   - 1, 2, or 3  (bytes per hop hash)
+  //   hopsCount      - number of hops
+  // Returns a list of blocks: [{offset, length, label, color, bytes[]}]
+  // Offsets and lengths are in BYTES (hex pairs).
+  function _tracingParsePayloadBlocks(hexUpper, pathHashSize, hopsCount) {
+    var blocks = [];
+    if (!hexUpper) return blocks;
+    // Convert hex to byte array
+    var bytes = [];
+    for (var i = 0; i < hexUpper.length; i += 2) {
+      bytes.push(parseInt(hexUpper.substr(i, 2), 16));
+    }
+    if (bytes.length === 0) return blocks;
+
+    var off = 0;
+    // Block 1: Header byte
+    var hdr = bytes[0];
+    var rt  = hdr & 0x03;
+    var pt  = (hdr >> 2) & 0x0F;
+    var ver = (hdr >> 6) & 0x03;
+    var rtNames = {0:'TFLOOD', 1:'FLOOD', 2:'DIRECT', 3:'TDIRECT'};
+    var ptNames = {0:'REQ',1:'RESPONSE',2:'TXT_MSG',3:'ACK',4:'ADVERT',5:'GRP_TXT',
+                   6:'GRP_DATA',7:'ANON_REQ',8:'PATH',9:'TRACE',10:'MULTIPART_TXT',12:'RAW_CUSTOM'};
+    blocks.push({
+      offset: off, length: 1,
+      label: 'Header [rt=' + (rtNames[rt]||rt) + ', pt=' + (ptNames[pt]||pt) + ', v=' + ver + ']',
+      legendKey: 'header',
+      color: '#3b82f6', bytes: bytes.slice(off, off+1)
+    });
+    off += 1;
+
+    // Block 2 (optional): Transport code (4 bytes) for TFLOOD/TDIRECT
+    var hasTc = (rt === 0 || rt === 3);
+    if (hasTc && bytes.length >= off + 4) {
+      blocks.push({
+        offset: off, length: 4,
+        label: 'Transport Code',
+        legendKey: 'tc',
+        color: '#a855f7', bytes: bytes.slice(off, off+4)
+      });
+      off += 4;
+    }
+
+    if (bytes.length <= off) return blocks;
+
+    // Block 3: Path header byte (hops + hash-size)
+    var pathByte = bytes[off];
+    var hops = pathByte & 0x3F;
+    var hsz  = ((pathByte >> 6) & 0x03) + 1;  // 1..3 bytes per hash
+    // Override with caller-provided values if available (more reliable)
+    if (hopsCount !== undefined && hopsCount !== null) hops = hopsCount;
+    if (pathHashSize)  hsz  = pathHashSize;
+    blocks.push({
+      offset: off, length: 1,
+      label: 'Path Header [hops=' + hops + ', hash-size=' + hsz + '-byte]',
+      legendKey: 'pathhdr',
+      color: '#f97316', bytes: bytes.slice(off, off+1)
+    });
+    off += 1;
+
+    // Block 4: Path hashes (hops * hsz bytes) — one sub-block per hop,
+    // but all share the same legendKey so the legend shows a single entry.
+    for (var h = 0; h < hops; h++) {
+      if (bytes.length < off + hsz) break;
+      blocks.push({
+        offset: off, length: hsz,
+        label: 'Hop #' + (h+1) + ' hash',
+        legendKey: 'hops',
+        legendLabel: 'Hop(s) \u2014 ' + hsz + '-byte each',
+        color: '#f59e0b', bytes: bytes.slice(off, off+hsz)
+      });
+      off += hsz;
+    }
+
+    if (bytes.length <= off) return blocks;
+
+    // Block 5/6: type-specific address field(s). Always 1-byte hashes.
+    var addrLen = 1;
+    if (pt === 0x00 || pt === 0x01 || pt === 0x02 || pt === 0x08) {
+      // REQ / RESP / TXT_MSG / PATH: [dst_hash][src_hash]
+      if (bytes.length >= off + addrLen) {
+        blocks.push({offset: off, length: addrLen, label: 'Dst Hash',
+                     legendKey: 'dst',
+                     color: '#ef4444', bytes: bytes.slice(off, off+addrLen)});
+        off += addrLen;
+      }
+      if (bytes.length >= off + addrLen) {
+        blocks.push({offset: off, length: addrLen, label: 'Src Hash',
+                     legendKey: 'src',
+                     color: '#22c55e', bytes: bytes.slice(off, off+addrLen)});
+        off += addrLen;
+      }
+    } else if (pt === 0x04) {
+      // ADVERT: src only
+      if (bytes.length >= off + addrLen) {
+        blocks.push({offset: off, length: addrLen, label: 'Src Hash',
+                     legendKey: 'src',
+                     color: '#22c55e', bytes: bytes.slice(off, off+addrLen)});
+        off += addrLen;
+      }
+    } else if (pt === 0x07) {
+      // ANON_REQ: dst only
+      if (bytes.length >= off + addrLen) {
+        blocks.push({offset: off, length: addrLen, label: 'Dst Hash',
+                     legendKey: 'dst',
+                     color: '#ef4444', bytes: bytes.slice(off, off+addrLen)});
+        off += addrLen;
+      }
+    } else if (pt === 0x05 || pt === 0x06) {
+      // GRP_TXT / GRP_DATA: first byte is the group/channel hash.
+      // Sender identity is encrypted inside the body and NOT available here.
+      if (bytes.length >= off + addrLen) {
+        blocks.push({offset: off, length: addrLen, label: 'Channel Hash',
+                     legendKey: 'chanhash',
+                     color: '#ef4444', bytes: bytes.slice(off, off+addrLen)});
+        off += addrLen;
+      }
+    }
+
+    // Block 7: Body (remaining bytes)
+    if (bytes.length > off) {
+      blocks.push({
+        offset: off, length: bytes.length - off,
+        label: 'Body / Payload (' + (bytes.length - off) + 'b)',
+        legendKey: 'body',
+        legendLabel: 'Body / Payload',
+        color: '#14b8a6', bytes: bytes.slice(off)
+      });
+    }
+    return blocks;
+  }
+
+  // Render hex/ASCII dump with block-colored highlights.
+  // 16 bytes per row, hex|ASCII side-by-side.
+  function _tracingRenderHexDump(hexUpper, blocks, truncatedFullSize) {
+    if (!hexUpper) return '<div style="color:var(--txm);font-style:italic">(no payload)</div>';
+    // Build byte -> color map
+    var byteColor = {};
+    var byteLabel = {};
+    for (var b = 0; b < blocks.length; b++) {
+      var bk = blocks[b];
+      for (var k = 0; k < bk.length; k++) {
+        byteColor[bk.offset + k] = bk.color;
+        byteLabel[bk.offset + k] = bk.label;
+      }
+    }
+    // Byte array
+    var bytes = [];
+    for (var i = 0; i < hexUpper.length; i += 2) {
+      bytes.push(parseInt(hexUpper.substr(i, 2), 16));
+    }
+    var html = '<div style="font-family:monospace;font-size:11px;line-height:1.5;background:rgba(0,0,0,0.25);border-radius:4px;padding:8px;overflow-x:auto">';
+    var BPR = 16;  // bytes per row
+    for (var row = 0; row < bytes.length; row += BPR) {
+      var hexPart = '';
+      var asciiPart = '';
+      for (var col = 0; col < BPR; col++) {
+        var idx = row + col;
+        if (idx < bytes.length) {
+          var v = bytes[idx];
+          var hx = (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+          var clr = byteColor[idx] || '#9ca3af';
+          var lbl = byteLabel[idx] || '';
+          hexPart += '<span style="color:' + clr + ';background:' + clr + '22;padding:0 2px;border-radius:2px" title="' + lbl + ' @' + idx + '">' + hx + '</span>';
+          if (col === 7) hexPart += ' ';  // middle spacer
+          hexPart += ' ';
+          var ch = (v >= 0x20 && v < 0x7f) ? String.fromCharCode(v) : '.';
+          if (ch === '<') ch = '&lt;';
+          else if (ch === '>') ch = '&gt;';
+          else if (ch === '&') ch = '&amp;';
+          asciiPart += '<span style="color:' + clr + '" title="' + lbl + '">' + ch + '</span>';
+        } else {
+          hexPart += '   ';
+          if (col === 7) hexPart += ' ';
+          asciiPart += ' ';
+        }
+      }
+      var offStr = (row < 16 ? '000' : row < 256 ? '00' : row < 4096 ? '0' : '') + row.toString(16).toUpperCase();
+      html += '<div><span style="color:var(--txm);opacity:0.6">' + offStr + '</span>  ' + hexPart + '  <span style="opacity:0.8">' + asciiPart + '</span></div>';
+    }
+    // (No truncation — full payload is always rendered)
+    html += '</div>';
+    return html;
+  }
+
+  // Render the full metadata panel for a single trace.
+  function _tracingRenderMetadataPanel(t) {
+    var fullHash = (t.pkt_hash_full || t.pkt_hash || '').toUpperCase();
+    var srcDisp = t.src_hash ? t.src_hash.toUpperCase() : '\u2014';
+    var dstDisp = t.dst_hash ? t.dst_hash.toUpperCase() : '*';  // * = flood/broadcast
+    var hsz = t.hash_size || 0;
+    var hopsN = (t.hops !== undefined && t.hops !== null) ? t.hops : 0;
+    var paths = t.path_hashes || [];
+    // Packet type context: group messages (GRP_TXT / GRP_DATA) have their
+    // sender identity encrypted inside the body, so src_hash is intentionally
+    // unavailable. The dst_hash byte for group packets represents the
+    // channel/group hash, not a unicast destination.
+    var _pt = (t.pkt_type || '').toUpperCase();
+    var _isGroup = (_pt === 'GRP_TXT' || _pt === 'GRP_DATA' ||
+                    _pt === 'GROUP_TXT' || _pt === 'GROUP_DATA');
+
+    // Path display with arrows. Final arrow leads to dst (or * if broadcast).
+    var pathBadges = '';
+    if (paths.length === 0) {
+      pathBadges = '<span style="color:var(--txm);font-style:italic">(no path yet - direct from source)</span>';
+    } else {
+      for (var p = 0; p < paths.length; p++) {
+        pathBadges += '<span style="display:inline-block;padding:2px 8px;background:#f59e0b22;color:#f59e0b;border-radius:4px;font-family:monospace;font-size:11px">' + paths[p].toUpperCase() + '</span>';
+        if (p < paths.length - 1) pathBadges += ' <span style="color:var(--txm);margin:0 2px">\u2192</span> ';
+      }
+    }
+    // Append final arrow to dst
+    var dstColor = (t.dst_hash) ? '#ef4444' : '#9ca3af';
+    pathBadges += ' <span style="color:var(--txm);margin:0 2px">\u2192</span> ';
+    pathBadges += '<span style="display:inline-block;padding:2px 8px;background:' + dstColor + '22;color:' + dstColor + ';border-radius:4px;font-family:monospace;font-size:11px" title="' + (t.dst_hash ? 'Destination' : 'Broadcast / flood') + '">' + dstDisp + '</span>';
+
+    var pathRaw = paths.join(' -> ') + (t.dst_hash ? ' -> ' + dstDisp : ' -> *');
+    var hszLabel = hsz ? (hsz + '-byte hashes') : 'unknown hash size';
+
+    // Payload blocks + hexdump
+    var blocks = _tracingParsePayloadBlocks(t.payload_hex || '', hsz, hopsN);
+    var hexDump = _tracingRenderHexDump(t.payload_hex || '', blocks, t.payload_full_size);
+
+    var html = '';
+    html += '<div style="background:rgba(99,102,241,0.05);border:1px solid rgba(99,102,241,0.18);border-radius:6px;padding:10px 12px;margin-bottom:12px">';
+    html += '<div style="font-size:11px;font-weight:700;color:var(--acc);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:8px">\uD83D\uDCE6 Packet Metadata</div>';
+    html += '<div style="display:grid;grid-template-columns:120px 1fr;gap:6px 10px;font-size:12px;align-items:center">';
+    // Full hash
+    html += '<div style="color:var(--txm)">Full hash:</div>';
+    html += '<div style="display:flex;align-items:center;flex-wrap:wrap"><code style="background:rgba(0,0,0,0.25);padding:2px 8px;border-radius:4px;color:#a5b4fc">' + (fullHash || '-') + '</code>' + (fullHash ? _tracingCopyBtn(fullHash, 'Copy full hash') : '') + '</div>';
+    // Hops
+    html += '<div style="color:var(--txm)">Hops:</div>';
+    html += '<div><span style="color:var(--txs);font-family:monospace">' + hopsN + '</span> <span style="color:var(--txm);margin-left:6px;font-size:11px">(' + hszLabel + ')</span></div>';
+    // Path
+    html += '<div style="color:var(--txm)">Path:</div>';
+    html += '<div style="display:flex;align-items:center;flex-wrap:wrap">' + pathBadges + _tracingCopyBtn(pathRaw, 'Copy path') + '</div>';
+    // Source
+    html += '<div style="color:var(--txm)">Source:</div>';
+    html += '<div><code style="background:#22c55e22;color:#22c55e;padding:2px 8px;border-radius:4px">' + srcDisp + '</code>';
+    if (_isGroup && !t.src_hash) {
+      html += ' <span style="color:var(--txm);font-size:11px;margin-left:6px;font-style:italic">encrypted \u2014 sender identity is inside the group-encrypted body</span>';
+    }
+    html += '</div>';
+    // Destination
+    html += '<div style="color:var(--txm)">Destination:</div>';
+    var _dstTitle = t.dst_hash
+      ? (_isGroup ? 'Group / channel hash' : 'Unicast destination')
+      : 'Broadcast / flood (no specific destination)';
+    html += '<div><code style="background:' + (t.dst_hash ? '#ef444422' : 'rgba(156,163,175,0.15)') + ';color:' + (t.dst_hash ? '#ef4444' : '#9ca3af') + ';padding:2px 8px;border-radius:4px" title="' + _dstTitle + '">' + dstDisp + '</code>';
+    if (!t.dst_hash) {
+      html += ' <span style="color:var(--txm);font-size:11px;margin-left:6px;font-style:italic">broadcast / flood</span>';
+    } else if (_isGroup) {
+      html += ' <span style="color:var(--txm);font-size:11px;margin-left:6px;font-style:italic">channel / group hash</span>';
+    }
+    html += '</div>';
+    // Payload header with copy buttons
+    var payloadSize = t.payload_full_size || (t.payload_hex ? (t.payload_hex.length / 2) : 0);
+    html += '<div style="color:var(--txm)">Payload:</div>';
+    html += '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px">';
+    html += '<span style="color:var(--txs);font-size:11px">' + payloadSize + ' bytes total</span>';
+    if (t.payload_hex) {
+      html += _tracingCopyBtn(t.payload_hex, 'Copy hex');
+      // Base64 copy
+      try {
+        var bytesForB64 = [];
+        for (var jj = 0; jj < t.payload_hex.length; jj += 2) {
+          bytesForB64.push(String.fromCharCode(parseInt(t.payload_hex.substr(jj, 2), 16)));
+        }
+        var b64 = btoa(bytesForB64.join(''));
+        html += _tracingCopyBtn(b64, 'Copy as base64').replace('\u2398 copy', '\u2398 base64');
+      } catch (e) { /* ignore */ }
+    }
+    html += '</div>';
+    html += '</div>';  // end grid
+    // Hex/ASCII dump
+    if (t.payload_hex) {
+      html += '<div style="margin-top:10px">' + hexDump + '</div>';
+      // Block legend (deduplicated by legendKey — e.g. all Hop #N entries
+      // collapse to a single 'Hop(s)' legend item).
+      html += '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:8px;font-size:10px;color:var(--txm)">';
+      var _seenLegend = {};
+      for (var lb = 0; lb < blocks.length; lb++) {
+        var bl = blocks[lb];
+        var _lkey = bl.legendKey || bl.label;
+        if (_seenLegend[_lkey]) continue;
+        _seenLegend[_lkey] = true;
+        var _llabel = bl.legendLabel || bl.label;
+        html += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:8px;height:8px;background:' + bl.color + ';border-radius:2px"></span>' + _llabel + '</span>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';  // end panel
+    return html;
+  }
+
   // Color palette per packet type (consistent with table)
   var _TRACE_TYPE_COLORS = {
     'ADVERT':   '#3b82f6', // blue
@@ -4637,23 +4977,66 @@ function renderPmCrcChart(channels) {
     }
     if (nodata) nodata.style.display = 'none';
     var html = '';
-    html += '<div style="display:grid;grid-template-columns:140px 90px 90px 80px 100px 60px;gap:4px 8px;font-size:12px;font-weight:600;color:var(--txm);padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);margin-bottom:4px">';
-    html += '<div>Time</div><div style="text-align:center">Hash</div><div>Channel</div><div>Type</div><div style="text-align:right">Duration</div><div style="text-align:center">Status</div>';
+    // v2.4.7+: Extended grid with Hops + Src->Dst columns. Full hash (16 chars).
+    var _TRACE_GRID = 'grid-template-columns:90px 150px 90px 80px 50px 110px 90px 50px;gap:4px 8px';
+    html += '<div style="display:grid;' + _TRACE_GRID + ';font-size:12px;font-weight:600;color:var(--txm);padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);margin-bottom:4px">';
+    html += '<div>Time</div>'
+         +  '<div style="text-align:center">Hash</div>'
+         +  '<div>Channel</div>'
+         +  '<div>Type</div>'
+         +  '<div style="text-align:center" title="Aantal hops in path">Hops</div>'
+         +  '<div style="text-align:center" title="Source hash -> Last hop (most recent) -> Destination hash. Src/Dst are always 1-byte node identifiers. Path hops can be 1/2/3-byte depending on path_hash_mode.">Src \u2192 Last hop \u2192 Dst</div>'
+         +  '<div style="text-align:right">Duration</div>'
+         +  '<div style="text-align:center">Status</div>';
     html += '</div>';
     for (var i = 0; i < traces.length; i++) {
       var t = traces[i];
       var hc = _hashColor(t.pkt_hash);
       var _traceUid = 'r' + i + '-' + (t.pkt_hash || 'idx') + '-' + String(t.first_seen || '').replace(/[^a-zA-Z0-9]/g, '');
       html += '<div data-trace-uid="' + _traceUid + '" style="cursor:pointer;border-radius:6px">';
-      html += '<div style="display:grid;grid-template-columns:140px 90px 90px 80px 100px 60px;gap:4px 8px;font-size:12px;padding:6px 8px;align-items:center">';
+      html += '<div style="display:grid;' + _TRACE_GRID + ';font-size:12px;padding:6px 8px;align-items:center">';
+      // Time
       html += '<div style="color:var(--txm)">' + _fmtTime(t.first_seen) + '</div>';
-      html += '<div style="font-family:monospace;font-size:11px;background:' + hc + '22;color:' + hc + ';padding:1px 6px;border-radius:4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (t.pkt_hash || '').toUpperCase() + '</div>';
+      // Hash (full 16 chars if available, fallback to short)
+      var _hashDisp = (t.pkt_hash_full || t.pkt_hash || '').toUpperCase();
+      html += '<div style="font-family:monospace;font-size:11px;background:' + hc + '22;color:' + hc + ';padding:1px 6px;border-radius:4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + _hashDisp + '">' + _hashDisp + '</div>';
+      // Channel
       html += '<div style="color:var(--txs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + _traceFriendlyName(t.channel) + '</div>';
+      // Type
       html += '<div style="color:var(--txs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (t.type || '-') + '</div>';
-      html += '<div style="text-align:right;white-space:nowrap;min-width:100px;font-family:monospace;color:var(--txs)">' + (t.total_ms !== undefined ? t.total_ms.toFixed(1) + 'ms' : '-') + '</div>';
-      html += '<div style="text-align:center;min-width:60px">' + _statusIcon(t.status) + '</div>';
+      // Hops
+      var _hopsVal = (t.hops !== undefined && t.hops !== null) ? t.hops : '-';
+      html += '<div style="text-align:center;color:var(--txs);font-family:monospace">' + _hopsVal + '</div>';
+      // Src -> Dst  (flood / broadcast => '*')
+      // v2.4.7+: include the LAST HOP (path_hashes[-1]) between src and dst so
+      // users immediately see which neighbour relayed the packet to us. If the
+      // last hop equals src or dst, it is suppressed to avoid duplication.
+      var _srcDisp = t.src_hash ? t.src_hash.toUpperCase() : '-';
+      var _dstDisp = t.dst_hash ? t.dst_hash.toUpperCase() : '*';
+      var _lastHop = null;
+      if (t.path_hashes && t.path_hashes.length > 0) {
+        var _lh = t.path_hashes[t.path_hashes.length - 1];
+        if (_lh) {
+          _lastHop = String(_lh).toUpperCase();
+          if (_lastHop === _srcDisp || _lastHop === _dstDisp) {
+            _lastHop = null;  // redundant, skip
+          }
+        }
+      }
+      var _pathMid  = _lastHop ? (_lastHop + ' \u2192 ') : '';
+      var _pathText = _srcDisp + ' \u2192 ' + _pathMid + _dstDisp;
+      var _pathTitle = 'Src: ' + _srcDisp
+                     + (_lastHop ? '\nLast hop (most recent): ' + _lastHop : '')
+                     + '\nDst: ' + (t.dst_hash ? _dstDisp : 'Broadcast (*)');
+      html += '<div style="text-align:center;color:var(--txs);font-family:monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + _pathTitle + '">' + _pathText + '</div>';
+      // Duration
+      html += '<div style="text-align:right;white-space:nowrap;font-family:monospace;color:var(--txs)">' + (t.total_ms !== undefined ? t.total_ms.toFixed(1) + 'ms' : '-') + '</div>';
+      // Status
+      html += '<div style="text-align:center">' + _statusIcon(t.status) + '</div>';
       html += '</div>';
       html += '<div id="trace-detail-' + _traceUid + '" data-trace-detail="1" style="display:none;padding:4px 8px 12px 20px;border-bottom:1px solid rgba(255,255,255,0.06)">';
+      // v2.4.7+: Packet metadata panel (full hash, hops, path, src->dst, payload hex+ASCII)
+      html += _tracingRenderMetadataPanel(t);
       if (t.steps && t.steps.length > 0) {
         // WM1303 v2.1.6: chronological sort safety net. Steps emitted nearly
         // simultaneously (e.g. lbt_check / cad_check / tx_send) may arrive

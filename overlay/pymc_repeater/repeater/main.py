@@ -33,6 +33,16 @@ try:
 except ImportError:
     _BRIDGE_AVAILABLE = False
 
+# Uniform all-channel RX tracer (v2.4.7+)
+try:
+    from repeater.uniform_tracer import install_on_radio as _install_uniform_tracer
+    from repeater.uniform_tracer import schedule_channel_e_wrap_retry as _uniform_tracer_retry_ch_e
+    _UNIFORM_TRACER_AVAILABLE = True
+except Exception:
+    _install_uniform_tracer = None  # type: ignore[assignment]
+    _uniform_tracer_retry_ch_e = None  # type: ignore[assignment]
+    _UNIFORM_TRACER_AVAILABLE = False
+
 
 # Register packet-trace callbacks with pymc_core modules so they can emit
 # TX-phase trace events without importing repeater.web (layering boundary).
@@ -153,6 +163,28 @@ class RepeaterDaemon:
                     logger.info(f"Radio config - TX Power: {self.radio.get_tx_power()}dBm")
 
                 logger.info("Radio hardware initialized")
+
+                # v2.4.7+: install uniform all-channel RX tracer
+                # (hooks _dispatch_rx + channel_e callback so every RX emits
+                # a 'received' trace for the Tracing tab, across all 5 channels,
+                # with correct 1/2/3-byte hash-size detection).
+                if _UNIFORM_TRACER_AVAILABLE and _install_uniform_tracer is not None:
+                    try:
+                        _install_uniform_tracer(self.radio)
+                    except Exception as _ut_err:
+                        logger.warning(f"Uniform tracer install failed: {_ut_err}")
+
+                # v2.4.7+: register friendly channel-name map with packet_trace
+                # so every trace_event() call (from bridge_engine, tx_queue,
+                # uniform_tracer, etc.) displays the same UI-friendly channel
+                # name (e.g. 'channel_e' -> 'EU-Narrow', 'channel_a' -> 'local-test').
+                try:
+                    from repeater.web.packet_trace import set_channel_name_map
+                    _ch_map = getattr(self.radio, '_ch_id_to_ui_name', {}) or {}
+                    if _ch_map:
+                        set_channel_name_map(_ch_map)
+                except Exception as _cn_err:
+                    logger.debug(f"Channel-name map registration failed: {_cn_err}")
             except Exception as e:
                 logger.error(f"Failed to initialize radio hardware: {e}")
                 raise RuntimeError("Repeater requires real LoRa hardware") from e
@@ -1504,6 +1536,43 @@ class RepeaterDaemon:
                     self._channel_e = ChannelEBridge(self.bridge_engine, backend=self.radio)
                     asyncio.create_task(self._channel_e.run())
                     logger.info("Channel E (native LoRa): bridge listener started")
+                    # v2.4.7+: schedule background retry to wrap channel_e RX
+                    # callback. ChannelEBridge installs its handler inside its
+                    # async run() task, which may not have completed yet; retry
+                    # for up to ~20 s until the callback appears.
+                    if _UNIFORM_TRACER_AVAILABLE and _uniform_tracer_retry_ch_e is not None:
+                        try:
+                            _uniform_tracer_retry_ch_e(self.radio)
+                        except Exception as _we:
+                            logger.debug(f"Uniform tracer channel_e retry failed: {_we}")
+
+                    # v2.4.7+: re-register the friendly channel-name map now
+                    # that ChannelEBridge has populated channel_e in
+                    # _ch_id_to_ui_name. Without this second call, bridge_engine
+                    # traces (which emit `channel='channel_e'`) would not be
+                    # rewritten to 'EU-Narrow' because the initial registration
+                    # ran before channel_e was added.
+                    try:
+                        from repeater.web.packet_trace import set_channel_name_map
+                        _ch_map2 = getattr(self.radio, '_ch_id_to_ui_name', {}) or {}
+                        # Ensure channel_e is present even if the radio hasn't
+                        # registered it yet — use the UI config fallback.
+                        if 'channel_e' not in _ch_map2:
+                            try:
+                                import json
+                                with open('/etc/pymc_repeater/wm1303_ui.json', 'r') as _uif:
+                                    _uicfg = json.load(_uif)
+                                _che = _uicfg.get('channel_e', {}) or {}
+                                _friendly = _che.get('friendly_name') or _che.get('name')
+                                if _friendly:
+                                    _ch_map2 = dict(_ch_map2)
+                                    _ch_map2['channel_e'] = _friendly
+                            except Exception:
+                                pass
+                        if _ch_map2:
+                            set_channel_name_map(_ch_map2)
+                    except Exception as _cn_err:
+                        logger.debug(f"Channel-name map re-registration failed: {_cn_err}")
                 except Exception as e:
                     logger.warning("Channel E init failed: %s", e)
 

@@ -22,10 +22,37 @@ logger = logging.getLogger('PacketTrace')
 
 _collector: TraceCollector | None = None
 
-MAX_TRACES = 200
+MAX_TRACES = 1000  # v2.4.7+: raised from 200 to support all-channel tracing (channel_a/b/c/d/e)
 MAX_STEPS_PER_TRACE = 30
 TRACE_TTL = 300       # seconds before a trace is considered stale for grouping
 GAP_THRESHOLD = 450.0  # seconds — start new trace if gap since last event exceeds this
+
+# v2.4.7+: Global mapping of channel IDs (e.g. 'channel_e') to UI-friendly
+# names (e.g. 'EU-Narrow'). Populated at startup from the radio's
+# `_ch_id_to_ui_name` dict so that every trace_event() call emits the same
+# friendly channel name regardless of which module produced the trace.
+# Callers may still pass a friendly name directly; passthrough is the default
+# when the lookup misses.
+_CHANNEL_FRIENDLY_NAMES: dict[str, str] = {}
+
+
+def set_channel_name_map(mapping: dict[str, str]) -> None:
+    """Install/overwrite the channel-id → friendly-name map used by
+    `trace_event` to normalize the `channel` field. Idempotent."""
+    global _CHANNEL_FRIENDLY_NAMES
+    try:
+        _CHANNEL_FRIENDLY_NAMES = {str(k): str(v) for k, v in (mapping or {}).items() if v}
+        logger.info('Channel name map installed: %s', _CHANNEL_FRIENDLY_NAMES)
+    except Exception as _e:
+        logger.debug('set_channel_name_map failed: %s', _e)
+
+
+def _friendly_channel(name: str) -> str:
+    """Resolve a channel id (e.g. 'channel_e') to its friendly UI name
+    (e.g. 'EU-Narrow'). Returns the input unchanged when no mapping exists."""
+    if not name:
+        return name
+    return _CHANNEL_FRIENDLY_NAMES.get(name, name)
 
 
 class TraceCollector:
@@ -44,17 +71,33 @@ class TraceCollector:
     def trace_event(self, pkt_hash: str, step_name: str,
                     channel: str = '', pkt_type: str = '',
                     detail: str = '', status: str = 'ok',
-                    ts_offset_ms: float = 0) -> None:
+                    ts_offset_ms: float = 0,
+                    # v2.4.7+: optional MeshCore packet metadata. Attached once
+                    # per trace; later events may backfill missing fields.
+                    pkt_hash_full: str | None = None,
+                    hops: int | None = None,
+                    hash_size: int | None = None,
+                    src_hash: str | None = None,
+                    dst_hash: str | None = None,
+                    path_hashes: list | None = None,
+                    payload_hex: str | None = None,
+                    payload_full_size: int | None = None) -> None:
         """Record a trace step for the given packet hash.
 
         If a trace for this hash already exists (within TTL and without
-        a large gap since the last event), the step is appended.
-        Otherwise a new trace entry is created.
-
-        ts_offset_ms: if positive, backdate the step display time and
-                      elapsed_ms by this amount.  Internal tracking
-                      (gap detection, TTL, _mono_last) uses real time.
+        a big gap), the step is appended; otherwise a new trace entry is
+        created. The `channel` argument is normalised through the global
+        friendly-name map so callers may pass either a channel id (e.g.
+        'channel_e') or a friendly name (e.g. 'EU-Narrow') and the trace
+        consistently shows the friendly name.
         """
+        # v2.4.7+: normalise channel id -> friendly UI name (no-op when the
+        # caller already passed a friendly name or no mapping exists).
+        channel = _friendly_channel(channel)
+
+        # ts_offset_ms: if positive, backdate the step display time and
+        # elapsed_ms by this amount.  Internal tracking (gap detection,
+        # TTL, _mono_last) uses real time.
         real_mono = time.monotonic()
         real_ts   = time.time()
         # Display time may be backdated
@@ -99,6 +142,15 @@ class TraceCollector:
                     '_mono_first': display_mono,
                     '_mono_last': real_mono,
                     '_ts_first': display_ts,
+                    # v2.4.7+: MeshCore packet metadata (optional)
+                    'pkt_hash_full': pkt_hash_full,
+                    'hops': hops,
+                    'hash_size': hash_size,
+                    'src_hash': src_hash,
+                    'dst_hash': dst_hash,
+                    'path_hashes': path_hashes or [],
+                    'payload_hex': payload_hex,
+                    'payload_full_size': payload_full_size,
                 }
                 # Evict oldest if at capacity
                 if len(self._traces) >= self._maxlen:
@@ -121,6 +173,24 @@ class TraceCollector:
                 trace['channel'] = channel
             if pkt_type and not trace['type']:
                 trace['type'] = pkt_type
+
+            # v2.4.7+: backfill MeshCore metadata if earlier event didn't have it
+            if pkt_hash_full and not trace.get('pkt_hash_full'):
+                trace['pkt_hash_full'] = pkt_hash_full
+            if hops is not None and not trace.get('hops'):
+                trace['hops'] = hops
+            if hash_size is not None and not trace.get('hash_size'):
+                trace['hash_size'] = hash_size
+            if src_hash and not trace.get('src_hash'):
+                trace['src_hash'] = src_hash
+            if dst_hash and not trace.get('dst_hash'):
+                trace['dst_hash'] = dst_hash
+            if path_hashes and not trace.get('path_hashes'):
+                trace['path_hashes'] = path_hashes
+            if payload_hex and not trace.get('payload_hex'):
+                trace['payload_hex'] = payload_hex
+            if payload_full_size is not None and not trace.get('payload_full_size'):
+                trace['payload_full_size'] = payload_full_size
 
             # Compute elapsed from first step
             elapsed_ms = round((display_mono - trace['_mono_first']) * 1000, 1)
@@ -194,6 +264,15 @@ class TraceCollector:
                 'status': t['status'],
                 'total_ms': t['total_ms'],
                 'steps': t['steps'],
+                # v2.4.7+: MeshCore packet metadata
+                'pkt_hash_full': t.get('pkt_hash_full'),
+                'hops': t.get('hops'),
+                'hash_size': t.get('hash_size'),
+                'src_hash': t.get('src_hash'),
+                'dst_hash': t.get('dst_hash'),
+                'path_hashes': t.get('path_hashes') or [],
+                'payload_hex': t.get('payload_hex'),
+                'payload_full_size': t.get('payload_full_size'),
             }
             result.append(entry)
         return result

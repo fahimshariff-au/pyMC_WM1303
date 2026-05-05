@@ -720,7 +720,25 @@ class BridgeEngine:
         pkt_hash = _stable_hash(data)
         pkt_hash8 = _stable_hash(data, 8)
         pkt_type_name = self._get_packet_type_name(data)
-        _trace(pkt_hash8, 'bridge_inject', channel=source_name, pkt_type=pkt_type_name, detail='Injected %d bytes from %s (origin=%s)' % (len(data), self._dn(source_name), self._dn(origin_channel) if origin_channel else 'none'))
+        # v2.4.7+: Parse MeshCore packet metadata once and attach to trace.
+        # Used by the Tracing-tab UI to show hops / src / dst / path / payload.
+        try:
+            _pinfo = BridgeEngine._parse_path_info(data) or {}
+        except Exception:
+            _pinfo = {}
+        _trace(pkt_hash8, 'bridge_inject',
+               channel=source_name, pkt_type=pkt_type_name,
+               detail='Injected %d bytes from %s (origin=%s)' % (
+                   len(data), self._dn(source_name),
+                   self._dn(origin_channel) if origin_channel else 'none'),
+               pkt_hash_full=pkt_hash,
+               hops=len(_pinfo.get('path_hashes') or []),
+               hash_size=_pinfo.get('path_hash_size') or 0,
+               src_hash=_pinfo.get('src_hash'),
+               dst_hash=_pinfo.get('dst_hash'),
+               path_hashes=_pinfo.get('path_hashes') or [],
+               payload_hex=(data.hex().upper() if data else ''),
+               payload_full_size=len(data) if data else 0)
         logger.info('[HEXDUMP] dir=INJECT src=%s sz=%d hdr=%s hex=%s', source_name, len(data), _mc_hdr(data), _hexdump(data))
         logger.info('BridgeEngine: injected %d bytes from %s (type=%s, hash=%s, origin_channel=%s)',
                    len(data), source_name, pkt_type_name, pkt_hash, origin_channel)
@@ -1274,6 +1292,13 @@ class BridgeEngine:
             elif pt == 0x07:  # ANON_REQ
                 if len(payload) >= 1:
                     result['dst_hash'] = f'{payload[0]:02X}'
+            elif pt in (0x05, 0x06):  # GRP_TXT, GRP_DATA
+                # Group messages: first byte is channel_hash (identifies the
+                # target group/channel). Sender identity is encrypted inside
+                # the payload and is NOT available in cleartext.
+                if len(payload) >= 1:
+                    result['dst_hash'] = f'{payload[0]:02X}'
+                    # src_hash stays None (encrypted, not extractable)
 
         return result
 
