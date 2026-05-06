@@ -13,8 +13,8 @@ letsmesh:
   broker_index: -1
   disallowed_packet_types: []
   email: ''
-  enabled: true
-  iata_code: GLZ
+  enabled: false
+  iata_code: ''
   owner: ''
   status_interval: 60
 logging:

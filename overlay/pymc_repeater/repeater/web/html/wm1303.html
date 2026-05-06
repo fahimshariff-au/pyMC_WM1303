@@ -4098,6 +4098,9 @@ function renderPmCrcChart(channels) {
           <option value="channel_e">channel_e</option>
           <option value="repeater">repeater</option>
         </select>
+        <input type="text" id="traceFilterSrc" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" placeholder="Src" style="width:60px" oninput="_traceApplySearch()">
+        <input type="text" id="traceFilterHop" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" placeholder="Last hop" style="width:70px" oninput="_traceApplySearch()">
+        <input type="text" id="traceFilterDst" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" placeholder="Dst" style="width:60px" oninput="_traceApplySearch()">
         <select id="traceFilterLimit" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" onchange="traceLoad()">
           <option value="25">25</option>
           <option value="50" selected>50</option>
@@ -4153,6 +4156,12 @@ function renderPmCrcChart(channels) {
     if (cb && cb.checked && _traceActive) {
       var iv = parseInt(document.getElementById('traceAutoInterval').value) || 5;
       _traceTimer = setInterval(traceLoad, iv * 1000);
+    }
+  };
+  window._traceApplySearch = function() {
+    // Re-render current trace data with updated search filter
+    if (_traceData && _traceData.length > 0) {
+      _renderTraces(_traceData);
     }
   };
   function _statusBadge(color, text) {
@@ -4494,8 +4503,30 @@ function renderPmCrcChart(channels) {
     return { delta: defaultDelta, tooltip: tooltip };
   }
   function _renderTraces(traces) {
-    // placeholder — real function below
-    return __renderTraces_real(traces);
+    // Apply separate src/dst/hop search filters before rendering
+    var qSrc = (document.getElementById('traceFilterSrc') || {}).value || '';
+    var qDst = (document.getElementById('traceFilterDst') || {}).value || '';
+    var qHop = (document.getElementById('traceFilterHop') || {}).value || '';
+    qSrc = qSrc.trim().toLowerCase();
+    qDst = qDst.trim().toLowerCase();
+    qHop = qHop.trim().toLowerCase();
+    var filtered = traces;
+    if (qSrc || qDst || qHop) {
+      filtered = traces.filter(function(t) {
+        if (qSrc && (t.src_hash || '').toLowerCase().indexOf(qSrc) === -1) return false;
+        if (qDst && (t.dst_hash || '').toLowerCase().indexOf(qDst) === -1) return false;
+        if (qHop) {
+          var hopMatch = false;
+          if (t.path_hashes && t.path_hashes.length > 0) {
+            var lastHop = t.path_hashes[t.path_hashes.length - 1] || '';
+            if (lastHop.toLowerCase().indexOf(qHop) !== -1) hopMatch = true;
+          }
+          if (!hopMatch) return false;
+        }
+        return true;
+      });
+    }
+    return __renderTraces_real(filtered);
   }
 
   // ===========================================================

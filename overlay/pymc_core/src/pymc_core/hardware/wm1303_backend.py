@@ -587,8 +587,8 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 'tx_enable': False,
             },
             **chan_configs,
-            'chan_Lora_std':  {'enable': True, 'radio': 0, 'if': 0,
-                              'bandwidth': 250000, 'spread_factor': 7},
+            'chan_Lora_std':  {'enable': False, 'radio': 0, 'if': 0,
+                              'bandwidth': 125000, 'spread_factor': 8},
             'chan_FSK':       {'enable': True, 'radio': 0, 'if': 0,
                               'bandwidth': 125000, 'datarate': 50000},
             # SX1261 companion chip for LBT (Listen Before Talk)
@@ -999,6 +999,7 @@ class WM1303Backend:
                            channel_config['friendly_name'])
                 radio = VirtualLoRaRadio(self, channel_id, channel_config)
                 radios.append(radio)
+
 
             logger.info('WM1303Backend.get_radios(): created %d radios from SSOT: %s',
                        len(radios), [r.channel_id for r in radios])
