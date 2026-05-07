@@ -1,13 +1,173 @@
-bridge:
-  bridge_rules: []
-  dedup_ttl_seconds: 300
+# WM1303 Repeater Configuration Template
+# radio_type: wm1303 (SX1302/SX1303 concentrator with SX1261 companion)
+radio_type: wm1303
+
+repeater:
+  # Node name for logging and identification
+  node_name: "mesh-repeater-01"
+
+  # TX mode: forward | monitor | no_tx (default: forward)
+  # forward = repeat on; monitor = no repeat but companions/tenants can send; no_tx = all TX off
+  mode: forward
+
+  # Geographic location (optional)
+  latitude: 0.0
+  longitude: 0.0
+
+  # Identity key (private seed) — auto-generated on first start if omitted
+  # identity_key: null
+
+  # Duplicate packet cache TTL in seconds
+  cache_ttl: 3600
+
+  # Maximum number of hops a flood packet may have already traversed before
+  # this repeater forwards it.
+  max_flood_hops: 64
+
+  # Maximum cache entries
+  max_cache_size: 1000
+
+  # Score-based transmission filtering
+  use_score_for_tx: false
+  score_threshold: 0.3
+
+  # Automatic advertisement interval in hours
+  # Set to 0 to disable automatic adverts
+  send_advert_interval_hours: 10
+
+  # Respond to discovery requests from other nodes
+  allow_discovery: true
+
+  # Loop detection
+  loop_detect: true
+
+  # Incoming advert rate limiter (per advert public key)
+  advert_rate_limit:
+    enabled: false
+    bucket_capacity: 2
+    refill_tokens: 1
+    refill_interval_seconds: 36000
+    min_interval_seconds: 0
+
+  # Penalty box for repeat advert limit violations (per pubkey)
+  advert_penalty_box:
+    enabled: false
+    violation_threshold: 2
+    violation_decay_seconds: 43200
+    base_penalty_seconds: 21600
+    penalty_multiplier: 2.0
+    max_penalty_seconds: 86400
+
+  # Adaptive rate limiting based on mesh activity
+  advert_adaptive:
+    enabled: false
+    ewma_alpha: 0.1
+    hysteresis_seconds: 300
+    thresholds:
+      quiet_max: 0.05
+      normal_max: 0.20
+      busy_max: 0.50
+
+  # Security settings
+  security:
+    max_clients: 1
+    admin_password: "admin123"
+    guest_password: "guest123"
+    allow_read_only: false
+    # JWT secret — auto-generated on first start if empty
+    jwt_secret: ""
+    jwt_expiry_minutes: 10080
+
+# GPS receiver configuration
+gps:
+  enabled: false
+  source: serial
+  device: "/dev/serial0"
+  baud_rate: 9600
+  read_timeout_seconds: 1.0
+  reconnect_interval_seconds: 5.0
+  source_path: "/var/lib/pymc_repeater/gps_nmea.txt"
+  poll_interval_seconds: 2.0
+  api_fallback_to_config_location: true
+  advertise_gps_location: false
+  persist_gps_fix_to_config: false
+  persist_gps_fix_interval_seconds: 600.0
+  location_precision_digits: null
+  stale_after_seconds: 10.0
+  retain_sentences: 25
+  validate_checksum: true
+  require_checksum: false
+  time_sync_enabled: true
+  time_sync_interval_seconds: 3600.0
+  time_sync_min_offset_seconds: 1.0
+  time_sync_min_valid_year: 2020
+
+# Mesh Network Configuration
+mesh:
+  unscoped_flood_allow: true
+  # Path hash mode: 0 = 1-byte, 1 = 2-byte, 2 = 3-byte
+  path_hash_mode: 0
+  loop_detect: minimal
+
+# Multiple Identity Configuration (Optional)
+identities:
+  room_servers: []
+  companions: []
+
+# Radio settings (Channel E — SX1261 companion chip)
+radio:
+  frequency: 869618000
+  tx_power: 14
+  bandwidth: 62500
+  spreading_factor: 8
+  coding_rate: 5
+  crc_enabled: true
+  preamble_length: 8
+  sync_word: 5156
+
+# SX1261 companion chip — used for LBT/CAD and Channel E
+sx1261_lbt:
+  bus_id: 0
+  cs_id: 0
+  cs_pin: 21
+  reset_pin: 18
+  busy_pin: 20
+  irq_pin: 16
+  is_waveshare: true
+  role: lbt_cad_spectrum_only
+  rxen_pin: 12
+  rxled_pin: -1
+  tx_enabled: false
+  txen_pin: 13
+  txled_pin: -1
+
+sx1262: {}
+
 delays:
-  direct_tx_delay_factor: 0
   tx_delay_factor: 0
+  direct_tx_delay_factor: 0
+
 duty_cycle:
   enforcement_enabled: false
   max_airtime_per_minute: 54000
   max_airtime_percent: 10
+
+# Storage Configuration
+storage:
+  storage_dir: "/var/lib/pymc_repeater"
+  retention:
+    metrics_days: 8
+
+# MQTT broker configuration
+mqtt_brokers:
+  iata_code: ""
+  status_interval: 300
+  owner: ""
+  email: ""
+  brokers: []
+  # disallowed_packet_types: []
+
+# LetsMesh integration (legacy format, overridden by mqtt_brokers if both present)
 letsmesh:
   additional_brokers: []
   broker_index: -1
@@ -17,62 +177,33 @@ letsmesh:
   iata_code: ''
   owner: ''
   status_interval: 60
+
+# pyMC_Glass control-plane integration (optional)
+glass:
+  enabled: false
+  base_url: "http://localhost:8080"
+  inform_interval_seconds: 30
+  request_timeout_seconds: 10
+  verify_tls: true
+  api_token: ""
+  cert_store_dir: "/etc/pymc_repeater/glass"
+
 logging:
   format: '%(asctime)s %(name)s %(levelname)s %(message)s'
   level: INFO
-mesh:
-  path_hash_mode: 0
-radio:
-  bandwidth: 62500
-  coding_rate: 5
-  crc_enabled: true
-  frequency: 869618000.0
-  preamble_length: 8
-  spreading_factor: 8
-  sync_word: 5156
-  tx_power: 14
-radio_type: wm1303
-repeater:
-  advert_interval_seconds: 133200
-  allow_discovery: true
-  cache_ttl: 300
-  direct_tx_delay_factor: 0
-  identity_key: !!binary |
-    Y/ehW/dwHvmsBWfxjGWRD9gEevSiMESzPdA1jL8hnj0=
-  initial_advert_delay_seconds: 15
-  latitude: 51.69716156901394
-  longitude: 4.860189557075501
-  loop_detect: true
-  max_cache_size: 1000
-  mode: forward
-  node_name: NL-GTB-HvM-Rpt-WM1303-1
-  security:
-    admin_password: Pluis123!
-    jwt_expiry_minutes: 10080
-    jwt_secret: 6d548a009fac457bd11c33ed73845e52c5269782629e8bb16692d1936c3355cb
-  send_advert_interval_hours: 37
-  tx_delay_factor: 0
-storage:
-  retention:
-    metrics_days: 8
-sx1261_lbt:
-  bus_id: 0
-  busy_pin: 20
-  cs_id: 0
-  cs_pin: 21
-  irq_pin: 16
-  is_waveshare: true
-  reset_pin: 18
-  role: lbt_cad_spectrum_only
-  rxen_pin: 12
-  rxled_pin: -1
-  tx_enabled: false
-  txen_pin: 13
-  txled_pin: -1
-sx1262: {}
+
+# Web interface configuration
 web:
   port: 8000
+  cors_enabled: false
   web_path: null
+
+# Bridge configuration (empty by default — configure via WM1303 Manager UI)
+bridge:
+  bridge_rules: []
+  dedup_ttl_seconds: 300
+
+# WM1303 concentrator configuration
 wm1303:
   bridge_rules: []
   channels:
