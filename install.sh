@@ -408,6 +408,7 @@ else
 fi
 
 step "Installing SPI optimization service script"
+mkdir -p "${INSTALL_BASE}"
 cp "${SCRIPT_DIR}/config/spi_optimize.sh" "${INSTALL_BASE}/spi_optimize.sh" >> "${LOG_FILE}" 2>&1 || \
     cp "${SCRIPT_DIR}/config/spi_optimize.sh" /opt/pymc_repeater/spi_optimize.sh >> "${LOG_FILE}" 2>&1
 chmod 755 "${INSTALL_BASE}/spi_optimize.sh" 2>/dev/null || chmod 755 /opt/pymc_repeater/spi_optimize.sh 2>/dev/null
