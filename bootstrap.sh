@@ -16,7 +16,7 @@
 
 set -e
 
-REPO_URL="https://github.com/HansvanMeer/pyMC_WM1303.git"
+REPO_URL="https://github.com/fahimshariff-au/pyMC_WM1303.git"
 INSTALL_DIR="/home/pi/pyMC_WM1303"
 PI_USER="pi"
 

@@ -572,8 +572,8 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 'rssi_tcomp': {'coeff_a': 0, 'coeff_b': 0, 'coeff_c': 20.41,
                                'coeff_d': 2162.56, 'coeff_e': 0},
                 'tx_enable': True,
-                'tx_freq_min': 863000000,
-                'tx_freq_max': 870000000,
+                'tx_freq_min': 915000000,
+                'tx_freq_max': 928000000,
                 'tx_gain_lut': DEFAULT_TX_GAIN_LUT,
             },
             # RF1 = RX only (no PA, SAW filter path)
