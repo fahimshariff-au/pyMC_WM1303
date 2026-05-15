@@ -871,6 +871,15 @@ step "Updating SPI optimization service script"
 cp "${SCRIPT_DIR}/config/spi_optimize.sh" "${INSTALL_BASE}/spi_optimize.sh" >> "${LOG_FILE}" 2>&1
 chmod 755 "${INSTALL_BASE}/spi_optimize.sh" 2>/dev/null
 ok "Updated (runs at every service start)"
+step "Installing radio presets"
+PRESETS_SRC="${SCRIPT_DIR}/config/radio-presets.json"
+if [ -f "${PRESETS_SRC}" ]; then
+    cp "${PRESETS_SRC}" "${DATA_DIR}/radio-presets.json" >> "${LOG_FILE}" 2>&1
+    chown ${PI_USER}:${PI_USER} "${DATA_DIR}/radio-presets.json"
+    ok "Radio presets installed to ${DATA_DIR}/radio-presets.json"
+else
+    ok "No radio-presets.json in config dir (skipping)"
+fi
 
 
 if [ "$FORCE_CONFIG" = true ]; then

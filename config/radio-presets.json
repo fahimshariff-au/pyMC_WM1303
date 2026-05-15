@@ -1,0 +1,78 @@
+{
+  "config": {
+    "suggested_radio_settings": {
+      "entries": [
+        {
+          "name": "AU-Mid",
+          "label": "Australia Mid (915.075 MHz)",
+          "description": "Australian MeshCore Mid preset. 915.075 MHz below the LoRaWAN AU915 band. Most common AU community preset (Brisbane/SEQ MBUG, national Discord).",
+          "region": "AU",
+          "frequency": 915.075,
+          "bandwidth": 125,
+          "spreading_factor": 9,
+          "coding_rate": 5,
+          "tx_power": 22,
+          "preamble_length": 16,
+          "sync_word": 13380,
+          "notes": "AU LIPD class licence: 915-928 MHz, 1W EIRP max (30 dBm). 22 dBm conducted + 8 dBi antenna = 30 dBm EIRP. sync_word 13380 = 0x3444 MeshCore public network."
+        },
+        {
+          "name": "AU-Narrow",
+          "label": "Australia Narrow (923.125 MHz)",
+          "description": "Australian MeshCore Narrow preset. 62.5 kHz bandwidth on the SX1261 Channel E radio. Used for Narrow-band bridging.",
+          "region": "AU",
+          "frequency": 923.125,
+          "bandwidth": 62.5,
+          "spreading_factor": 8,
+          "coding_rate": 5,
+          "tx_power": 22,
+          "preamble_length": 16,
+          "sync_word": 13380,
+          "notes": "Requires Channel E (SX1261). Verify frequency with your local AU community before deploying."
+        },
+        {
+          "name": "AU-Wide",
+          "label": "Australia Wide (915.8 MHz)",
+          "description": "Australian MeshCore Wide preset. 250 kHz bandwidth for high-throughput links at shorter range.",
+          "region": "AU",
+          "frequency": 915.8,
+          "bandwidth": 250,
+          "spreading_factor": 11,
+          "coding_rate": 5,
+          "tx_power": 22,
+          "preamble_length": 16,
+          "sync_word": 13380,
+          "notes": "Verify frequency and SF with your local AU community before deploying."
+        },
+        {
+          "name": "EU-868",
+          "label": "Europe 868 MHz (EU868)",
+          "description": "European MeshCore standard preset. 869.462 MHz in the EU863-870 ISM band.",
+          "region": "EU",
+          "frequency": 869.462,
+          "bandwidth": 125,
+          "spreading_factor": 10,
+          "coding_rate": 5,
+          "tx_power": 14,
+          "preamble_length": 17,
+          "sync_word": 13380,
+          "notes": "EU duty cycle limit applies. Max 1% per channel (36s/hour). TX power 14 dBm typical for ETSI compliance."
+        },
+        {
+          "name": "EU-Narrow",
+          "label": "Europe Narrow (869.618 MHz)",
+          "description": "European MeshCore Narrow preset. 62.5 kHz bandwidth for Channel E (SX1261).",
+          "region": "EU",
+          "frequency": 869.618,
+          "bandwidth": 62.5,
+          "spreading_factor": 8,
+          "coding_rate": 5,
+          "tx_power": 14,
+          "preamble_length": 17,
+          "sync_word": 13380,
+          "notes": "Requires Channel E (SX1261). EU duty cycle limit applies."
+        }
+      ]
+    }
+  }
+}

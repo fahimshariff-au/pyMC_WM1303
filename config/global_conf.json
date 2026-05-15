@@ -15,7 +15,7 @@
     "radio_0": {
       "enable": true,
       "type": "SX1250",
-      "freq": 869525000,
+      "freq": 915275000,
       "rssi_offset": -215.4,
       "rssi_tcomp": {
         "coeff_a": 0,
@@ -25,8 +25,8 @@
         "coeff_e": 0
       },
       "tx_enable": true,
-      "tx_freq_min": 863000000,
-      "tx_freq_max": 870000000,
+      "tx_freq_min": 915000000,
+      "tx_freq_max": 928000000,
       "tx_gain_lut": [
         {
           "rf_power": 12,
@@ -113,7 +113,7 @@
     "radio_1": {
       "enable": true,
       "type": "SX1250",
-      "freq": 869525000,
+      "freq": 915500000,
       "rssi_offset": -215.4,
       "rssi_tcomp": {
         "coeff_a": 0,
@@ -183,7 +183,7 @@
       "rssi_offset": 0,
       "lora_rx": {
         "enable": true,
-        "freq_hz": 869618000,
+        "freq_hz": 923125000,
         "bandwidth": 62500,
         "spreading_factor": 8,
         "coding_rate": 1,
@@ -191,8 +191,8 @@
       },
       "spectral_scan": {
         "enable": false,
-        "freq_start": 868600000,
-        "nb_chan": 9,
+        "freq_start": 915000000,
+        "nb_chan": 14,
         "nb_scan": 100,
         "pace_s": 300
       },
@@ -202,14 +202,14 @@
         "nb_channel": 2,
         "channels": [
           {
-            "freq_hz": 869462000,
+            "freq_hz": 915075000,
             "bandwidth": 125000,
             "scan_time_us": 128,
             "transmit_time_ms": 4000,
             "rssi_target": -80
           },
           {
-            "freq_hz": 869618000,
+            "freq_hz": 923125000,
             "bandwidth": 62500,
             "scan_time_us": 128,
             "transmit_time_ms": 4000,
@@ -223,12 +223,12 @@
         "rssi_target": -80,
         "channels": [
           {
-            "freq_hz": 869462000,
+            "freq_hz": 915075000,
             "lbt_enabled": false,
             "cad_enabled": false
           },
           {
-            "freq_hz": 869618000,
+            "freq_hz": 923125000,
             "lbt_enabled": false,
             "cad_enabled": false
           }
