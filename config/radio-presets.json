@@ -11,7 +11,7 @@
           "bandwidth": 125,
           "spreading_factor": 9,
           "coding_rate": 5,
-          "tx_power": 22,
+          "tx_power": 20,
           "preamble_length": 16,
           "sync_word": 13380,
           "notes": "AU LIPD class licence: 915-928 MHz, 1W EIRP max (30 dBm). 22 dBm conducted + 8 dBi antenna = 30 dBm EIRP. sync_word 13380 = 0x3444 MeshCore public network."
@@ -25,7 +25,7 @@
           "bandwidth": 62.5,
           "spreading_factor": 8,
           "coding_rate": 5,
-          "tx_power": 22,
+          "tx_power": 20,
           "preamble_length": 16,
           "sync_word": 13380,
           "notes": "Requires Channel E (SX1261). Verify frequency with your local AU community before deploying."
@@ -39,7 +39,7 @@
           "bandwidth": 250,
           "spreading_factor": 11,
           "coding_rate": 5,
-          "tx_power": 22,
+          "tx_power": 20,
           "preamble_length": 16,
           "sync_word": 13380,
           "notes": "Verify frequency and SF with your local AU community before deploying."

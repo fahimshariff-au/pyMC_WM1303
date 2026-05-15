@@ -7,7 +7,7 @@
       "preamble_length": 16,
       "friendly_name": "Channel A",
       "lbt_rssi_target": -90,
-      "tx_power": 22,
+      "tx_power": 20,
       "lbt_enabled": true,
       "cad_enabled": false,
       "lbt_threshold": -90,

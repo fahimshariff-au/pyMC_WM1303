@@ -117,7 +117,7 @@ identities:
 # Radio settings (Channel E — SX1261 companion chip)
 radio:
   frequency: 923125000  # AU-Narrow (62.5 kHz / SF8)
-  tx_power: 22  # AU LIPD: 1W EIRP max (30 dBm)
+  tx_power: 20  # AU LIPD: 1W EIRP max (30 dBm)
   bandwidth: 62500
   spreading_factor: 8
   coding_rate: 5
@@ -215,7 +215,7 @@ wm1303:
       preamble_length: 16
       spreading_factor: 9
       tx_enable: true
-      tx_power: 22  # AU LIPD: 1W EIRP max
+      tx_power: 20  # AU LIPD: 1W EIRP max
   pktfwd_bin: lora_pkt_fwd
   pktfwd_dir: /home/pi/wm1303_pf
   reset_script: reset_lgw.sh
