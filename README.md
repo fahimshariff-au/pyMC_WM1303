@@ -1,5 +1,12 @@
 # pyMC WM1303 — LoRa Multi-Channel Bridge/Repeater
 
+> **⚠️ This is a fork of [HansvanMeer/pyMC_WM1303](https://github.com/HansvanMeer/pyMC_WM1303).**  
+> Fork maintained by [@fahimshariff-au](https://github.com/fahimshariff-au).  
+> This fork targets **Australian 915–928 MHz ISM band hardware** (AU915 Mid — 915.075 MHz, SF9, BW125kHz) and includes bug fixes and AU-specific modifications on top of the upstream codebase.  
+> See [FORK_NOTES.md](FORK_NOTES.md) for the full modification log and [AU915_SETUP.md](AU915_SETUP.md) for the AU915 Mid frequency rationale and setup guide.
+
+---
+
 A multi-channel LoRa bridge and repeater that turns an SX1302/SX1303-based concentrator into a **MeshCore multi-channel radio gateway**. It receives, deduplicates, and retransmits packets across up to 5 independent LoRa channels — each with its own frequency, bandwidth, spreading factor, coding rate, and TX power — enabling MeshCore nodes on different channels to communicate through a single device.
 
 Built on top of [pyMC_core](https://github.com/HansvanMeer/pyMC_core) (dev) and [pyMC_Repeater](https://github.com/HansvanMeer/pyMC_Repeater) (dev), this project adds the WM1303-specific backend, bridge engine, web management UI, and all HAL-level modifications needed to run the concentrator as a multi-channel MeshCore repeater.
@@ -93,11 +100,14 @@ Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel
 
 ### Prerequisites
 
-- SenseCAP M1 (or Raspberry Pi 4 with WM1302/WM1303 HAT)
+- SenseCAP M1, or Raspberry Pi (3B+/4/5) with WM1302/WM1303 HAT (must include onboard SX1261/SX1262 — see Hardware Compatibility)
 - Raspberry Pi OS Lite (Bookworm or newer)
 - SSH access and internet connectivity
+- **⚠️ The primary user account must be named `pi`.** All install and patch scripts in this fork hardcode `/home/pi/` as the home directory. If you have renamed the account or are using a different username, paths in the scripts will break. This is a known limitation — flagged for a future fix. Use the default `pi` account.
 
 ### Install or Upgrade
+
+> **Fork note**: The bootstrap command below pulls from the **upstream** HansvanMeer repository. After running it, apply this fork's overlay patches from [FORK_NOTES.md](FORK_NOTES.md) to get the AU915 bug fixes and modifications.
 
 A single command handles both fresh installations and upgrades — the script automatically detects which is needed:
 
@@ -247,6 +257,8 @@ With slower LoRa settings, the same message takes **much** longer:
 
 | Document | Description |
 |----------|-------------|
+| [AU915_SETUP.md](AU915_SETUP.md) | **Fork** — AU915 Mid frequency rationale, link budgets, community test results, Optus caveat, Narrow/Eastmesh coexistence |
+| [FORK_NOTES.md](FORK_NOTES.md) | **Fork** — Fork scope, `pi` username requirement, complete AU modification log for all commits |
 | [Architecture](docs/architecture.md) | System architecture, data flow, design principles |
 | [Radio](docs/radio.md) | Radio topology, 5-channel model, RF chains |
 | [Hardware](docs/hardware.md) | WM1303 HAT, SPI layout, GPIO, platform details |
