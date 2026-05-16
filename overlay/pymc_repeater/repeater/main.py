@@ -1007,30 +1007,32 @@ class RepeaterDaemon:
             logger.warning("BridgeRepeaterHandler: failed to parse %d bytes", len(data))
             return
 
-        # Attach RSSI/SNR from bridge metadata to the parsed Packet so
-        # downstream handlers (advert processing, neighbor tracking) can
-        # access signal quality even though it's not in the wire format.
-        if rssi is not None:
-            pkt._rssi = int(rssi)
-        if snr is not None:
-            pkt._snr = float(snr)
+        # Attach RSSI/SNR from bridge metadata to the parsed Packet.
+        # NOTE: Packet.rssi/snr are read-only properties — only _rssi/_snr are writable.
+        _rssi_int = int(rssi) if rssi is not None else 0
+        _snr_float = float(snr) if snr is not None else 0.0
+        pkt._rssi = _rssi_int
+        pkt._snr = _snr_float
 
         logger.info(
             "BridgeRepeaterHandler: parsed %d bytes, header=0x%02x, origin_channel=%s, rssi=%s, snr=%s",
             len(data), pkt.header, origin_channel, rssi, snr
         )
 
-        # Process ADVERT packets for neighbor tracking
-        payload_type = pkt.get_payload_type() if hasattr(pkt, 'get_payload_type') else None
-        if payload_type == AdvertHandler.payload_type() and self.advert_helper:
+        # Bug 2 fix: deliver RF-received packets to TCP companion bridges.
+        # BridgeEngine bypasses the Dispatcher on WM1303 hardware, so packets
+        # never reach PacketRouter via the normal Dispatcher->router->companion path,
+        # making companions deaf to RF traffic.  Enqueue here so _route_packet
+        # delivers to companion_bridges (ADVERT, TXT_MSG, ACK, PATH, GRP_TXT ...).
+        # _injected_for_tx=True prevents _route_packet from calling daemon.repeater_handler
+        # a second time (forwarding is handled below via process_packet + inject_packet).
+        if self.router:
             try:
-                _rssi = int(rssi) if rssi is not None else 0
-                _snr = float(snr) if snr is not None else 0.0
-                await self.advert_helper.process_advert_packet(pkt, _rssi, _snr)
-                logger.info("BridgeRepeaterHandler: processed ADVERT for neighbor tracking (rssi=%s, snr=%s)",
-                            _rssi, _snr)
+                pkt._injected_for_tx = True
+                await self.router.enqueue(pkt)
+                logger.debug('BridgeRepeaterHandler: enqueued for companion delivery')
             except Exception as e:
-                logger.warning("BridgeRepeaterHandler: advert processing error: %s", e)
+                logger.warning('BridgeRepeaterHandler: companion delivery enqueue failed: %s', e)
 
         # Run repeater forwarding logic
         result = self.repeater_handler.process_packet(pkt)
