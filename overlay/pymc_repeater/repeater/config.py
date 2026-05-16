@@ -419,6 +419,21 @@ def get_radio_for_board(board_config: dict):
 
         radio = WM1303Backend(config=board_config)
 
+        # Stamp channel_a radio params as plain attributes so engine.py
+        # can read them via getattr() — WM1303Backend does not expose
+        # spreading_factor / coding_rate / tx_power as plain attributes,
+        # causing engine.py to fall back to hardcoded EU defaults.
+        _wm_ch_a = board_config.get('wm1303', {}).get('channels', {}).get('channel_a', {})
+        if _wm_ch_a:
+            radio.spreading_factor = int(_wm_ch_a.get('spreading_factor', 9))
+            radio.bandwidth        = int(_wm_ch_a.get('bandwidth', 125000))
+            _cr = _wm_ch_a.get('coding_rate', '4/5')
+            _cr_map = {'4/5': 5, '4/6': 6, '4/7': 7, '4/8': 8}
+            radio.coding_rate      = _cr_map.get(str(_cr), 5) if isinstance(_cr, str) else int(_cr)
+            radio.tx_power         = int(_wm_ch_a.get('tx_power', 20))
+            radio.frequency        = int(_wm_ch_a.get('frequency', 916200000))
+            radio.preamble_length  = int(_wm_ch_a.get('preamble_length', 17))
+
         if hasattr(radio, "begin"):
             try:
                 radio.begin()
