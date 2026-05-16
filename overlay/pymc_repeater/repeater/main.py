@@ -1008,7 +1008,8 @@ class RepeaterDaemon:
             return
 
         # Attach RSSI/SNR from bridge metadata to the parsed Packet.
-        # NOTE: Packet.rssi/snr are read-only properties — only _rssi/_snr are writable.
+        # Set both underscore-prefixed and plain attributes so all downstream
+        # consumers (_route_packet, advert_helper) use the correct values.
         _rssi_int = int(rssi) if rssi is not None else 0
         _snr_float = float(snr) if snr is not None else 0.0
         pkt._rssi = _rssi_int
