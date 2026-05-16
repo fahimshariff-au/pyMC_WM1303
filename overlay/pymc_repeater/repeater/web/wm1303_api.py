@@ -1894,8 +1894,8 @@ class WM1303API:
         spec_scan = sx1261.get("spectral_scan", {})
         lbt = sx1261.get("lbt", {})
         rf = {
-            0: sx.get("radio_0", {}).get("freq", 867500000),
-            1: sx.get("radio_1", {}).get("freq", 868500000),
+            0: sx.get("radio_0", {}).get("freq", 915200000),
+            1: sx.get("radio_1", {}).get("freq", 917200000),
         }
         channels = _build_if_channels(conf)
         last_scan = {}
@@ -1964,7 +1964,7 @@ class WM1303API:
             sx = self._get_sx1261()
             if sx and getattr(sx, '_initialized', False):
                 try:
-                    result = sx.lbt_scan(868100000, 5000)
+                    result = sx.lbt_scan(915200000, 5000)
                     return _j({"status": "ok", "result": "Channel " + ("free" if result else "busy"), "channel_free": result})
                 except Exception as e:
                     return _j({"status": "error", "result": str(e), "error": str(e)})
@@ -1973,7 +1973,7 @@ class WM1303API:
             sx = self._get_sx1261()
             if sx and getattr(sx, '_initialized', False):
                 try:
-                    result = sx.cad_detect(868100000)
+                    result = sx.cad_detect(915200000)
                     return _j({"status": "ok", "result": "Activity " + ("detected" if result else "not detected"), "activity_detected": result})
                 except Exception as e:
                     return _j({"status": "error", "result": str(e), "error": str(e)})
@@ -2085,7 +2085,7 @@ class WM1303API:
             sx = self._get_sx1261()
             if sx and getattr(sx, '_initialized', False):
                 try:
-                    results = sx.get_rssi_scan(863000000, 870000000, 200000)
+                    results = sx.get_rssi_scan(915000000, 928000000, 200000)
                     scan_points = [{"freq_mhz": round(r["freq_hz"]/1e6, 3), "rssi_dbm": r["rssi_dbm"]} for r in results]
                     note = "Real Channel E RSSI measurement (Python driver)"
                 except Exception as e:
@@ -2094,7 +2094,7 @@ class WM1303API:
 
         # --- Fallback: Simulated data ---
         if not scan_points:
-            for freq_hz in range(863000000, 870200000, 200000):
+            for freq_hz in range(915000000, 928200000, 200000):
                 freq_mhz = round(freq_hz / 1e6, 3)
                 near = any(abs(ch["frequency_hz"] - freq_hz) < 150000 for ch in channels)
                 rssi = -120.0 + random.uniform(0, 4)

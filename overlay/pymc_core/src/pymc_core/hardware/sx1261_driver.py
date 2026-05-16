@@ -251,8 +251,8 @@ class SX1261Radio:
             self._cmd(CMD_SET_DIO2_AS_RF_SWITCH, [0x01])
             self._wait_busy()
 
-            # Calibrate image for EU868 band (863-870 MHz)
-            self._cmd(CMD_CALIBRATE_IMAGE, [0xD7, 0xDB])  # 863-870 MHz
+            # Calibrate image for AU915 band (902-928 MHz)
+            self._cmd(CMD_CALIBRATE_IMAGE, [0xE1, 0xE9])  # 902-928 MHz
             self._wait_busy(timeout=1.0)
 
             # Full calibration
