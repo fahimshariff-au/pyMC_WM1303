@@ -782,6 +782,20 @@ class BridgeEngine:
         _fwd_after = self.forwarded_packets
         _was_forwarded = (_fwd_after > _fwd_before)
 
+        # NEW: Emit trace for TX outcome (Fix: tx_start/tx_drop missing in UI)
+        if _was_forwarded:
+            _trace(pkt_hash8, 'tx_start',
+                   channel=source_name, pkt_type=pkt_type_name,
+                   detail='Forwarded by rule(s)',
+                   status='ok')
+        else:
+            _trace(pkt_hash8, 'tx_drop',
+                   channel=source_name, pkt_type=pkt_type_name,
+                   detail='Dropped: no matching rule',
+                   status='warning')
+
+
+
         # Fix (Bug 2 / packets.transmitted persistence): record the injected
         # packet into the SQLite `packets` table via the repeater engine.
         # For the 'repeater' re-inject source we intentionally skip recording:
@@ -1520,6 +1534,20 @@ class BridgeEngine:
             # --- Update RepeaterHandler counters ---
             _fwd_after = self.forwarded_packets
             _was_forwarded = (_fwd_after > _fwd_before)
+
+            # NEW: Emit trace for TX outcome (Fix: tx_start/tx_drop missing in UI)
+            if _was_forwarded:
+                _trace(pkt_hash8, 'tx_start',
+                       channel=cid, pkt_type=pkt_type_name,
+                       detail='Forwarded by rule(s)',
+                       status='ok')
+            else:
+                _trace(pkt_hash8, 'tx_drop',
+                       channel=cid, pkt_type=pkt_type_name,
+                       detail='Dropped: no matching rule',
+                       status='warning')
+
+
             self._update_repeater_counters(
                 data, cid, pkt_type_name=pkt_type_name,
                 pkt_hash=pkt_hash, was_forwarded=_was_forwarded,
