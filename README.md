@@ -112,7 +112,7 @@ Channels A–D use the SX1302 concentrator's multi-channel demodulators. Channel
 A single command handles both fresh installations and upgrades — the script automatically detects which is needed:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/fahimshariff-au/pyMC_WM1303/main/bootstrap.sh | sudo bash
 ```
 
 - **New system** → clones the repository and runs a full installation (15–30 minutes)
