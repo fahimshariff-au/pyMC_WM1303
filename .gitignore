@@ -31,3 +31,4 @@ Thumbs.db
 *.promptinclude.md
 upgrade_bootstrap.sh
 node_modules/
+CLAUDE.md
