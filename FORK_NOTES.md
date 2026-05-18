@@ -48,6 +48,82 @@ All changes relative to upstream `HansvanMeer/pyMC_WM1303` are recorded here in 
 
 ---
 
+### `fecf31e` — Fix: sync node_name to GroupTextHandler after _load_prefs
+
+**Date**: May 19, 2026
+**Files patched**: `overlay/pymc_repeater/repeater/companion_bridge.py`
+
+**Problem**: `RepeaterCompanionBridge._load_prefs()` updates `self.prefs.node_name` from SQLite but does not call `group_text_handler.set_our_node_name()`. If the stored name diverges from the constructor-time name (e.g. after a UI rename), the GRP_TXT echo filter silently uses the wrong name and would fail to filter the node's own outgoing messages.
+
+**Fix**: After the prefs merge loop in `_load_prefs`, sync the loaded name to GroupTextHandler:
+```python
+gth = self._get_group_text_handler()
+if gth and hasattr(gth, "set_our_node_name"):
+    gth.set_our_node_name(self.prefs.node_name)
+```
+
+**Note**: Currently harmless (node name has not been renamed since install). Bundled with ping fix commit for hygiene.
+
+---
+
+### `71d3aa8` — Fix c6 ping delivery (three bugs in TRACE_RESP path)
+
+**Date**: May 19, 2026
+**Files patched**:
+- `repeater/handler_helpers/trace.py`
+- `repeater/packet_router.py`
+- `overlay/pymc_repeater/repeater/packet_router.py`
+
+**Also patched (manual, not in repo — pymc_core venv dependency)**:
+- `/opt/pymc_repeater/venv/lib/python3.13/site-packages/pymc_core/hardware/wm1303_backend.py`
+
+**Problem**: MeshCore "ping" uses TRACE packets (payload_type=0x09). Three bugs combined to prevent TRACE_RESP from being delivered to the companion app (c6):
+
+**Bug A — double `is_duplicate()` call in trace_helper**:
+`_log_no_forward_reason()` called `is_duplicate()` (registering the packet in the dedup cache), then the `on_trace_complete` guard called it again — always returning True by that point. The callback was silently blocked on every TRACE_RESP.
+
+Fix: pre-compute `_is_dup` once before `_log_no_forward_reason`, pass it as a parameter, remove the second `is_duplicate()` call from the `on_trace_complete` guard entirely. Note: `inject_packet()` calls `repeater_handler(local_transmission=True)` before the router enqueues — this registers the packet in the dedup cache before TraceHelper ever runs, so `is_duplicate()` is structurally always True for bridge-received TRACE_RESPs and cannot be used as a delivery guard.
+
+**Bug B — packet_router skipping TraceHelper for bridge-received TRACE_RESPs**:
+The Bug 2 fix (`2555cc0`) sets `_injected_for_tx=True` on all bridge-received packets in `_bridge_repeater_handler`. The TRACE branch in `packet_router.py` was using this flag alone to decide whether to skip TraceHelper — causing TraceHelper to be skipped for ALL TRACE packets, including incoming TRACE_RESPs.
+
+Fix: check `packet.path` length to distinguish outgoing TX TRACE (empty path, skip TraceHelper) from incoming TRACE_RESP (non-empty path, run TraceHelper).
+
+**Bug C — wm1303_backend self-echo hash false-matching TRACE_RESP**:
+`_extract_mc_payload()` strips path bytes from packets to produce a stable application-layer hash for echo detection. For TRACE (0 hops) and TRACE_RESP (1 hop), stripping the path bytes produces identical payloads (tag + flags + auth + target_hash). The TRACE_RESP was therefore hash-matched as a self-echo of the outgoing TRACE and discarded before TraceHelper could process it.
+
+Fix: skip storing the TX echo hash entirely for TRACE packets (type 0x09). Applied manually to the pymc_core venv install at `/opt/pymc_repeater/venv/lib/python3.13/site-packages/pymc_core/hardware/wm1303_backend.py` — this file is NOT tracked in this repo as it is part of the pymc_core dependency. **This patch will be lost on pymc_core upgrades and must be re-applied manually.**
+
+**Tested**: c6→75 ping succeeds. e4 pyMC dashboard ping succeeds.
+
+---
+
+### `d38dc7d` — Add missing TX trace events to bridge_engine
+
+**Date**: May 18, 2026  
+**Files patched**: `overlay/pymc_repeater/repeater/bridge_engine.py`
+
+**Problem**: WM1303 UI trace logs were missing TX completion events (`tx_start`/`tx_drop`) at the bridge routing layer. The UI showed packets arriving and being injected into the bridge, but then disappearing with no indication of whether they were forwarded or dropped. This created a gap between the UI trace view and the pymc dashboard, which showed the complete packet lifecycle including routing decisions.
+
+**Fix**: Added trace emissions at two critical routing decision points:
+- **Line 787**: After injected packet forwarding decision — emits `tx_start` if forwarded, `tx_drop` if dropped
+- **Line 1540**: After RX packet forwarding decision — emits `tx_start` if forwarded, `tx_drop` if dropped
+
+Both trace points include:
+- Packet hash (for correlation)
+- Channel/CID (which channel the decision was made for)
+- Packet type
+- Detail string ("Forwarded by rule(s)" or "Dropped: no matching rule")
+- Status (ok/warning)
+
+**Effect**: UI trace logs now show the complete packet lifecycle: `received` → `dedup_check` → `bridge_inject` → `tx_start`/`tx_drop` → (transmitted or dropped). This brings bridge-layer trace coverage to 100% of visible packet disposition.
+
+**Note**: PING/PING_RESP events may still be handled at a higher layer (dispatcher/router) and may require separate tracing. This fix addresses packets processed through the bridge routing layer only.
+
+**Verification**: After deployment and restart, traces for forwarded packets now include `tx_start` events showing the routing decision point. Dropped packets show `tx_drop` with drop reason.
+
+---
+
 ### `e93e649` — Fix radio_config SF/CR/TX power reporting (real fix)
 
 **Date**: May 2026  
