@@ -547,7 +547,7 @@ ok "HAL overlay applied"
 
 step "Applying pyMC_core overlay"
 CORE_HW_DIR="${REPO_DIR}/pyMC_core/src/pymc_core/hardware"
-for f in __init__.py wm1303_backend.py sx1302_hal.py tx_queue.py sx1261_driver.py signal_utils.py virtual_radio.py; do
+for f in __init__.py wm1303_backend.py sx1302_hal.py tx_queue.py sx1261_driver.py signal_utils.py virtual_radio.py region_config.py; do
     if [ -f "${OVERLAY_DIR}/pymc_core/src/pymc_core/hardware/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_core/src/pymc_core/hardware/${f}" "${CORE_HW_DIR}/" >> "${LOG_FILE}" 2>&1
     fi
@@ -785,6 +785,15 @@ ok "Cleaned"
 # Phase 8: Install Configuration Files
 # =============================================================================
 phase "Install Configuration Files"
+
+step "Installing presets.json (channel presets per region)"
+# Always overwrite presets.json since it is read-only catalog data managed by the installer.
+if [ -f "${SCRIPT_DIR}/config/presets.json" ]; then
+    cp "${SCRIPT_DIR}/config/presets.json" "${CONFIG_DIR}/presets.json" >> "${LOG_FILE}" 2>&1
+    ok "presets.json installed"
+else
+    warn "presets.json not found in config/, skipping"
+fi
 
 step "Installing wm1303_ui.json"
 if [ ! -f "${CONFIG_DIR}/wm1303_ui.json" ]; then

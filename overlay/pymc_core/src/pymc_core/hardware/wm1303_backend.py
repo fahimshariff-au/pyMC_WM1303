@@ -29,6 +29,18 @@ import sqlite3
 
 from contextlib import contextmanager as _contextmanager
 
+# Region configuration (regulatory frequency bands, SX1261 image calibration)
+try:
+    from .region_config import (
+        get_tx_bounds as _region_get_tx_bounds,
+        get_region_summary as _region_get_summary,
+        DEFAULT_REGION as _REGION_DEFAULT,
+    )
+    _REGION_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _REGION_AVAILABLE = False
+    _REGION_DEFAULT = "EU868"
+
 class _SharedConn:
     """Module-level shared SQLite connection with thread-safe access.
 
@@ -276,6 +288,18 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
     # Read ALL channel definitions from wm1303_ui.json (the SSOT)
     all_ui_channels = []
     manual_center_hz = 0  # Manual RF center override from UI (MHz -> Hz)
+    region_code = _REGION_DEFAULT  # Regulatory region (default EU868)
+    region_custom_min = None       # Optional CUSTOM region tx_freq_min (Hz)
+    region_custom_max = None       # Optional CUSTOM region tx_freq_max (Hz)
+    # Device-wide LoRa network sync word (NOT per-channel).
+    # SX1302 hardware supports ONLY two values via the board-level
+    # lorawan_public flag (lgw_conf_board_t):
+    #   - Private 0x1424 (5156)  -> lorawan_public = false  (default; MeshCore)
+    #   - Public  0x3444 (13380) -> lorawan_public = true   (LoRaWAN public nets)
+    # Custom sync words are NOT hardware-supported and are removed from the UI.
+    # Legacy configs with mode=="custom" fall back silently to Private.
+    _sync_word_value = 0x1424
+    _sync_word_mode = 'private'
     try:
         if UI_JSON_PATH.exists():
             ui_data = json.loads(UI_JSON_PATH.read_text())
@@ -284,8 +308,46 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             _rf_mhz = ui_data.get('rf_center_freq_mhz', 0)
             if _rf_mhz:
                 manual_center_hz = int(float(_rf_mhz) * 1_000_000)
+            # Regulatory region (EU868, US915, AU915, AS923, IN865, JP920, KR920, CUSTOM)
+            _region_field = ui_data.get('region')
+            if isinstance(_region_field, dict):
+                # Allow region as object: {'code': 'CUSTOM', 'tx_freq_min': 915000000, 'tx_freq_max': 928000000}
+                region_code = str(_region_field.get('code', _REGION_DEFAULT)).upper()
+                region_custom_min = _region_field.get('tx_freq_min')
+                region_custom_max = _region_field.get('tx_freq_max')
+            elif isinstance(_region_field, str) and _region_field:
+                region_code = _region_field.upper()
+            # Device-wide sync_word (top-level; NOT per-channel).
+            _sw_field = ui_data.get('sync_word')
+            if isinstance(_sw_field, dict):
+                try:
+                    _sync_word_value = int(_sw_field.get('value', 0x1424)) & 0xFFFF
+                except (TypeError, ValueError):
+                    _sync_word_value = 0x1424
+                _sync_word_mode = str(_sw_field.get('mode', '')).lower() or 'private'
+            elif isinstance(_sw_field, int):
+                _sync_word_value = int(_sw_field) & 0xFFFF
+                _sync_word_mode = ''  # derive below
+            # Normalize: only Private/Public are hardware-valid. Anything else
+            # (including legacy 'custom' mode from older UI builds) falls back
+            # to Private silently.
+            if _sync_word_value == 0x3444:
+                _sync_word_mode = 'public'
+            else:
+                _sync_word_value = 0x1424
+                _sync_word_mode = 'private'
     except Exception as ex:
         logger.warning('_generate_bridge_conf: could not read %s: %s', UI_JSON_PATH, ex)
+
+    # Derive the board-level lorawan_public flag from device-wide sync_word.
+    # HAL v2.10 lgw_conf_board_t.lorawan_public is BOARD-LEVEL: true -> Public
+    # sync word 0x3444; false -> Private 0x1424. This is the ONLY mechanism
+    # SX1302 exposes for sync word selection.
+    _lorawan_public = (_sync_word_mode == 'public')
+    logger.info(
+        '_generate_bridge_conf: sync_word=0x%04X mode=%s lorawan_public=%s',
+        _sync_word_value, _sync_word_mode, _lorawan_public,
+    )
 
     active_freqs = []  # track for logging
     if not all_ui_channels:
@@ -520,8 +582,17 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             chan_configs[key] = {'enable': False, 'radio': 0, 'if': 0}
 
     # --- Channel E config from wm1303_ui.json ---
+    # sync_word is the DEVICE-WIDE value (top-level wm1303_ui.json). HAL v2.10
+    # applies the board-level lorawan_public flag to all RX paths including the
+    # SX1261 lora_rx; the explicit 'sync_word' field below is reserved for a
+    # future HAL extension and is currently ignored by HAL v2.10. Keeping it
+    # makes the config self-describing and avoids surprises if HAL adds support.
     _che_d = {}  # default: empty dict, populated from wm1303_ui.json channel_e section
-    _che_lora_rx = {'enable': True, 'freq_hz': 869618000, 'bandwidth': 62500, 'spreading_factor': 8, 'coding_rate': 1, 'boosted': True}
+    _che_lora_rx = {
+        'enable': True, 'freq_hz': 869618000, 'bandwidth': 62500,
+        'spreading_factor': 8, 'coding_rate': 1, 'boosted': True,
+        'sync_word': int(_sync_word_value) & 0xFFFF,
+    }
     try:
         _che_path = Path('/etc/pymc_repeater/wm1303_ui.json')
         if _che_path.exists():
@@ -535,10 +606,40 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                     'spreading_factor': int(_che_d.get('spreading_factor', 8)),
                     'coding_rate': {'4/5':1,'4/6':2,'4/7':3,'4/8':4}.get(str(_che_d.get('coding_rate','4/5')), int(_che_d.get('coding_rate',1)) if str(_che_d.get('coding_rate','1')).isdigit() else 1),
                     'boosted': bool(_che_d.get('boosted_rx', True)),
+                    'sync_word': int(_sync_word_value) & 0xFFFF,
                 }
-                logger.info('_generate_bridge_conf: channel_e from UI: freq=%d bw=%d sf=%d cr=%d boosted=%s', _che_lora_rx['freq_hz'], _che_lora_rx['bandwidth'], _che_lora_rx['spreading_factor'], _che_lora_rx['coding_rate'], _che_lora_rx['boosted'])
+                logger.info('_generate_bridge_conf: channel_e from UI: freq=%d bw=%d sf=%d cr=%d boosted=%s sync_word=0x%04X', _che_lora_rx['freq_hz'], _che_lora_rx['bandwidth'], _che_lora_rx['spreading_factor'], _che_lora_rx['coding_rate'], _che_lora_rx['boosted'], _che_lora_rx['sync_word'])
     except Exception as _cex:
         logger.warning('_generate_bridge_conf: channel_e read error: %s', _cex)
+
+    # --- Channel F config from wm1303_ui.json (chan_Lora_std on RF0) ---
+    # Channel F enables BW125/250/500 single-SF reception in parallel with
+    # channels A-D (chan_multiSF_0-3, all BW125). Issue #1 multi-region BW250.
+    _chf_d = {}
+    _chf_enabled = False
+    _chf_freq_hz = 869525000
+    _chf_bw_hz = 250000
+    _chf_sf = 9
+    try:
+        _chf_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+        if _chf_path.exists():
+            _chf_d = json.loads(_chf_path.read_text()).get('channel_f', {})
+            if _chf_d:
+                _chf_enabled = bool(_chf_d.get('enabled', False))
+                _chf_freq_hz = int(_chf_d.get('frequency', 869525000))
+                _chf_bw_hz = int(_chf_d.get('bandwidth', 250000))
+                if _chf_bw_hz not in (125000, 250000, 500000):
+                    _chf_bw_hz = 125000
+                _chf_sf = int(_chf_d.get('spreading_factor', 9))
+                if _chf_sf < 5 or _chf_sf > 12:
+                    _chf_sf = 9
+                if _chf_enabled:
+                    logger.info(
+                        '_generate_bridge_conf: channel_f ENABLED freq=%d bw=%d sf=%d',
+                        _chf_freq_hz, _chf_bw_hz, _chf_sf,
+                    )
+    except Exception as _chfex:
+        logger.warning('_generate_bridge_conf: channel_f read error: %s', _chfex)
 
     # WM1303: AGC reload interval from UI advanced config (0 = disabled)
     _agc_reload_interval_s = 30  # default 30s (aggressive to prevent SX1302 correlator stall)
@@ -549,11 +650,35 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
         pass
     logger.info('_generate_bridge_conf: agc_reload_interval_s=%d', _agc_reload_interval_s)
 
+    # Resolve regulatory TX frequency bounds based on region (Issue #4)
+    # Supports EU868, US915, AU915, AS923, IN865, JP920, KR920, and CUSTOM.
+    # Falls back to EU868 bounds when region_config module is unavailable.
+    if _REGION_AVAILABLE:
+        _tx_freq_min, _tx_freq_max = _region_get_tx_bounds(
+            region_code,
+            custom_min=region_custom_min,
+            custom_max=region_custom_max,
+            fallback_channels=active_freqs,
+        )
+        logger.info(
+            '_generate_bridge_conf: region=%s tx_freq_min=%d Hz tx_freq_max=%d Hz',
+            region_code, _tx_freq_min, _tx_freq_max,
+        )
+    else:
+        # Backwards-compatible fallback: EU868
+        _tx_freq_min, _tx_freq_max = 863_000_000, 870_000_000
+        logger.warning(
+            '_generate_bridge_conf: region_config not available, '
+            'using EU868 fallback tx_freq bounds'
+        )
+
     conf = {
         'SX130x_conf': {
             'com_type': 'SPI',
             'com_path': '/dev/spidev0.0',
-            'lorawan_public': False,
+            # Board-level LoRa sync word selector (HAL v2.10 lgw_conf_board_t).
+            # Derived from device-wide sync_word (top-level wm1303_ui.json).
+            'lorawan_public': bool(_lorawan_public),
             'clksrc': 0,
             'antenna_gain': 0,
             'full_duplex': False,
@@ -572,8 +697,8 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 'rssi_tcomp': {'coeff_a': 0, 'coeff_b': 0, 'coeff_c': 20.41,
                                'coeff_d': 2162.56, 'coeff_e': 0},
                 'tx_enable': True,
-                'tx_freq_min': 863000000,
-                'tx_freq_max': 870000000,
+                'tx_freq_min': _tx_freq_min,
+                'tx_freq_max': _tx_freq_max,
                 'tx_gain_lut': DEFAULT_TX_GAIN_LUT,
             },
             # RF1 = RX only (no PA, SAW filter path)
@@ -587,8 +712,24 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 'tx_enable': False,
             },
             **chan_configs,
-            'chan_Lora_std':  {'enable': False, 'radio': 0, 'if': 0,
-                              'bandwidth': 125000, 'spread_factor': 8},
+            # Channel F: chan_Lora_std for BW125/250/500 single-SF on RF0.
+            # Runs in PARALLEL with chan_multiSF_0-3 (channels A-D). When enabled,
+            # uses the if-offset derived from channel_f.frequency relative to center.
+            # sync_word here is the DEVICE-WIDE value (top-level in wm1303_ui.json).
+            # NOTE: HAL v2.10 applies the board-level lorawan_public flag to all
+            # IF chains including chan_Lora_std; the explicit 'sync_word' field
+            # below is reserved for a future HAL extension and is currently
+            # ignored by HAL v2.10. With Custom removed from the UI, this value
+            # is always 0x1424 (Private) or 0x3444 (Public), matching the board
+            # flag, so no divergence is possible.
+            'chan_Lora_std':  {
+                'enable': bool(_chf_enabled),
+                'radio': 0,
+                'if': int(_chf_freq_hz - center) if _chf_enabled else 0,
+                'bandwidth': int(_chf_bw_hz),
+                'spread_factor': int(_chf_sf),
+                'sync_word': int(_sync_word_value) & 0xFFFF,
+            },
             'chan_FSK':       {'enable': True, 'radio': 0, 'if': 0,
                               'bandwidth': 125000, 'datarate': 50000},
             # SX1261 companion chip for LBT (Listen Before Talk)
@@ -721,6 +862,14 @@ class WM1303Backend:
         self._tx_echo_hashes: dict[str, float] = {}  # md5_hash -> monotonic_time
         self._tx_echo_ttl = 30.0  # seconds to keep TX hashes
         self._tx_echo_detected = 0
+        self._tx_mesh_echo_detected = 0  # neighbor-repeater retransmissions of our packets
+        self._tx_unknown_echo_detected = 0  # echo matched on hash but path/src didn't confirm origin
+        # Local identity for path-based echo classification (set by repeater main on startup)
+        # _local_pub_key: full bytes; _local_path_hash_hex: hex string of the first N bytes
+        # matching the configured path_hash_size (1, 2, or 3 bytes).
+        self._local_pub_key: bytes | None = None
+        self._local_path_hash_hex: str | None = None
+        self._local_path_hash_size: int = 1
         self._rx_dedup_cache: dict = {}  # multi-demod dedup  # counter for stats
 
         # Dispatcher RX callback (set by Dispatcher via set_rx_callback)
@@ -812,6 +961,15 @@ class WM1303Backend:
         self._channel_e_cache_time: float = 0
         self._channel_e_cache_ttl: float = 5.0  # seconds
 
+        # Channel F config cache (chan_Lora_std on RF0): freq + bw + sf for RX matching
+        self._channel_f_enabled_cache: bool = False
+        self._channel_f_freq_cache: int = 0
+        self._channel_f_bw_cache: int = 0  # Hz (125000/250000/500000)
+        self._channel_f_sf_cache: int = 0
+        self._channel_f_config_cache: dict = {}
+        self._channel_f_cache_time: float = 0
+        self._channel_f_cache_ttl: float = 5.0  # seconds
+
         # RX Watchdog: auto-restart pkt_fwd when concentrator stops receiving
         self._last_rx_timestamp = time.monotonic()
         self._watchdog_timeout = 9999  # 3 minutes without RX triggers restart
@@ -855,6 +1013,113 @@ class WM1303Backend:
         self._crc_rate_counters: dict[str, dict[str, int]] = {}  # {channel_id: {"crc_error": N, "crc_disabled": N}}
 
 
+
+    def set_local_identity(self, pub_key: bytes, path_hash_size: int = 1) -> None:
+        """Register the local repeater identity for path-based echo classification.
+
+        The path-hash that this repeater appends to a packet when it forwards
+        it is the first ``path_hash_size`` bytes of its public key (uppercase
+        hex). We use this to distinguish:
+
+        * ``self_echo``    - own TX heard back via RF coupling (our path_hash
+          is the LAST entry in the packet's path, OR the packet was
+          originated by us and the path is empty).
+        * ``mesh_echo``    - a neighbour repeater retransmitted a packet that
+          we had previously transmitted (our path_hash is in the path but
+          not last, OR our identity is the source and the path is non-empty).
+        * ``unknown_echo`` - content hash matched a recent TX but neither the
+          path nor the source confirmed our involvement (rare collision).
+        """
+        if not pub_key:
+            return
+        try:
+            sz = int(path_hash_size)
+        except Exception:
+            sz = 1
+        if sz not in (1, 2, 3):
+            sz = 1
+        self._local_pub_key = bytes(pub_key)
+        self._local_path_hash_size = sz
+        self._local_path_hash_hex = self._local_pub_key[:sz].hex().upper()
+        logger.info('WM1303Backend: local identity registered for echo classification: '
+                    'path_hash=%s (size=%d byte%s)',
+                    self._local_path_hash_hex, sz, 's' if sz != 1 else '')
+
+    def _classify_echo(self, payload: bytes) -> str:
+        """Classify a content-hash-matched echo as 'self_echo', 'mesh_echo', or 'unknown_echo'.
+
+        The classification is **path-based** rather than time-based, so the
+        decision is independent of mesh latency and works correctly on any
+        repeater because each one has its own unique identity hash.
+
+        Falls back to 'unknown_echo' when the local identity is not registered
+        yet or when the packet is too short to parse the path.
+        """
+        if not self._local_pub_key or not payload or len(payload) < 2:
+            return 'unknown_echo'
+        try:
+            hdr = payload[0]
+            rt = hdr & 0x03
+            pt = (hdr >> 2) & 0x0F
+            has_tc = rt in (0x00, 0x03)  # TFLOOD/TDIRECT have transport codes
+            idx = 5 if has_tc else 1  # offset to path_raw byte
+            if idx >= len(payload):
+                return 'unknown_echo'
+            path_raw = payload[idx]
+            hops = path_raw & 0x3F
+            hsz = ((path_raw >> 6) & 0x03) + 1  # 1..3 byte path hashes
+            # Use the encoded path-hash size from the packet (matches what the
+            # network is actually using) so we compare on the right number of bytes.
+            local_hex = self._local_pub_key[:hsz].hex().upper()
+            path_hashes = []
+            for i in range(hops):
+                start = idx + 1 + i * hsz
+                end = start + hsz
+                if end <= len(payload):
+                    path_hashes.append(payload[start:end].hex().upper())
+            # Determine src_hash for self-originated detection (REQ/RESP/TXT/PATH/ADVERT)
+            src_hash_hex = None
+            pbytes = hops * hsz
+            payload_start = idx + 1 + pbytes
+            if payload_start < len(payload):
+                inner = payload[payload_start:]
+                if pt in (0x00, 0x01, 0x02, 0x08) and len(inner) >= 2:
+                    src_hash_hex = f'{inner[1]:02X}'
+                elif pt == 0x04 and len(inner) >= 1:
+                    src_hash_hex = f'{inner[0]:02X}'
+            local_first_byte_hex = self._local_pub_key[:1].hex().upper()
+            # --- Classification rules ---
+            if path_hashes:
+                # Our hash is the LAST entry -> we transmitted this packet last;
+                # hearing it back means RF self-coupling (true self_echo).
+                if path_hashes[-1] == local_hex:
+                    return 'self_echo'
+                # Our hash is somewhere earlier in the path -> a neighbour took
+                # our forwarded packet and forwarded it onward (mesh_echo).
+                if local_hex in path_hashes:
+                    return 'mesh_echo'
+                # Our identity is the source but path was added by relays ->
+                # neighbour retransmitted our originated packet (mesh_echo).
+                if src_hash_hex and src_hash_hex == local_first_byte_hex:
+                    return 'mesh_echo'
+                # Hash matched a recent TX but neither path nor src confirms
+                # our involvement -> rare collision; classify as unknown.
+                return 'unknown_echo'
+            # No path entries at all
+            if src_hash_hex and src_hash_hex == local_first_byte_hex:
+                # Originated by us, no relays yet -> direct RF self-echo.
+                return 'self_echo'
+            # No path entries AND src_hash not parsable/not matching.
+            # Since this packet matched our recent TX hash (the echo detection
+            # prerequisite), and the path contains no relays, the most likely
+            # explanation is RF self-coupling on a packet type whose src_hash
+            # we cannot easily extract (e.g. GROUP_TXT, RAW_CUSTOM, TRACE).
+            # Mesh-echoes would have left a path entry from the relaying
+            # neighbour. Classify as self_echo to provide actionable info
+            # instead of opaque 'unknown'.
+            return 'self_echo'
+        except Exception:
+            return 'unknown_echo'
 
     def _start_hourly_timer(self) -> None:
         """Start the recurring hourly summary timer."""
@@ -1261,6 +1526,63 @@ class WM1303Backend:
             logger.warning("WM1303Backend: could not add channel_e TX queue "
                           "(max channels reached)")
 
+        # --- Channel F (chan_Lora_std on SX1302 RF0) TX queue ---
+        # Channel F runs in PARALLEL with channels A-D on the SX1302. It uses
+        # a single configurable BW (125/250/500 kHz) and SF, and goes through
+        # the same HAL TX path (PULL_RESP -> chan_Lora_std). Only enabled when
+        # channel_f.enabled is True in wm1303_ui.json.
+        try:
+            _chf_tx_path = Path('/etc/pymc_repeater/wm1303_ui.json')
+            _chf_enabled = False
+            _chf_tx_freq = 869525000
+            _chf_tx_bw = 250.0
+            _chf_tx_sf = 9
+            _chf_tx_cr = 5
+            _chf_tx_preamble = 17
+            _chf_tx_power = 14
+            try:
+                if _chf_tx_path.exists():
+                    _chf_tx_ui = json.loads(_chf_tx_path.read_text()).get('channel_f', {})
+                    if _chf_tx_ui:
+                        _chf_enabled = bool(_chf_tx_ui.get('enabled', False))
+                        _chf_tx_freq = int(_chf_tx_ui.get('frequency', 869525000))
+                        _chf_bw_hz = int(_chf_tx_ui.get('bandwidth', 250000))
+                        if _chf_bw_hz not in (125000, 250000, 500000):
+                            _chf_bw_hz = 125000
+                        _chf_tx_bw = _chf_bw_hz / 1000.0
+                        _chf_tx_sf = int(_chf_tx_ui.get('spreading_factor', 9))
+                        if _chf_tx_sf < 5 or _chf_tx_sf > 12:
+                            _chf_tx_sf = 9
+                        _cr_raw = _chf_tx_ui.get('coding_rate', '4/5')
+                        _cr_map = {'4/5': 5, '4/6': 6, '4/7': 7, '4/8': 8}
+                        if isinstance(_cr_raw, str) and _cr_raw in _cr_map:
+                            _chf_tx_cr = _cr_map[_cr_raw]
+                        elif isinstance(_cr_raw, int) and 1 <= _cr_raw <= 4:
+                            _chf_tx_cr = _cr_raw + 4
+                        _chf_tx_preamble = int(_chf_tx_ui.get('preamble_length', 17))
+                        _chf_tx_power = int(_chf_tx_ui.get('tx_power', 14))
+            except Exception as _chf_tx_err:
+                logger.warning("WM1303Backend: channel_f TX queue UI read error: %s, using defaults", _chf_tx_err)
+            if _chf_enabled:
+                self._tx_queue_manager.add_channel(
+                    channel_id="channel_f",
+                    freq_hz=_chf_tx_freq,
+                    bw_khz=_chf_tx_bw,
+                    sf=_chf_tx_sf,
+                    cr=_chf_tx_cr,
+                    preamble=_chf_tx_preamble,
+                    tx_power=_chf_tx_power,
+                )
+                logger.info("WM1303Backend: TX queue created for channel_f "
+                           "(freq=%d, SF%d, BW%.1fkHz, CR4/%d, preamble=%d, TX%ddBm)",
+                           _chf_tx_freq, _chf_tx_sf, _chf_tx_bw, _chf_tx_cr,
+                           _chf_tx_preamble, _chf_tx_power)
+            else:
+                logger.info("WM1303Backend: channel_f disabled in UI, skipping TX queue creation")
+        except ValueError:
+            logger.warning("WM1303Backend: could not add channel_f TX queue "
+                          "(max channels reached)")
+
 
     def _load_channel_e_cache(self) -> int:
         """Load and cache channel_e frequency from wm1303_ui.json.
@@ -1282,6 +1604,35 @@ class WM1303Backend:
             if not self._channel_e_freq_cache:
                 self._channel_e_freq_cache = 0
         return self._channel_e_freq_cache
+
+    def _load_channel_f_cache(self) -> tuple:
+        """Load and cache channel_f (chan_Lora_std) parameters from wm1303_ui.json.
+
+        Returns (enabled, freq_hz, bw_hz, sf). Cached for TTL seconds to
+        avoid disk I/O on every RX packet.
+        """
+        now = time.monotonic()
+        if (now - self._channel_f_cache_time) < self._channel_f_cache_ttl and self._channel_f_freq_cache:
+            return (self._channel_f_enabled_cache, self._channel_f_freq_cache,
+                    self._channel_f_bw_cache, self._channel_f_sf_cache)
+        try:
+            _ui = json.loads(Path("/etc/pymc_repeater/wm1303_ui.json").read_text()).get("channel_f", {})
+            self._channel_f_config_cache = _ui
+            self._channel_f_enabled_cache = bool(_ui.get("enabled", False))
+            self._channel_f_freq_cache = int(_ui.get("frequency", 0))
+            _bw_hz = int(_ui.get("bandwidth", 0))
+            if _bw_hz not in (125000, 250000, 500000):
+                _bw_hz = 0
+            self._channel_f_bw_cache = _bw_hz
+            _sf = int(_ui.get("spreading_factor", 0))
+            if _sf < 5 or _sf > 12:
+                _sf = 0
+            self._channel_f_sf_cache = _sf
+            self._channel_f_cache_time = now
+        except Exception as e:
+            logger.debug("WM1303Backend: channel_f cache refresh error: %s", e)
+        return (self._channel_f_enabled_cache, self._channel_f_freq_cache,
+                self._channel_f_bw_cache, self._channel_f_sf_cache)
 
     def _apply_ssot_channel_freqs(self) -> None:
         """Apply SSOT channel params from wm1303_ui.json to self.channels.
@@ -1598,6 +1949,15 @@ class WM1303Backend:
                     'bandwidth': int(che_cfg.get('bandwidth', 62500)),
                     'active': True
                 })
+            # Include Channel F (chan_Lora_std on SX1302 RF0) in noise floor processing
+            chf_cfg = ui.get('channel_f', {})
+            if chf_cfg.get('enabled', False):
+                channels.append({
+                    'name': chf_cfg.get('friendly_name', 'Channel F'),
+                    'frequency': int(chf_cfg.get('frequency', 0)),
+                    'bandwidth': int(chf_cfg.get('bandwidth', 250000)),
+                    'active': True
+                })
             # Build/refresh freq_hz -> channel_id mapping
             new_freq_map = {}
             # Build/refresh freq_hz -> ui_config_name mapping
@@ -1631,6 +1991,19 @@ class WM1303Backend:
                 if che_freq:
                     new_map[che_freq] = che_name
                     new_freq_map[che_freq] = 'channel_e'
+            # --- Channel F (chan_Lora_std on SX1302 RF0) ---
+            chf = ui.get('channel_f', {})
+            if chf.get('enabled', False):
+                chf_name = chf.get('friendly_name', 'Channel F')
+                chf_freq = int(chf.get('frequency', 0))
+                new_id_map['channel_f'] = chf_name
+                new_ui_to_ch_id[chf_name] = 'channel_f'
+                if chf_freq:
+                    # Note: channel_f may share frequency with another channel; last write wins.
+                    # The RX classifier in _dispatch_rx falls back to BW+SF matching for channel_f
+                    # so freq-only collisions are handled correctly.
+                    new_map[chf_freq] = chf_name
+                    new_freq_map[chf_freq] = 'channel_f'
             with self._nf_lock:
                 self._freq_to_ui_name = new_map
                 self._ch_id_to_ui_name = new_id_map
@@ -2993,15 +3366,56 @@ class WM1303Backend:
                 _tx_time = self._tx_echo_hashes[_rx_echo_hash]
                 _age = _now_mono - _tx_time
                 if _age < self._tx_echo_ttl:
-                    self._tx_echo_detected += 1
-                    logger.warning('WM1303Backend: Self-echo detected! hash=%s age=%.1fs rssi=%s '
-                                   'freq=%.3f (total_echoes=%d) - DISCARDING',
-                                   _rx_echo_hash, _age, _rx_rssi, _rx_freq, self._tx_echo_detected)
-                    # Record for dedup visualization
+                    # Path-based echo classification (v2.5.x):
+                    # Distinguish RF self-echo from neighbour mesh-echo by inspecting
+                    # the packet's path field, NOT by time. Each repeater has a unique
+                    # path_hash derived from its public key, so this works correctly
+                    # on any repeater regardless of mesh latency.
+                    _echo_kind = self._classify_echo(payload)
+                    if _echo_kind == 'self_echo':
+                        self._tx_echo_detected += 1
+                        _echo_label = 'Self-echo'
+                        _echo_desc = 'RF feedback / own TX heard back'
+                        _echo_count = self._tx_echo_detected
+                    elif _echo_kind == 'mesh_echo':
+                        if not hasattr(self, '_tx_mesh_echo_detected'):
+                            self._tx_mesh_echo_detected = 0
+                        self._tx_mesh_echo_detected += 1
+                        _echo_label = 'Mesh-echo'
+                        _echo_desc = 'neighbour repeater retransmitted our packet'
+                        _echo_count = self._tx_mesh_echo_detected
+                    else:  # 'unknown_echo'
+                        if not hasattr(self, '_tx_unknown_echo_detected'):
+                            self._tx_unknown_echo_detected = 0
+                        self._tx_unknown_echo_detected += 1
+                        _echo_label = 'Unknown-echo'
+                        _echo_desc = 'content hash matched recent TX but path/src did not confirm origin'
+                        _echo_count = self._tx_unknown_echo_detected
+                    logger.warning('WM1303Backend: %s detected! hash=%s age=%.1fs rssi=%s '
+                                   'freq=%.3f (total_%ses=%d) - DISCARDING',
+                                   _echo_label, _rx_echo_hash, _age, _rx_rssi, _rx_freq,
+                                   _echo_kind, _echo_count)
+                    # Emit trace step so the UI shows why no further processing happens.
+                    # Use distinct step names so the UI can render them differently.
+                    try:
+                        from repeater.web.packet_trace import trace_event as _trace_ev
+                        _trace_ev(_rx_echo_hash, _echo_kind,
+                                  channel=str(_rx_freq),
+                                  detail='%s (%s, age=%.1fs, rssi=%s, freq=%.3f) - DISCARDED' % (_echo_label, _echo_desc, _age, _rx_rssi, _rx_freq),
+                                  status='ok')
+                    except Exception:
+                        pass
+                    # Record for dedup visualization (separate kinds)
                     try:
                         from repeater.bridge_engine import _active_bridge
                         if _active_bridge:
-                            _active_bridge._record_dedup_event('hal_tx_echo', 'HAL',
+                            if _echo_kind == 'self_echo':
+                                _dd_kind = 'hal_tx_echo'
+                            elif _echo_kind == 'mesh_echo':
+                                _dd_kind = 'hal_mesh_echo'
+                            else:
+                                _dd_kind = 'hal_unknown_echo'
+                            _active_bridge._record_dedup_event(_dd_kind, 'HAL',
                                                                _rx_echo_hash, len(payload),
                                                                self._get_packet_type_name(payload) if hasattr(self, '_get_packet_type_name') else '')
                     except Exception:
@@ -3015,6 +3429,14 @@ class WM1303Backend:
             if _dd_hash in self._rx_dedup_cache:
                 if _dd_now - self._rx_dedup_cache[_dd_hash] < 2.0:
                     logger.debug('WM1303Backend: multi-demod dup %s', _dd_hash)
+                    # Emit trace step so the UI shows why no further processing happens
+                    try:
+                        from repeater.web.packet_trace import trace_event as _trace_ev
+                        _trace_ev(_dd_hash, 'echo_dedup',
+                                  detail='Multi-demod duplicate - DISCARDED',
+                                  status='ok')
+                    except Exception:
+                        pass
                     # Record for dedup visualization
                     try:
                         from repeater.bridge_engine import _active_bridge
@@ -3107,6 +3529,35 @@ class WM1303Backend:
                 except Exception as _channel_e_err:
                     logger.warning("WM1303Backend: channel_e rx_callback error: %s", _channel_e_err)
         # --- End Channel E injection ---
+
+        # --- Channel F (chan_Lora_std on RF0) RX injection ---
+        # Channel F shares the HAL pkt_fwd UDP port with channels A-D, so we
+        # match by frequency + bandwidth + spreading factor (all three must
+        # match the channel_f config in wm1303_ui.json). This avoids false
+        # positives where an A-D BW125 packet on the same frequency would
+        # otherwise leak into the channel_f bridge.
+        if not matched and hasattr(self, "_channel_f_rx_callback") and self._channel_f_rx_callback is not None:
+            _chf_enabled, _chf_freq, _chf_bw, _chf_sf = self._load_channel_f_cache()
+            try:
+                _rx_bw_int = int(rx_bw) if rx_bw else 0
+            except Exception:
+                _rx_bw_int = 0
+            if (_chf_enabled and _chf_freq and _chf_bw and _chf_sf
+                    and abs(freq_hz - _chf_freq) <= 50000
+                    and _rx_bw_int == _chf_bw
+                    and (rx_sf == 0 or rx_sf == _chf_sf)):
+                try:
+                    self._channel_f_rx_callback(payload, rssi=int(rssi), snr=snr)
+                    self._update_rx_stats("channel_f", freq_hz, rssi, snr)
+                    logger.info("WM1303Backend: RX->channel_f freq=%d SF%d BW%dkHz %d bytes rssi=%.1f snr=%.1f",
+                                freq_hz, rx_sf or _chf_sf, _chf_bw // 1000,
+                                len(payload), rssi, snr)
+                    self._last_rx_timestamp = time.monotonic()
+                    self._zero_rx_stat_count = 0
+                    matched = True
+                except Exception as _channel_f_err:
+                    logger.warning("WM1303Backend: channel_f rx_callback error: %s", _channel_f_err)
+        # --- End Channel F injection ---
 
         if not matched:
             logger.info('WM1303Backend: no channel match for freq=%d SF%s '

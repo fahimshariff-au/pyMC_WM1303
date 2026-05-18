@@ -1,5 +1,8 @@
 """
 Hardware abstraction layer for PyMC_Core
+
+This overlay extends upstream pymc_core hardware exports with WM1303-specific
+backends while preserving upstream USB/TCP LoRa radio support.
 """
 
 from .base import LoRaRadio
@@ -40,17 +43,37 @@ except ImportError:
     _KISS_MODEM_AVAILABLE = False
     KissModemWrapper = None
 
-# Conditional import for WM1303Backend
+# Conditional import for USBLoRaRadio (requires pyserial) [upstream 1.0.11+]
+try:
+    from .usb_radio import USBLoRaRadio
+
+    _USB_AVAILABLE = True
+except ImportError:
+    _USB_AVAILABLE = False
+    USBLoRaRadio = None
+
+# Conditional import for TCPLoRaRadio (stdlib only) [upstream 1.0.11+]
+try:
+    from .tcp_radio import TCPLoRaRadio
+
+    _TCP_AVAILABLE = True
+except ImportError:
+    _TCP_AVAILABLE = False
+    TCPLoRaRadio = None
+
+# Conditional import for WM1303Backend [pyMC_WM1303 overlay]
 try:
     from .wm1303_backend import WM1303Backend
+
     _WM1303_AVAILABLE = True
 except ImportError:
     _WM1303_AVAILABLE = False
     WM1303Backend = None
 
-# Conditional import for VirtualLoRaRadio
+# Conditional import for VirtualLoRaRadio [pyMC_WM1303 overlay]
 try:
     from .virtual_radio import VirtualLoRaRadio
+
     _VIRTUAL_AVAILABLE = True
 except ImportError:
     _VIRTUAL_AVAILABLE = False
@@ -75,10 +98,18 @@ if _KISS_SERIAL_AVAILABLE:
 if _KISS_MODEM_AVAILABLE:
     __all__.append("KissModemWrapper")
 
-# Add WM1303Backend to exports if available
+# Add USBLoRaRadio to exports if available [upstream]
+if _USB_AVAILABLE:
+    __all__.append("USBLoRaRadio")
+
+# Add TCPLoRaRadio to exports if available [upstream]
+if _TCP_AVAILABLE:
+    __all__.append("TCPLoRaRadio")
+
+# Add WM1303Backend to exports if available [overlay]
 if _WM1303_AVAILABLE:
     __all__.append("WM1303Backend")
 
-# Add VirtualLoRaRadio to exports if available
+# Add VirtualLoRaRadio to exports if available [overlay]
 if _VIRTUAL_AVAILABLE:
     __all__.append("VirtualLoRaRadio")

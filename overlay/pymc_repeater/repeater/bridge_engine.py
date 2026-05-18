@@ -241,17 +241,22 @@ class BridgeEngine:
     }
 
     # Non-radio endpoints (handled by external callbacks, not in _radio_map)
-    NON_RADIO_ENDPOINTS = {'mqtt', 'repeater', 'channel_e'}
+    # NOTE: channel_e (SX1261) and channel_f (SX1302 chan_Lora_std) are NOT in
+    # _radio_map (they are not VirtualLoRaRadio instances) but they ARE RF
+    # endpoints — they perform real over-the-air TX/RX via dedicated bridge
+    # plugins (channel_e_bridge.py / channel_f_bridge.py).
+    NON_RADIO_ENDPOINTS = {'mqtt', 'repeater', 'channel_e', 'channel_f'}
 
     # RF-transmitting endpoints: endpoints that perform actual over-the-air TX
     # and should participate in TX ordering / origin-channel-first priority,
     # alongside WM1303 radio channels. Non-RF endpoints (repeater, mqtt) are
     # excluded because they do internal processing, not RF TX.
     # Extend this set as more RF endpoints (e.g. extra SX126x channels) are added.
-    RF_ENDPOINTS = {'channel_e'}
+    RF_ENDPOINTS = {'channel_e', 'channel_f'}
 
     # Internal sources that bypass dedup (non-RF origins that re-inject processed packets)
-    # channel_e is excluded because it IS an RF source (SX1261 radio)
+    # channel_e and channel_f are excluded because they ARE RF sources
+    # (channel_e = SX1261 radio, channel_f = SX1302 chan_Lora_std)
     DEDUP_BYPASS_SOURCES = {'mqtt', 'repeater'}
 
     # Static fallback aliases (overridden by dynamic aliases built in __init__)
@@ -496,6 +501,11 @@ class BridgeEngine:
                 che_friendly = che_cfg.get('friendly_name', '') or che_cfg.get('name', '')
                 if che_friendly:
                     self._display_names['channel_e'] = che_friendly
+                # Channel F display name from its friendly_name
+                chf_cfg = ui.get('channel_f', {})
+                chf_friendly = chf_cfg.get('friendly_name', '') or chf_cfg.get('name', '')
+                if chf_friendly:
+                    self._display_names['channel_f'] = chf_friendly
                 # Channels a-d: use internal name from channels list
                 radio_cids = [getattr(r, 'channel_id', None) for r in radios]
                 radio_cids = [c for c in radio_cids if c]

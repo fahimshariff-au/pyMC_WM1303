@@ -218,6 +218,17 @@ class RepeaterDaemon:
             local_hash_hex = f"0x{self.local_hash:02x}"
             logger.info(f"Local node hash (from identity): {local_hash_hex}")
 
+            # v2.5.x: register local identity with the WM1303 radio backend so it
+            # can do PATH-BASED echo classification (self_echo vs mesh_echo vs
+            # unknown_echo) instead of the legacy time-based heuristic. This is
+            # repeater-agnostic because each device has a unique pubkey.
+            try:
+                _path_hash_size = (self.config.get("mesh", {}).get("path_hash_mode", 0) or 0) + 1
+                if hasattr(self.radio, "set_local_identity"):
+                    self.radio.set_local_identity(pubkey, _path_hash_size)
+            except Exception as _exc:
+                logger.warning(f"Could not register local identity with radio backend: {_exc}")
+
             # Load additional identities from config (e.g., room servers)
             await self._load_additional_identities()
 
@@ -1575,6 +1586,40 @@ class RepeaterDaemon:
                         logger.debug(f"Channel-name map re-registration failed: {_cn_err}")
                 except Exception as e:
                     logger.warning("Channel E init failed: %s", e)
+
+                # --- Channel F (chan_Lora_std on SX1302 RF0) ---
+                # Channel F shares the HAL pkt_fwd UDP port with channels A-D
+                # (no separate UDP listener), so the bridge plugin only registers
+                # a TX handler + RX callback. The backend dispatches matching
+                # chan_Lora_std packets via _channel_f_rx_callback.
+                try:
+                    from repeater.channel_f_bridge import ChannelFBridge
+                    self._channel_f = ChannelFBridge(self.bridge_engine, backend=self.radio)
+                    asyncio.create_task(self._channel_f.run())
+                    logger.info("Channel F (chan_Lora_std on RF0): bridge handler started")
+                    # Re-register friendly channel-name map so 'channel_f' resolves
+                    # to its UI-configured friendly_name in trace events.
+                    try:
+                        from repeater.web.packet_trace import set_channel_name_map
+                        _ch_map3 = getattr(self.radio, '_ch_id_to_ui_name', {}) or {}
+                        if 'channel_f' not in _ch_map3:
+                            try:
+                                import json
+                                with open('/etc/pymc_repeater/wm1303_ui.json', 'r') as _uif:
+                                    _uicfg = json.load(_uif)
+                                _chf = _uicfg.get('channel_f', {}) or {}
+                                _friendly = _chf.get('friendly_name') or _chf.get('name')
+                                if _friendly:
+                                    _ch_map3 = dict(_ch_map3)
+                                    _ch_map3['channel_f'] = _friendly
+                            except Exception:
+                                pass
+                        if _ch_map3:
+                            set_channel_name_map(_ch_map3)
+                    except Exception as _cnf_err:
+                        logger.debug(f"Channel F name map registration failed: {_cnf_err}")
+                except Exception as e:
+                    logger.warning("Channel F init failed: %s", e)
 
             # Safety-net: re-register repeater handler if not yet registered
             if (self.bridge_engine and self.repeater_handler

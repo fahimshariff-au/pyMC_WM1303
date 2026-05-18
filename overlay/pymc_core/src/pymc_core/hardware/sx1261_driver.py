@@ -29,6 +29,54 @@ try:
 except ImportError:
     spidev = None
 
+# Region-aware image calibration (Issue #4 multi-region support)
+try:
+    from .region_config import get_sx1261_calib as _region_get_sx1261_calib
+    _REGION_CALIB_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _REGION_CALIB_AVAILABLE = False
+
+
+def _read_region_from_ui() -> tuple[int, int]:
+    """Read regulatory region from wm1303_ui.json and return SX1261 calibration bytes.
+
+    Returns (cal_low, cal_high) byte values for CMD_CALIBRATE_IMAGE.
+    Falls back to EU868 [0xD7, 0xDB] if region_config or UI JSON unavailable.
+    """
+    if not _REGION_CALIB_AVAILABLE:
+        return 0xD7, 0xDB  # EU868 fallback
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        # UI JSON path: /etc/pymc_repeater/wm1303_ui.json (production)
+        # or relative override during development
+        _candidates = [
+            _Path(os.environ.get("WM1303_UI_JSON", "")),
+            _Path("/etc/pymc_repeater/wm1303_ui.json"),
+            _Path("/opt/pymc_repeater/wm1303_ui.json"),
+        ]
+        ui_data = None
+        center_hz = None
+        for p in _candidates:
+            if p and str(p) and p.exists():
+                ui_data = _json.loads(p.read_text())
+                break
+        if ui_data is None:
+            return 0xD7, 0xDB  # EU868 fallback
+        # Get region (string or {'code': ..., ...})
+        _region = ui_data.get("region", "EU868")
+        if isinstance(_region, dict):
+            _region_code = str(_region.get("code", "EU868")).upper()
+        else:
+            _region_code = str(_region or "EU868").upper()
+        # Center freq fallback for CUSTOM region
+        _rf_mhz = ui_data.get("rf_center_freq_mhz", 0)
+        if _rf_mhz:
+            center_hz = int(float(_rf_mhz) * 1_000_000)
+        return _region_get_sx1261_calib(_region_code, fallback_center_hz=center_hz)
+    except Exception:
+        return 0xD7, 0xDB  # Safe fallback
+
 try:
     import gpiod
     _HAS_GPIOD = True
@@ -251,8 +299,14 @@ class SX1261Radio:
             self._cmd(CMD_SET_DIO2_AS_RF_SWITCH, [0x01])
             self._wait_busy()
 
-            # Calibrate image for EU868 band (863-870 MHz)
-            self._cmd(CMD_CALIBRATE_IMAGE, [0xD7, 0xDB])  # 863-870 MHz
+            # Calibrate image for the configured regulatory region (Issue #4)
+            # Reads region from wm1303_ui.json; defaults to EU868 [0xD7, 0xDB].
+            _cal_low, _cal_high = _read_region_from_ui()
+            logger.info(
+                "SX1261: image calibration for region (cal_low=0x%02X, cal_high=0x%02X)",
+                _cal_low, _cal_high,
+            )
+            self._cmd(CMD_CALIBRATE_IMAGE, [_cal_low, _cal_high])
             self._wait_busy(timeout=1.0)
 
             # Full calibration

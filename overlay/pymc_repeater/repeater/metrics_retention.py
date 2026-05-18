@@ -214,19 +214,31 @@ DOWNSAMPLE_TABLES: List[Dict] = [
         "ts_col": "timestamp",
         "group_cols": ["channel_id"],
         "agg_cols": [
-            ("COUNT(*)",            "sample_count"),
-            ("SUM(rx_count)",       "total_rx_count"),
-            ("AVG(avg_rssi)",       "avg_rssi"),
-            ("AVG(avg_snr)",        "avg_snr"),
-            ("SUM(tx_count)",       "total_tx_count"),
-            ("SUM(tx_failed)",      "total_tx_failed"),
-            ("SUM(tx_airtime_ms)",  "total_tx_airtime_ms"),
-            ("SUM(tx_bytes)",       "total_tx_bytes"),
-            ("SUM(lbt_blocked)",    "total_lbt_blocked"),
-            ("SUM(lbt_passed)",     "total_lbt_passed"),
-            ("AVG(noise_floor_dbm)", "avg_noise_floor_dbm"),
-            ("SUM(pkt_count)",      "total_pkt_count"),
-            ("AVG(tx_noisefloor_dbm)", "avg_tx_noisefloor_dbm"),
+            ("COUNT(*)",                "sample_count"),
+            # NOTE: rx_count/tx_count/tx_failed/tx_airtime_ms/tx_bytes/
+            # lbt_blocked/lbt_passed/pkt_count are CUMULATIVE counters in
+            # channel_stats_history (monotonically increasing since service
+            # start). Using SUM would multiply the cumulative value by the
+            # number of samples in the bucket, which is meaningless. The
+            # correct per-bucket delta is MAX(x) - MIN(x). With 1 sample per
+            # bucket this yields 0 (no observable delta within that minute),
+            # which is preferable to the previous fake number (cumulative
+            # value masquerading as a delta). Higher-tier re-aggregation
+            # (_1m -> _10m -> _15m) is handled by the existing SUM logic on
+            # aliases starting with `total_`, which correctly sums the
+            # per-minute deltas into 10/15-minute deltas.
+            ("MAX(rx_count) - MIN(rx_count)",             "total_rx_count"),
+            ("AVG(avg_rssi)",                             "avg_rssi"),
+            ("AVG(avg_snr)",                              "avg_snr"),
+            ("MAX(tx_count) - MIN(tx_count)",             "total_tx_count"),
+            ("MAX(tx_failed) - MIN(tx_failed)",           "total_tx_failed"),
+            ("MAX(tx_airtime_ms) - MIN(tx_airtime_ms)",   "total_tx_airtime_ms"),
+            ("MAX(tx_bytes) - MIN(tx_bytes)",             "total_tx_bytes"),
+            ("MAX(lbt_blocked) - MIN(lbt_blocked)",       "total_lbt_blocked"),
+            ("MAX(lbt_passed) - MIN(lbt_passed)",         "total_lbt_passed"),
+            ("AVG(noise_floor_dbm)",                      "avg_noise_floor_dbm"),
+            ("MAX(pkt_count) - MIN(pkt_count)",           "total_pkt_count"),
+            ("AVG(tx_noisefloor_dbm)",                    "avg_tx_noisefloor_dbm"),
         ],
     },
     {

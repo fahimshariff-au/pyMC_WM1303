@@ -51,6 +51,13 @@ from pathlib import Path
 from contextlib import contextmanager as _contextmanager
 import threading
 
+from repeater.web.tiered_query import (
+    tiered_packet_activity_query, tiered_noise_floor_query,
+    tiered_channel_stats_query, tiered_dedup_query,
+    tiered_cad_events_query, tiered_crc_error_rate_query,
+    tiered_packet_metrics_query, auto_bucket_seconds,
+)
+
 _STATUS_CACHE={}
 _STATUS_CACHE_TTL=8
 
@@ -811,6 +818,17 @@ class WM1303API:
                 return self._channel_e_get()
             if method == "POST":
                 return self._channel_e_post()
+
+        # -- channel_f (Channel F / chan_Lora_std on RF0, parallel to A-D) --
+        # UI-only persistence: backend (wm1303_backend.py) reads channel_f from
+        # wm1303_ui.json and generates chan_Lora_std dynamically. No global_conf
+        # writes here (unlike channel_e which also writes SX1261 lora_rx block).
+        if resource == "channel_f":
+            if method == "GET":
+                return self._channel_f_get()
+            if method == "POST":
+                return self._channel_f_post()
+
         # -- debug bundle --
         if resource == "debug":
             sub = args[0] if args else "status"
@@ -821,6 +839,38 @@ class WM1303API:
             if sub == "download" and method == "GET":
                 return self._debug_download()
             raise cherrypy.HTTPError(404, "Unknown debug sub-resource: {}".format(sub))
+
+        # -- regions (Issue #4 multi-region support) --
+        # GET /api/wm1303/regions -> list all available regions and their metadata
+        if resource == "regions":
+            if method == "GET":
+                return self._regions_get()
+
+        # -- region (current selected region from UI config) --
+        # GET /api/wm1303/region -> current region
+        # POST/PUT /api/wm1303/region -> update region (body: {"code":..., optional tx_freq_min/max for CUSTOM})
+        if resource == "region":
+            if method == "GET":
+                return self._region_get()
+            if method in ("POST", "PUT"):
+                return self._region_post()
+
+        # -- sync_word (device-wide LoRa network sync word) --
+        # GET /api/wm1303/sync_word -> current sync_word (value, mode, hex)
+        # POST/PUT /api/wm1303/sync_word -> update sync_word (body: {"mode":"private|public"})
+        # Note: Custom sync_word is NOT hardware-supported on SX1302 (lorawan_public
+        # is a board-level flag). Only Private (0x1424) and Public (0x3444) accepted.
+        if resource == "sync_word":
+            if method == "GET":
+                return self._sync_word_get()
+            if method in ("POST", "PUT"):
+                return self._sync_word_post()
+
+        # -- presets (community channel presets for MeshCore frequencies) --
+        # GET /api/wm1303/presets -> list available channel presets per region
+        if resource == "presets":
+            if method == "GET":
+                return self._presets_get()
 
         raise cherrypy.HTTPError(404, "Unknown resource: {}".format(resource))
 
@@ -1059,6 +1109,14 @@ class WM1303API:
                         f"Channel '{ch_name}' at {f/1e6:.3f} MHz is {delta_khz:.1f} kHz "
                         f"from center {center/1e6:.3f} MHz (max {max_khz:.1f} kHz for "
                         f"BW {bw/1000:.0f} kHz). It will be force-disabled at startup.")
+
+        # Defensive cleanup: sync_word is device-wide, never per-channel.
+        # Strip any sync_word field that may have leaked in from older UI builds
+        # or third-party callers. The device-wide value lives at the top level
+        # of wm1303_ui.json and is managed via /api/wm1303/sync_word.
+        for _ch in channels:
+            if isinstance(_ch, dict):
+                _ch.pop("sync_word", None)
 
         ui = _load_ui()
         ui["channels"] = channels
@@ -1339,6 +1397,73 @@ class WM1303API:
             total_rx += _che_rx
             total_tx += _che_tx_sent
 
+        # --- Include Channel F (chan_Lora_std on SX1302 RF0) if enabled ---
+        # Channel F runs in PARALLEL with channels A-D on the SX1302 (BW125/250/500).
+        _chf_ui = _load_ui().get("channel_f", {})
+        if _chf_ui.get("enabled", False):
+            ch_f_st = channel_stats.get("channel_f", {})
+            ch_f_tx = tx_stats.get("channel_f", {})
+            _chf_freq = int(_chf_ui.get("frequency", 0))
+            _chf_rx = ch_f_st.get("rx_count", 0)
+            _chf_tx_sent = ch_f_st.get("tx_count", 0) or ch_f_tx.get("total_sent", 0)
+            _chf_tx_failed = ch_f_st.get("tx_failed", 0) or ch_f_tx.get("total_failed", 0)
+            _chf_last_tx = ch_f_st.get("last_tx_time") or ch_f_tx.get("last_tx_time")
+            _chf_last_rx = ch_f_st.get("last_rx_time")
+            _chf_rssi = ch_f_st.get("last_rssi", -120.0)
+            _chf_rssi_avg = ch_f_st.get("rssi_avg", -120.0)
+            _chf_snr = ch_f_st.get("last_snr", 0.0)
+            _chf_nf_lbt = ch_f_tx.get("noise_floor_lbt_avg")
+            _chf_nf = _find_noise(_chf_freq)
+            if _chf_nf == 0 or _chf_nf is None:
+                _chf_nf = -120.0
+            if _chf_nf_lbt is not None and _chf_nf_lbt > -119.0:
+                _chf_nf = _chf_nf_lbt
+            _chf_total_airtime_ms = ch_f_st.get("total_tx_airtime_ms", 0)
+            _chf_duty = round((_chf_total_airtime_ms / 1000.0 / uptime_seconds) * 100, 3) if uptime_seconds > 0 else 0
+            channels_live.append({
+                "name": _chf_ui.get("name", _chf_ui.get("friendly_name", "Channel F")),
+                "friendly_name": _chf_ui.get("friendly_name", "Channel F"),
+                "frequency": _chf_freq,
+                "bandwidth": int(_chf_ui.get("bandwidth", 250000)),
+                "spreading_factor": int(_chf_ui.get("spreading_factor", 9)),
+                "coding_rate": _chf_ui.get("coding_rate", "4/5"),
+                "is_chan_lora_std": True,
+                "rx_packets": _chf_rx,
+                "tx_packets": _chf_tx_sent,
+                "tx_failed": _chf_tx_failed,
+                "last_rx": _chf_last_rx,
+                "last_tx": _chf_last_tx,
+                "rssi_last": _chf_rssi,
+                "rssi_avg": _chf_rssi_avg,
+                "snr_last": _chf_snr,
+                "noise_floor": _chf_nf,
+                "avg_tx_airtime_ms": ch_f_st.get("avg_tx_airtime_ms", 0),
+                "avg_tx_send_ms": ch_f_st.get("avg_tx_send_ms", 0),
+                "avg_tx_wait_ms": ch_f_st.get("avg_tx_wait_ms", 0),
+                "last_tx_airtime_ms": ch_f_st.get("last_tx_airtime_ms", 0),
+                "total_tx_airtime_ms": _chf_total_airtime_ms,
+                "total_tx_send_ms": ch_f_st.get("total_tx_send_ms", 0),
+                "tx_bytes": ch_f_st.get("tx_bytes", 0),
+                "tx_duty_pct": _chf_duty,
+                "lbt_blocked": ch_f_tx.get("lbt_blocked", 0) or ch_f_st.get("lbt_blocked", 0),
+                "lbt_passed": ch_f_tx.get("lbt_passed", 0) or ch_f_st.get("lbt_passed", 0),
+                "lbt_skipped": ch_f_tx.get("lbt_skipped", 0) or ch_f_st.get("lbt_skipped", 0),
+                "lbt_last_blocked_at": ch_f_tx.get("lbt_last_blocked_at") or ch_f_st.get("lbt_last_blocked_at"),
+                "lbt_last_rssi": ch_f_tx.get("lbt_last_rssi") or ch_f_st.get("lbt_last_rssi"),
+                "noise_floor_lbt_avg": ch_f_tx.get("noise_floor_lbt_avg"),
+                "noise_floor_lbt_min": ch_f_tx.get("noise_floor_lbt_min"),
+                "noise_floor_lbt_max": ch_f_tx.get("noise_floor_lbt_max"),
+                "noise_floor_lbt_samples": ch_f_tx.get("noise_floor_lbt_samples", 0),
+                "queue_pending": ch_f_tx.get("pending", 0),
+                "queue_size": ch_f_tx.get("queue_size", 15),
+                "dropped_overflow": ch_f_tx.get("dropped_overflow", 0),
+                "dropped_ttl": ch_f_tx.get("dropped_ttl", 0),
+                "cad_clear": ch_f_tx.get("cad_clear", 0),
+                "cad_detected": ch_f_tx.get("cad_detected", 0),
+            })
+            total_rx += _chf_rx
+            total_tx += _chf_tx_sent
+
 
         return _j({
             "channels": channels_live,
@@ -1472,7 +1597,8 @@ class WM1303API:
         buckets = []
         period_stats = {"total_forwarded": 0, "total_duplicate": 0,
                         "total_tx_echo": 0, "total_filtered": 0,
-                        "total_hal_tx_echo": 0, "total_multi_demod": 0,
+                        "total_hal_tx_echo": 0, "total_hal_mesh_echo": 0,
+                        "total_hal_unknown_echo": 0, "total_multi_demod": 0,
                         "total_companion_dedup": 0,
                         "period_start": since_ts, "period_end": until_ts,
                         "dedup_ratio": 0.0}
@@ -1500,61 +1626,65 @@ class WM1303API:
                                 period_stats[k] += 1
                         total = len(events)
                         if total > 0:
-                            period_stats["dedup_ratio"] = round(
-                                period_stats["total_duplicate"] / total, 4)
+                            # Dedup ratio = (all non-forwarded events) / total.
+                            # Includes duplicates, echoes (bridge/HAL/mesh/unknown),
+                            # filtered, multi-demod, and companion-dedup.
+                            _dedup_sum = (
+                                period_stats.get("total_duplicate", 0)
+                                + period_stats.get("total_tx_echo", 0)
+                                + period_stats.get("total_filtered", 0)
+                                + period_stats.get("total_hal_tx_echo", 0)
+                                + period_stats.get("total_hal_mesh_echo", 0)
+                                + period_stats.get("total_hal_unknown_echo", 0)
+                                + period_stats.get("total_multi_demod", 0)
+                                + period_stats.get("total_companion_dedup", 0)
+                            )
+                            period_stats["dedup_ratio"] = round(_dedup_sum / total, 4)
                         period_stats.update(live_stats)
                         return _j({"events": events, "stats": period_stats, "mode": "raw"})
 
                     # Aggregated buckets
+                    # Aggregated buckets via tiered query
                     bucket_secs = bucket_min * 60
-                    rows = conn.execute(f"""
-                        SELECT
-                            CAST((ts / {bucket_secs}) AS INTEGER) * {bucket_secs} AS bucket_ts,
-                            SUM(CASE WHEN event_type = 'forwarded' THEN 1 ELSE 0 END) AS forwarded,
-                            SUM(CASE WHEN event_type = 'duplicate' THEN 1 ELSE 0 END) AS duplicate,
-                            SUM(CASE WHEN event_type = 'tx_echo' THEN 1 ELSE 0 END) AS tx_echo,
-                            SUM(CASE WHEN event_type = 'filtered' THEN 1 ELSE 0 END) AS filtered,
-                            SUM(CASE WHEN event_type = 'hal_tx_echo' THEN 1 ELSE 0 END) AS hal_tx_echo,
-                            SUM(CASE WHEN event_type = 'multi_demod' THEN 1 ELSE 0 END) AS multi_demod,
-                            SUM(CASE WHEN event_type = 'companion_dedup' THEN 1 ELSE 0 END) AS companion_dedup
-                        FROM dedup_events
-                        WHERE ts >= ? AND ts <= ?
-                        GROUP BY bucket_ts
-                        ORDER BY bucket_ts ASC
-                    """, (since_ts, until_ts)).fetchall()
+                    _EVENT_TYPES = ('forwarded', 'duplicate', 'tx_echo', 'filtered',
+                                    'hal_tx_echo', 'hal_mesh_echo', 'hal_unknown_echo',
+                                    'multi_demod', 'companion_dedup')
+                    tiered_rows = tiered_dedup_query(conn, since_ts, until_ts, bucket_secs)
+                    # Pivot: one row per (bucket_ts, event_type) -> one dict per bucket_ts
+                    bkt_map = {}
+                    for r in tiered_rows:
+                        bts = int(r["bucket_ts"])
+                        if bts not in bkt_map:
+                            bkt_map[bts] = {"ts": bts, "forwarded": 0, "duplicate": 0,
+                                            "tx_echo": 0, "filtered": 0, "hal_tx_echo": 0,
+                                            "hal_mesh_echo": 0, "hal_unknown_echo": 0,
+                                            "multi_demod": 0, "companion_dedup": 0}
+                        et = r.get("event_type", "")
+                        cnt = r.get("sample_count") or 0
+                        if et in bkt_map[bts]:
+                            bkt_map[bts][et] += cnt
+                    buckets = [bkt_map[k] for k in sorted(bkt_map.keys())]
 
-                    buckets = [{"ts": int(r["bucket_ts"]), "forwarded": r["forwarded"],
-                                "duplicate": r["duplicate"], "tx_echo": r["tx_echo"],
-                                "filtered": r["filtered"],
-                                "hal_tx_echo": r["hal_tx_echo"],
-                                "multi_demod": r["multi_demod"],
-                                "companion_dedup": r["companion_dedup"]} for r in rows]
-
-                    # Totals from query
-                    totals = conn.execute("""
-                        SELECT
-                            SUM(CASE WHEN event_type = 'forwarded' THEN 1 ELSE 0 END) AS tf,
-                            SUM(CASE WHEN event_type = 'duplicate' THEN 1 ELSE 0 END) AS td,
-                            SUM(CASE WHEN event_type = 'tx_echo' THEN 1 ELSE 0 END) AS te,
-                            SUM(CASE WHEN event_type = 'filtered' THEN 1 ELSE 0 END) AS tfi,
-                            SUM(CASE WHEN event_type = 'hal_tx_echo' THEN 1 ELSE 0 END) AS the,
-                            SUM(CASE WHEN event_type = 'multi_demod' THEN 1 ELSE 0 END) AS tmd,
-                            SUM(CASE WHEN event_type = 'companion_dedup' THEN 1 ELSE 0 END) AS tcd,
-                            COUNT(*) AS total
-                        FROM dedup_events WHERE ts >= ? AND ts <= ?
-                    """, (since_ts, until_ts)).fetchone()
-
-                    period_stats["total_forwarded"] = totals["tf"] or 0
-                    period_stats["total_duplicate"] = totals["td"] or 0
-                    period_stats["total_tx_echo"] = totals["te"] or 0
-                    period_stats["total_filtered"] = totals["tfi"] or 0
-                    period_stats["total_hal_tx_echo"] = totals["the"] or 0
-                    period_stats["total_multi_demod"] = totals["tmd"] or 0
-                    period_stats["total_companion_dedup"] = totals["tcd"] or 0
-                    total = totals["total"] or 0
+                    # Compute period totals from the pivoted buckets
+                    for b in buckets:
+                        for et in _EVENT_TYPES:
+                            k = "total_" + et
+                            if k in period_stats:
+                                period_stats[k] += b.get(et, 0)
+                    total = sum(period_stats.get("total_" + et, 0) for et in _EVENT_TYPES)
                     if total > 0:
-                        period_stats["dedup_ratio"] = round(
-                            period_stats["total_duplicate"] / total, 4)
+                        # Dedup ratio = (all non-forwarded events) / total.
+                        _dedup_sum = (
+                            period_stats.get("total_duplicate", 0)
+                            + period_stats.get("total_tx_echo", 0)
+                            + period_stats.get("total_filtered", 0)
+                            + period_stats.get("total_hal_tx_echo", 0)
+                            + period_stats.get("total_hal_mesh_echo", 0)
+                            + period_stats.get("total_hal_unknown_echo", 0)
+                            + period_stats.get("total_multi_demod", 0)
+                            + period_stats.get("total_companion_dedup", 0)
+                        )
+                        period_stats["dedup_ratio"] = round(_dedup_sum / total, 4)
 
         except Exception as _e:
             import logging
@@ -1569,7 +1699,8 @@ class WM1303API:
                     bts = int(ev['ts'] / bucket_secs) * bucket_secs
                     if bts not in bkt_map:
                         bkt_map[bts] = {"ts": bts, "forwarded": 0, "duplicate": 0, "tx_echo": 0,
-                                        "filtered": 0, "hal_tx_echo": 0, "multi_demod": 0,
+                                        "filtered": 0, "hal_tx_echo": 0, "hal_mesh_echo": 0,
+                                        "hal_unknown_echo": 0, "multi_demod": 0,
                                         "companion_dedup": 0}
                     et = ev.get('type', '')
                     if et in bkt_map[bts]:
@@ -1580,8 +1711,18 @@ class WM1303API:
                         period_stats[k] += 1
                 total = len(events)
                 if total > 0:
-                    period_stats["dedup_ratio"] = round(
-                        period_stats["total_duplicate"] / total, 4)
+                    # Dedup ratio = (all non-forwarded events) / total.
+                    _dedup_sum = (
+                        period_stats.get("total_duplicate", 0)
+                        + period_stats.get("total_tx_echo", 0)
+                        + period_stats.get("total_filtered", 0)
+                        + period_stats.get("total_hal_tx_echo", 0)
+                        + period_stats.get("total_hal_mesh_echo", 0)
+                        + period_stats.get("total_hal_unknown_echo", 0)
+                        + period_stats.get("total_multi_demod", 0)
+                        + period_stats.get("total_companion_dedup", 0)
+                    )
+                    period_stats["dedup_ratio"] = round(_dedup_sum / total, 4)
 
         period_stats.update(live_stats)
         return _j({
@@ -2255,80 +2396,42 @@ class WM1303API:
     @cherrypy.expose
     @cherrypy.tools.json_out()
     def lbt_history(self, hours='24'):
-        """GET /api/wm1303/lbt_history - LBT stats per channel from channel_stats_history."""
-        import sqlite3
+        """GET /api/wm1303/lbt_history - LBT stats per channel (tiered)."""
         h = min(int(hours), 168)
+        bucket_s = auto_bucket_seconds(h)
+        now = time.time()
+        cutoff = now - (h * 3600)
         db_path = "/var/lib/pymc_repeater/repeater.db"
-        cutoff = time.time() - (h * 3600)
-        bucket_s = 60  # 1-minute buckets
         ui_chs = _load_ui().get("channels", [])
         ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
                      "channel_c": "#10b981", "channel_d": "#f59e0b",
-                     "channel_e": "#f97316"}
+                     "channel_e": "#f97316", "channel_f": "#a855f7"}
         ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
+
+        def _map_lbt_row(r):
+            blocked = r.get("total_lbt_blocked") or 0
+            return {
+                "timestamp": r["bucket_ts"],
+                "noise_floor_dbm": round(r["avg_noise_floor_dbm"], 1) if r.get("avg_noise_floor_dbm") is not None else None,
+                "lbt_last_rssi": None,  # not available in aggregated data
+                "tx_noisefloor_dbm": round(r["avg_tx_noisefloor_dbm"], 1) if r.get("avg_tx_noisefloor_dbm") is not None else None,
+                "avg_rssi": round(r["avg_rssi"], 1) if r.get("avg_rssi") is not None else None,
+                "avg_snr": round(r["avg_snr"], 1) if r.get("avg_snr") is not None else None,
+                "tx_count_delta": r.get("total_tx_count") or 0,
+                "lbt_blocked_delta": blocked,
+                "lbt_passed_delta": r.get("total_lbt_passed") or 0,
+                "lbt_clear": blocked == 0,
+            }
+
         result_channels = []
         try:
             with _db_conn(db_path) as conn:
-                conn.row_factory = sqlite3.Row
                 ch_id_map = _get_ui_channel_id_map()
                 for idx, ch_cfg in enumerate(ui_chs):
                     ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
                     letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
-                    rows = conn.execute(
-                        "SELECT timestamp, tx_count, lbt_blocked, lbt_passed, "
-                        "lbt_last_rssi, lbt_threshold, noise_floor_dbm, "
-                        "avg_rssi, avg_snr, rx_count, tx_noisefloor_dbm "
-                        "FROM channel_stats_history "
-                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
-                        (ch_id, cutoff)
-                    ).fetchall()
-                    # noise_floor_dbm now contains per-channel values (spectral scan or LBT fallback).
-                    # Use noise_floor_dbm as primary, lbt_last_rssi as secondary fallback.
-                    timeseries = []
-                    if len(rows) >= 1:
-                        buckets = {}
-                        for row in rows:
-                            bk = int(row["timestamp"] / bucket_s) * bucket_s
-                            if bk not in buckets:
-                                buckets[bk] = []
-                            buckets[bk].append(row)
-                        prev_last = None
-                        for bk_ts in sorted(buckets.keys()):
-                            bk_rows = buckets[bk_ts]
-                            first = prev_last if prev_last else bk_rows[0]
-                            last = bk_rows[-1]
-                            tx_delta = max(0, (last["tx_count"] or 0) - (first["tx_count"] or 0))
-                            blocked_delta = max(0, (last["lbt_blocked"] or 0) - (first["lbt_blocked"] or 0))
-                            passed_delta = max(0, (last["lbt_passed"] or 0) - (first["lbt_passed"] or 0))
-                            # Prefer per-channel noise_floor_dbm, fall back to lbt_last_rssi
-                            nf_vals = [r["noise_floor_dbm"] for r in bk_rows if r["noise_floor_dbm"] is not None]
-                            if not nf_vals:
-                                nf_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
-                            avg_nf = round(sum(nf_vals)/len(nf_vals), 1) if nf_vals else None
-                            # lbt_last_rssi as a separate continuous line
-                            lbt_rssi_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
-                            lbt_last_rssi = round(sum(lbt_rssi_vals)/len(lbt_rssi_vals), 1) if lbt_rssi_vals else None
-                            # avg_rssi / avg_snr only present when packets were received
-                            rssi_vals = [r["avg_rssi"] for r in bk_rows if r["avg_rssi"] is not None]
-                            snr_vals = [r["avg_snr"] for r in bk_rows if r["avg_snr"] is not None]
-                            avg_rssi = round(sum(rssi_vals)/len(rssi_vals), 1) if rssi_vals else None
-                            avg_snr = round(sum(snr_vals)/len(snr_vals), 1) if snr_vals else None
-                            # TX noisefloor (pre-CAD FSK-RX measurement)
-                            tx_nf_vals = [r["tx_noisefloor_dbm"] for r in bk_rows if r["tx_noisefloor_dbm"] is not None]
-                            avg_tx_nf = round(sum(tx_nf_vals)/len(tx_nf_vals), 1) if tx_nf_vals else None
-                            timeseries.append({
-                                "timestamp": bk_ts,
-                                "noise_floor_dbm": avg_nf,
-                                "lbt_last_rssi": lbt_last_rssi,
-                                "tx_noisefloor_dbm": avg_tx_nf,
-                                "avg_rssi": avg_rssi,
-                                "avg_snr": avg_snr,
-                                "tx_count_delta": tx_delta,
-                                "lbt_blocked_delta": blocked_delta,
-                                "lbt_passed_delta": passed_delta,
-                                "lbt_clear": blocked_delta == 0
-                            })
-                            prev_last = last
+                    rows = tiered_channel_stats_query(conn, ch_id, cutoff, now, bucket_s)
+                    timeseries = [_map_lbt_row(r) for r in rows]
                     result_channels.append({
                         "name": ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}")),
                         "friendly_name": ch_cfg.get("friendly_name", f"Channel {letter}"),
@@ -2342,52 +2445,8 @@ class WM1303API:
                 # --- Channel E (SX1261) ---
                 _che_cfg = _load_ui().get("channel_e", {})
                 if _che_cfg.get("enabled", False):
-                    che_rows = conn.execute(
-                        "SELECT timestamp, tx_count, lbt_blocked, lbt_passed, "
-                        "lbt_last_rssi, lbt_threshold, noise_floor_dbm, "
-                        "avg_rssi, avg_snr, rx_count "
-                        "FROM channel_stats_history "
-                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
-                        ("channel_e", cutoff)
-                    ).fetchall()
-                    che_ts = []
-                    if len(che_rows) >= 1:
-                        che_buckets = {}
-                        for row in che_rows:
-                            bk = int(row["timestamp"] / bucket_s) * bucket_s
-                            if bk not in che_buckets:
-                                che_buckets[bk] = []
-                            che_buckets[bk].append(row)
-                        prev_last = None
-                        for bk_ts in sorted(che_buckets.keys()):
-                            bk_rows = che_buckets[bk_ts]
-                            first = prev_last if prev_last else bk_rows[0]
-                            last = bk_rows[-1]
-                            tx_delta = max(0, (last["tx_count"] or 0) - (first["tx_count"] or 0))
-                            blocked_delta = max(0, (last["lbt_blocked"] or 0) - (first["lbt_blocked"] or 0))
-                            passed_delta = max(0, (last["lbt_passed"] or 0) - (first["lbt_passed"] or 0))
-                            nf_vals = [r["noise_floor_dbm"] for r in bk_rows if r["noise_floor_dbm"] is not None]
-                            if not nf_vals:
-                                nf_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
-                            avg_nf = round(sum(nf_vals)/len(nf_vals), 1) if nf_vals else None
-                            lbt_rssi_vals = [r["lbt_last_rssi"] for r in bk_rows if r["lbt_last_rssi"] is not None]
-                            lbt_last_rssi = round(sum(lbt_rssi_vals)/len(lbt_rssi_vals), 1) if lbt_rssi_vals else None
-                            rssi_vals = [r["avg_rssi"] for r in bk_rows if r["avg_rssi"] is not None]
-                            snr_vals = [r["avg_snr"] for r in bk_rows if r["avg_snr"] is not None]
-                            avg_rssi = round(sum(rssi_vals)/len(rssi_vals), 1) if rssi_vals else None
-                            avg_snr = round(sum(snr_vals)/len(snr_vals), 1) if snr_vals else None
-                            che_ts.append({
-                                "timestamp": bk_ts,
-                                "noise_floor_dbm": avg_nf,
-                                "lbt_last_rssi": lbt_last_rssi,
-                                "avg_rssi": avg_rssi,
-                                "avg_snr": avg_snr,
-                                "tx_count_delta": tx_delta,
-                                "lbt_blocked_delta": blocked_delta,
-                                "lbt_passed_delta": passed_delta,
-                                "lbt_clear": blocked_delta == 0
-                            })
-                            prev_last = last
+                    che_rows = tiered_channel_stats_query(conn, "channel_e", cutoff, now, bucket_s)
+                    che_ts = [_map_lbt_row(r) for r in che_rows]
                     result_channels.append({
                         "name": _che_cfg.get("name", _che_cfg.get("friendly_name", "Channel E")),
                         "friendly_name": _che_cfg.get("friendly_name", "Channel E"),
@@ -2397,6 +2456,21 @@ class WM1303API:
                         "color": "#f97316",
                         "active": True,
                         "timeseries": che_ts
+                    })
+                # --- Channel F (chan_Lora_std on RF0) ---
+                _chf_cfg = _load_ui().get("channel_f", {})
+                if _chf_cfg.get("enabled", False):
+                    chf_rows = tiered_channel_stats_query(conn, "channel_f", cutoff, now, bucket_s)
+                    chf_ts = [_map_lbt_row(r) for r in chf_rows]
+                    result_channels.append({
+                        "name": _chf_cfg.get("name", _chf_cfg.get("friendly_name", "Channel F")),
+                        "friendly_name": _chf_cfg.get("friendly_name", "Channel F"),
+                        "channel_id": "channel_f",
+                        "freq_mhz": round(_chf_cfg.get("frequency", 0) / 1e6, 4),
+                        "lbt_threshold_dbm": _chf_cfg.get("lbt_rssi_target", -80),
+                        "color": "#a855f7",
+                        "active": True,
+                        "timeseries": chf_ts
                     })
             return {"hours": h, "channels": result_channels}
         except Exception as e:
@@ -2412,71 +2486,97 @@ class WM1303API:
     @cherrypy.expose
     @cherrypy.tools.json_out()
     def signal_quality(self, hours='24'):
-        """GET /api/wm1303/signal_quality - Per-channel RSSI, SNR from channel_stats_history."""
+        """GET /api/wm1303/signal_quality - Per-channel RSSI, SNR (tiered)."""
         import sqlite3
         h = min(int(hours), 168)
+        bucket_s = auto_bucket_seconds(h)
+        now = time.time()
+        cutoff = now - (h * 3600)
         db_path = "/var/lib/pymc_repeater/repeater.db"
-        cutoff = time.time() - (h * 3600)
-        bucket_s = 60  # 1-minute buckets
         ui_chs = _load_ui().get("channels", [])
         ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
                      "channel_c": "#10b981", "channel_d": "#f59e0b",
-                     "channel_e": "#f97316"}
+                     "channel_e": "#f97316", "channel_f": "#a855f7"}
         ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
+
+        def _pkt_counts_for(conn, ch_id):
+            """Return (total_in_period, {bucket_ts: count}) for a channel.
+
+            Uses ``packet_activity`` which stores per-snapshot **deltas**
+            (not cumulative counters), so SUM gives a correct total and
+            sums per bucket give correct per-bucket counts. This is the
+            authoritative source for RX packet counts on a channel.
+            """
+            try:
+                total_row = conn.execute(
+                    "SELECT COALESCE(SUM(rx_count),0) FROM packet_activity "
+                    "WHERE channel_id=? AND timestamp >= ? AND timestamp <= ?",
+                    (ch_id, cutoff, now)
+                ).fetchone()
+                total = int(total_row[0]) if total_row and total_row[0] is not None else 0
+                # Per-bucket counts: group by floor(timestamp/bucket_s)*bucket_s
+                bucket_rows = conn.execute(
+                    "SELECT (CAST(timestamp AS INTEGER)/?)*? AS bts, "
+                    "COALESCE(SUM(rx_count),0) FROM packet_activity "
+                    "WHERE channel_id=? AND timestamp >= ? AND timestamp <= ? "
+                    "GROUP BY bts ORDER BY bts",
+                    (bucket_s, bucket_s, ch_id, cutoff, now)
+                ).fetchall()
+                per_bucket = {int(b[0]): int(b[1] or 0) for b in bucket_rows}
+                return total, per_bucket
+            except Exception:
+                return 0, {}
+
+        def _build_sq_channel(rows, total_pkts, pkts_per_bucket):
+            """Build timeseries and summary stats from tiered channel_stats rows.
+
+            ``rows`` provides RSSI/SNR/NF aggregates; packet counts are
+            overridden from ``packet_activity`` (passed in) so they remain
+            correct even when channel_stats_history MAX-MIN deltas yield 0
+            (small bucket containing 1 cumulative sample).
+            """
+            timeseries = []
+            all_rssi, all_snr = [], []
+            for r in rows:
+                _rssi = r.get("avg_rssi")
+                _snr = r.get("avg_snr")
+                _nf = r.get("avg_noise_floor_dbm")
+                _bts = int(r.get("bucket_ts") or 0)
+                _rx = pkts_per_bucket.get(_bts, 0)
+                timeseries.append({
+                    "timestamp": r["bucket_ts"],
+                    "pkt_count": _rx,
+                    "avg_rssi": round(_rssi, 1) if _rssi is not None else None,
+                    "avg_snr": round(_snr, 1) if _snr is not None else None,
+                    "noise_floor_dbm": round(_nf, 1) if _nf is not None else None,
+                })
+                if _rssi is not None:
+                    all_rssi.append(_rssi)
+                if _snr is not None:
+                    all_snr.append(_snr)
+            stats = {
+                "pkt_count": total_pkts,
+                "avg_rssi": round(sum(all_rssi) / len(all_rssi), 1) if all_rssi else None,
+                "min_rssi": round(min(all_rssi), 1) if all_rssi else None,
+                "max_rssi": round(max(all_rssi), 1) if all_rssi else None,
+                "avg_snr": round(sum(all_snr) / len(all_snr), 1) if all_snr else None,
+                "min_snr": round(min(all_snr), 1) if all_snr else None,
+                "max_snr": round(max(all_snr), 1) if all_snr else None,
+            }
+            return timeseries, stats
+
         result_channels = []
         try:
             with _db_conn(db_path) as conn:
-                conn.row_factory = sqlite3.Row
                 ch_id_map = _get_ui_channel_id_map()
                 for idx, ch_cfg in enumerate(ui_chs):
                     if not ch_cfg.get('active', False):
                         continue
                     ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
                     letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
-                    rows = conn.execute(
-                        "SELECT timestamp, rx_count, avg_rssi, avg_snr, noise_floor_dbm "
-                        "FROM channel_stats_history "
-                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
-                        (ch_id, cutoff)
-                    ).fetchall()
-                    timeseries = []
-                    if len(rows) >= 1:
-                        buckets = {}
-                        for row in rows:
-                            bk = int(row["timestamp"] / bucket_s) * bucket_s
-                            if bk not in buckets:
-                                buckets[bk] = []
-                            buckets[bk].append(row)
-                        sorted_bks = sorted(buckets.keys())
-                        prev_last = None
-                        for bk_ts in sorted_bks:
-                            bk_rows = buckets[bk_ts]
-                            first = prev_last if prev_last else bk_rows[0]
-                            last = bk_rows[-1]
-                            rx_delta = max(0, (last["rx_count"] or 0) - (first["rx_count"] or 0))
-                            rssi_vals = [r["avg_rssi"] for r in bk_rows if r["avg_rssi"] is not None]
-                            snr_vals = [r["avg_snr"] for r in bk_rows if r["avg_snr"] is not None]
-                            try:
-                                nf_vals = [r["noise_floor_dbm"] for r in bk_rows if r["noise_floor_dbm"] is not None]
-                            except (IndexError, KeyError):
-                                nf_vals = []
-                            avg_rssi = round(sum(rssi_vals) / len(rssi_vals), 1) if rssi_vals else None
-                            avg_snr = round(sum(snr_vals) / len(snr_vals), 1) if snr_vals else None
-                            avg_nf = round(sum(nf_vals) / len(nf_vals), 1) if nf_vals else None
-                            timeseries.append({
-                                "timestamp": bk_ts,
-                                "pkt_count": rx_delta,
-                                "avg_rssi": avg_rssi,
-                                "avg_snr": avg_snr,
-                                "noise_floor_dbm": avg_nf
-                            })
-                            prev_last = last
-                    # Summary stats
-                    all_rssi = [r["avg_rssi"] for r in rows if r["avg_rssi"] is not None]
-                    all_snr = [r["avg_snr"] for r in rows if r["avg_snr"] is not None]
-                    total_rx = 0
-                    if len(rows) >= 2:
-                        total_rx = max(0, (rows[-1]["rx_count"] or 0) - (rows[0]["rx_count"] or 0))
+                    rows = tiered_channel_stats_query(conn, ch_id, cutoff, now, bucket_s)
+                    _tot, _per = _pkt_counts_for(conn, ch_id)
+                    timeseries, stats = _build_sq_channel(rows, _tot, _per)
                     result_channels.append({
                         "name": ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}")),
                         "friendly_name": ch_cfg.get("friendly_name", f"Channel {letter}"),
@@ -2485,63 +2585,15 @@ class WM1303API:
                         "spreading_factor": ch_cfg.get("spreading_factor", 0),
                         "active": ch_cfg.get("active", False),
                         "color": ch_colors.get(ch_id, "#999"),
-                        "stats": {
-                            "pkt_count": total_rx,
-                            "avg_rssi": round(sum(all_rssi)/len(all_rssi), 1) if all_rssi else None,
-                            "min_rssi": round(min(all_rssi), 1) if all_rssi else None,
-                            "max_rssi": round(max(all_rssi), 1) if all_rssi else None,
-                            "avg_snr": round(sum(all_snr)/len(all_snr), 1) if all_snr else None,
-                            "min_snr": round(min(all_snr), 1) if all_snr else None,
-                            "max_snr": round(max(all_snr), 1) if all_snr else None,
-                        },
+                        "stats": stats,
                         "timeseries": timeseries
                     })
                 # --- Channel E (SX1261) ---
                 _che_cfg = _load_ui().get("channel_e", {})
                 if _che_cfg.get("enabled", False):
-                    che_rows = conn.execute(
-                        "SELECT timestamp, rx_count, avg_rssi, avg_snr, noise_floor_dbm "
-                        "FROM channel_stats_history "
-                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
-                        ("channel_e", cutoff)
-                    ).fetchall()
-                    che_ts = []
-                    if len(che_rows) >= 1:
-                        che_buckets = {}
-                        for row in che_rows:
-                            bk = int(row["timestamp"] / bucket_s) * bucket_s
-                            if bk not in che_buckets:
-                                che_buckets[bk] = []
-                            che_buckets[bk].append(row)
-                        sorted_bks = sorted(che_buckets.keys())
-                        prev_last = None
-                        for bk_ts in sorted_bks:
-                            bk_rows = che_buckets[bk_ts]
-                            first = prev_last if prev_last else bk_rows[0]
-                            last = bk_rows[-1]
-                            rx_delta = max(0, (last["rx_count"] or 0) - (first["rx_count"] or 0))
-                            rssi_vals = [r["avg_rssi"] for r in bk_rows if r["avg_rssi"] is not None]
-                            snr_vals = [r["avg_snr"] for r in bk_rows if r["avg_snr"] is not None]
-                            try:
-                                nf_vals = [r["noise_floor_dbm"] for r in bk_rows if r["noise_floor_dbm"] is not None]
-                            except (IndexError, KeyError):
-                                nf_vals = []
-                            avg_rssi = round(sum(rssi_vals) / len(rssi_vals), 1) if rssi_vals else None
-                            avg_snr = round(sum(snr_vals) / len(snr_vals), 1) if snr_vals else None
-                            avg_nf = round(sum(nf_vals) / len(nf_vals), 1) if nf_vals else None
-                            che_ts.append({
-                                "timestamp": bk_ts,
-                                "pkt_count": rx_delta,
-                                "avg_rssi": avg_rssi,
-                                "avg_snr": avg_snr,
-                                "noise_floor_dbm": avg_nf
-                            })
-                            prev_last = last
-                    che_all_rssi = [r["avg_rssi"] for r in che_rows if r["avg_rssi"] is not None]
-                    che_all_snr = [r["avg_snr"] for r in che_rows if r["avg_snr"] is not None]
-                    che_total_rx = 0
-                    if len(che_rows) >= 2:
-                        che_total_rx = max(0, (che_rows[-1]["rx_count"] or 0) - (che_rows[0]["rx_count"] or 0))
+                    che_rows = tiered_channel_stats_query(conn, "channel_e", cutoff, now, bucket_s)
+                    _tot_e, _per_e = _pkt_counts_for(conn, "channel_e")
+                    che_ts, che_stats = _build_sq_channel(che_rows, _tot_e, _per_e)
                     result_channels.append({
                         "name": _che_cfg.get("name", _che_cfg.get("friendly_name", "Channel E")),
                         "friendly_name": _che_cfg.get("friendly_name", "Channel E"),
@@ -2550,18 +2602,29 @@ class WM1303API:
                         "spreading_factor": _che_cfg.get("spreading_factor", 0),
                         "active": True,
                         "color": "#f97316",
-                        "stats": {
-                            "pkt_count": che_total_rx,
-                            "avg_rssi": round(sum(che_all_rssi)/len(che_all_rssi), 1) if che_all_rssi else None,
-                            "min_rssi": round(min(che_all_rssi), 1) if che_all_rssi else None,
-                            "max_rssi": round(max(che_all_rssi), 1) if che_all_rssi else None,
-                            "avg_snr": round(sum(che_all_snr)/len(che_all_snr), 1) if che_all_snr else None,
-                            "min_snr": round(min(che_all_snr), 1) if che_all_snr else None,
-                            "max_snr": round(max(che_all_snr), 1) if che_all_snr else None,
-                        },
+                        "stats": che_stats,
                         "timeseries": che_ts
                     })
-                # Noise floor from noise_floor_history table - individual per-channel data points
+                # --- Channel F (chan_Lora_std on RF0) ---
+                _chf_cfg = _load_ui().get("channel_f", {})
+                if _chf_cfg.get("enabled", False):
+                    chf_rows = tiered_channel_stats_query(conn, "channel_f", cutoff, now, bucket_s)
+                    _tot_f, _per_f = _pkt_counts_for(conn, "channel_f")
+                    chf_ts, chf_stats = _build_sq_channel(chf_rows, _tot_f, _per_f)
+                    result_channels.append({
+                        "name": _chf_cfg.get("name", _chf_cfg.get("friendly_name", "Channel F")),
+                        "friendly_name": _chf_cfg.get("friendly_name", "Channel F"),
+                        "channel_id": "channel_f",
+                        "freq_mhz": round(_chf_cfg.get("frequency", 0) / 1e6, 4),
+                        "spreading_factor": _chf_cfg.get("spreading_factor", 0),
+                        "active": True,
+                        "color": "#a855f7",
+                        "stats": chf_stats,
+                        "timeseries": chf_ts
+                    })
+                # Noise floor from noise_floor_history table — kept as direct query
+                # for per-channel individual data points overlay.
+                conn.row_factory = sqlite3.Row
                 nf_rows = conn.execute("""
                     SELECT timestamp, channel_id, noise_floor_dbm
                     FROM noise_floor_history
@@ -2575,7 +2638,6 @@ class WM1303API:
                         "channel_id": row["channel_id"],
                         "noise_floor_dbm": round(row["noise_floor_dbm"], 1) if row["noise_floor_dbm"] else None
                     })
-                # Get current noise floor: latest average across all channels
                 current_nf = conn.execute("""
                     SELECT AVG(nfh.noise_floor_dbm) as avg_nf
                     FROM noise_floor_history nfh
@@ -2586,6 +2648,7 @@ class WM1303API:
                     ) latest ON nfh.channel_id = latest.channel_id
                                AND nfh.timestamp = latest.max_ts
                 """).fetchone()
+                conn.row_factory = None
                 return {
                     "hours": h,
                     "channels": result_channels,
@@ -2604,7 +2667,7 @@ class WM1303API:
     # ---- Per-channel Noise Floor ----
 
     def _noise_floor_get(self, **params):
-        """GET /api/wm1303/noise_floor - Per-channel noise floor with history.
+        """GET /api/wm1303/noise_floor - Per-channel noise floor with history (tiered).
 
         Query params:
           range  - '1h','6h','24h','3d','7d' (default '1h')
@@ -2626,6 +2689,8 @@ class WM1303API:
         }
         span_secs = RANGE_SECS.get(range_str, 3600)
         since_ts = now - span_secs
+        h_equiv = max(1, span_secs // 3600)
+        bucket_s = auto_bucket_seconds(h_equiv)
 
         db_path = "/var/lib/pymc_repeater/repeater.db"
         result_channels = {}
@@ -2637,9 +2702,8 @@ class WM1303API:
                            "error": "database not found"})
 
             with _db_conn(db_path, timeout=5) as conn:
+                # Get current noise floor per channel (direct query — always recent)
                 conn.row_factory = _sqlite3.Row
-
-                # Get current noise floor per channel
                 current_rows = conn.execute("""
                     SELECT nfh.*
                     FROM noise_floor_history nfh
@@ -2650,6 +2714,7 @@ class WM1303API:
                     ) latest ON nfh.channel_id = latest.channel_id
                                AND nfh.timestamp = latest.max_ts
                 """).fetchall()
+                conn.row_factory = None
 
                 for row in current_rows:
                     ch_id = row["channel_id"]
@@ -2662,64 +2727,51 @@ class WM1303API:
                         "stats": {}
                     }
 
-                # Get all individual data points (no bucketing)
-                where = ["timestamp >= ?"]
-                qparams = [since_ts]
-                if channel_filter:
-                    where.append("channel_id = ?")
-                    qparams.append(channel_filter)
-                where_str = ' AND '.join(where)
+                # Build list of channels to query
+                ch_ids_to_query = list(result_channels.keys())
+                if channel_filter and channel_filter not in ch_ids_to_query:
+                    ch_ids_to_query = [channel_filter]
+                if not ch_ids_to_query:
+                    # Discover channels from the DB
+                    conn.row_factory = _sqlite3.Row
+                    disc_rows = conn.execute(
+                        "SELECT DISTINCT channel_id FROM noise_floor_history WHERE timestamp >= ?",
+                        (since_ts,)
+                    ).fetchall()
+                    conn.row_factory = None
+                    ch_ids_to_query = [r["channel_id"] for r in disc_rows
+                                       if not channel_filter or r["channel_id"] == channel_filter]
 
-                hist_rows = conn.execute(f"""
-                    SELECT
-                        channel_id,
-                        timestamp as ts,
-                        noise_floor_dbm as avg_nf,
-                        min_rssi as min_nf,
-                        max_rssi as max_nf,
-                        samples_collected,
-                        samples_accepted
-                    FROM noise_floor_history
-                    WHERE {where_str}
-                    ORDER BY channel_id, timestamp ASC
-                """, qparams).fetchall()
-
-                for row in hist_rows:
-                    ch_id = row["channel_id"]
+                # Tiered history per channel
+                for ch_id in ch_ids_to_query:
+                    rows = tiered_noise_floor_query(conn, ch_id, since_ts, now, bucket_s)
                     if ch_id not in result_channels:
                         result_channels[ch_id] = {
                             "current": None, "last_update": None,
                             "history": [], "stats": {}
                         }
-                    result_channels[ch_id]["history"].append({
-                        "ts": row["ts"],
-                        "avg_nf": round(row["avg_nf"], 1) if row["avg_nf"] else None,
-                        "min_nf": round(row["min_nf"], 1) if row["min_nf"] else None,
-                        "max_nf": round(row["max_nf"], 1) if row["max_nf"] else None,
-                        "samples": row["samples_collected"] or 0,
-                    })
-
-                # Get per-channel stats
-                stat_rows = conn.execute(f"""
-                    SELECT channel_id,
-                        COUNT(*) as cnt,
-                        AVG(noise_floor_dbm) as avg_nf,
-                        MIN(noise_floor_dbm) as min_nf,
-                        MAX(noise_floor_dbm) as max_nf
-                    FROM noise_floor_history
-                    WHERE {where_str}
-                    GROUP BY channel_id
-                """, qparams).fetchall()
-
-                for row in stat_rows:
-                    ch_id = row["channel_id"]
-                    if ch_id in result_channels:
-                        result_channels[ch_id]["stats"] = {
-                            "count": row["cnt"],
-                            "avg": round(row["avg_nf"], 1) if row["avg_nf"] else None,
-                            "min": round(row["min_nf"], 1) if row["min_nf"] else None,
-                            "max": round(row["max_nf"], 1) if row["max_nf"] else None,
-                        }
+                    hist = []
+                    all_nf = []
+                    for r in rows:
+                        _nf = r.get("avg_noise_floor_dbm")
+                        _min = r.get("min_noise_floor_dbm")
+                        _max = r.get("max_noise_floor_dbm")
+                        hist.append({
+                            "ts": r["bucket_ts"],
+                            "avg_nf": round(_nf, 1) if _nf is not None else None,
+                            "min_nf": round(_min, 1) if _min is not None else None,
+                            "max_nf": round(_max, 1) if _max is not None else None,
+                            "samples": r.get("total_samples_collected") or 0,
+                        })
+                        if _nf is not None:
+                            all_nf.append(_nf)
+                    result_channels[ch_id]["history"] = hist
+                    result_channels[ch_id]["stats"] = {
+                        "count": len(all_nf),
+                        "avg": round(sum(all_nf) / len(all_nf), 1) if all_nf else None,
+                        "min": round(min(all_nf), 1) if all_nf else None,
+                        "max": round(max(all_nf), 1) if all_nf else None,
+                    }
 
             # Also get in-memory noise floors from backend
             # Map live keys to DB-style keys to avoid duplicates
@@ -2818,7 +2870,7 @@ class WM1303API:
     # ---- CAD Stats ----
 
     def _cad_stats_get(self, **params):
-        """GET /api/wm1303/cad_stats - CAD event timeline from cad_events table.
+        """GET /api/wm1303/cad_stats - CAD event timeline (tiered).
 
         Query params:
           range  - '1h','6h','24h','3d','7d' (default '1h')
@@ -2855,67 +2907,58 @@ class WM1303API:
                            "range": range_str, "bucket_minutes": bucket_min, "error": "database not found"})
 
             with _db_conn(db_path) as conn:
-                conn.row_factory = _sqlite3.Row
-
                 # Check if cad_events table exists
+                conn.row_factory = _sqlite3.Row
                 tbl = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='cad_events'"
                 ).fetchone()
+                conn.row_factory = None
                 if not tbl:
                     pass  # Table not yet created
                 else:
+                    # Discover channel IDs present in the range
+                    conn.row_factory = _sqlite3.Row
+                    if channel_filter:
+                        ch_ids = [channel_filter]
+                    else:
+                        disc = conn.execute(
+                            "SELECT DISTINCT channel_id FROM cad_events WHERE timestamp >= ?",
+                            (since_ts,)
+                        ).fetchall()
+                        ch_ids = [r["channel_id"] for r in disc]
+                    conn.row_factory = None
+
+                    # Tiered aggregation per channel
+                    for ch_id in ch_ids:
+                        rows = tiered_cad_events_query(conn, ch_id, since_ts, now, bucket_secs)
+                        ch_total_clear = 0
+                        ch_total_det = 0
+                        ch_buckets = []
+                        for r in rows:
+                            _clear = r.get("total_cad_clear") or 0
+                            _det = r.get("total_cad_detected") or 0
+                            ch_total_clear += _clear
+                            ch_total_det += _det
+                            ch_buckets.append({
+                                "ts": r["bucket_ts"],
+                                "clear": _clear,
+                                "detected": _det,
+                            })
+                        channels[ch_id] = {
+                            "clear": ch_total_clear,
+                            "detected": ch_total_det,
+                            "total": ch_total_clear + ch_total_det,
+                        }
+                        buckets[ch_id] = ch_buckets
+
+                    # Recent rows (last 100) — direct query on raw table
+                    conn.row_factory = _sqlite3.Row
                     where = ["timestamp >= ?"]
                     qparams = [since_ts]
                     if channel_filter:
                         where.append("channel_id = ?")
                         qparams.append(channel_filter)
                     where_str = ' AND '.join(where)
-
-                    # Summary per channel
-                    summary_rows = conn.execute(f"""
-                        SELECT channel_id,
-                            SUM(cad_clear) as total_clear,
-                            SUM(cad_detected) as total_detected,
-                            COUNT(*) as sample_count
-                        FROM cad_events
-                        WHERE {where_str}
-                        GROUP BY channel_id
-                    """, qparams).fetchall()
-
-                    for row in summary_rows:
-                        ch_id = row["channel_id"]
-                        t_clear = row["total_clear"] or 0
-                        t_det = row["total_detected"] or 0
-                        channels[ch_id] = {
-                            "clear": t_clear,
-                            "detected": t_det,
-                            "total": t_clear + t_det,
-                        }
-
-                    # Time-bucketed aggregation
-                    bucket_rows = conn.execute(f"""
-                        SELECT
-                            channel_id,
-                            CAST((timestamp / {bucket_secs}) AS INTEGER) * {bucket_secs} AS bucket_ts,
-                            SUM(cad_clear) as sum_clear,
-                            SUM(cad_detected) as sum_detected
-                        FROM cad_events
-                        WHERE {where_str}
-                        GROUP BY channel_id, bucket_ts
-                        ORDER BY channel_id, bucket_ts ASC
-                    """, qparams).fetchall()
-
-                    for row in bucket_rows:
-                        ch_id = row["channel_id"]
-                        if ch_id not in buckets:
-                            buckets[ch_id] = []
-                        buckets[ch_id].append({
-                            "ts": int(row["bucket_ts"]),
-                            "clear": row["sum_clear"] or 0,
-                            "detected": row["sum_detected"] or 0,
-                        })
-
-                    # Recent rows (last 100)
                     recent_rows = conn.execute(f"""
                         SELECT timestamp, channel_id, cad_clear, cad_detected
                         FROM cad_events
@@ -2923,6 +2966,7 @@ class WM1303API:
                         ORDER BY timestamp DESC
                         LIMIT 100
                     """, qparams).fetchall()
+                    conn.row_factory = None
 
                     recent = [{
                         "ts": row["timestamp"],
@@ -2961,48 +3005,52 @@ class WM1303API:
         })
 
     def noise_floor_history(self, hours='24'):
-        """GET /api/wm1303/noise_floor_history - Noise floor measurements over time."""
-        h = min(int(hours), 168)
+        """GET /api/wm1303/noise_floor_history - Noise floor measurements over time (tiered)."""
         import sqlite3
+        h = min(int(hours), 168)
+        bucket_s = auto_bucket_seconds(h)
+        now = time.time()
+        cutoff = now - (h * 3600)
         db_path = "/var/lib/pymc_repeater/repeater.db"
-        cutoff = time.time() - (h * 3600)
         try:
             with _db_conn(db_path) as conn:
+                # Discover channels present in the range
                 conn.row_factory = sqlite3.Row
-                # Return individual data points per channel (no bucketing)
-                rows = conn.execute("""
-                    SELECT timestamp, channel_id, noise_floor_dbm,
-                           min_rssi, max_rssi, samples_collected
-                    FROM noise_floor_history
-                    WHERE timestamp > ?
-                    ORDER BY timestamp ASC
-                """, (cutoff,)).fetchall()
+                disc = conn.execute(
+                    "SELECT DISTINCT channel_id FROM noise_floor_history WHERE timestamp > ?",
+                    (cutoff,)
+                ).fetchall()
+                ch_ids = [r["channel_id"] for r in disc]
+                conn.row_factory = None
+
+                # Tiered query per channel, merge into flat list
                 data = []
-                for row in rows:
-                    data.append({
-                        "timestamp": row["timestamp"],
-                        "channel_id": row["channel_id"],
-                        "noise_floor_dbm": round(row["noise_floor_dbm"], 1) if row["noise_floor_dbm"] else None,
-                        "min_rssi": round(row["min_rssi"], 1) if row["min_rssi"] else None,
-                        "max_rssi": round(row["max_rssi"], 1) if row["max_rssi"] else None,
-                        "samples": row["samples_collected"] or 0
-                    })
-                stats = conn.execute("""
-                    SELECT
-                        COUNT(*) as total,
-                        AVG(noise_floor_dbm) as avg_nf,
-                        MIN(noise_floor_dbm) as min_nf,
-                        MAX(noise_floor_dbm) as max_nf
-                    FROM noise_floor_history
-                    WHERE timestamp > ?
-                """, (cutoff,)).fetchone()
+                all_nf = []
+                for ch_id in ch_ids:
+                    rows = tiered_noise_floor_query(conn, ch_id, cutoff, now, bucket_s)
+                    for r in rows:
+                        _nf = r.get("avg_noise_floor_dbm")
+                        _min = r.get("min_noise_floor_dbm")
+                        _max = r.get("max_noise_floor_dbm")
+                        data.append({
+                            "timestamp": r["bucket_ts"],
+                            "channel_id": ch_id,
+                            "noise_floor_dbm": round(_nf, 1) if _nf is not None else None,
+                            "min_rssi": round(_min, 1) if _min is not None else None,
+                            "max_rssi": round(_max, 1) if _max is not None else None,
+                            "samples": r.get("total_samples_collected") or 0,
+                        })
+                        if _nf is not None:
+                            all_nf.append(_nf)
+                # Sort by timestamp across all channels
+                data.sort(key=lambda x: x["timestamp"])
                 return _j({
                     "hours": h,
-                    "total_measurements": stats["total"] if stats else 0,
+                    "total_measurements": len(data),
                     "stats": {
-                        "avg": round(stats["avg_nf"], 1) if stats and stats["avg_nf"] else None,
-                        "min": round(stats["min_nf"], 1) if stats and stats["min_nf"] else None,
-                        "max": round(stats["max_nf"], 1) if stats and stats["max_nf"] else None,
+                        "avg": round(sum(all_nf) / len(all_nf), 1) if all_nf else None,
+                        "min": round(min(all_nf), 1) if all_nf else None,
+                        "max": round(max(all_nf), 1) if all_nf else None,
                     },
                     "data": data
                 })
@@ -3016,25 +3064,15 @@ class WM1303API:
     @cherrypy.expose
     @cherrypy.tools.json_out()
     def _packet_activity(self, **params):
-        """GET /api/wm1303/packet_activity - RX/TX activity per channel from packet_activity table."""
-        import sqlite3 as _sq3
+        """GET /api/wm1303/packet_activity - RX/TX activity per channel (tiered)."""
         hours_str = params.get("hours", "24")
         try:
             h = min(int(hours_str), 168)
         except (ValueError, TypeError):
             h = 24
-        # Bucket sizes: 1h->1min, 6h->5min, 24h->15min, 72h->1h, 168h->4h
-        if h <= 1:
-            bucket_s = 60
-        elif h <= 6:
-            bucket_s = 300
-        elif h <= 24:
-            bucket_s = 900
-        elif h <= 72:
-            bucket_s = 3600
-        else:
-            bucket_s = 14400
-        cutoff = time.time() - (h * 3600)
+        bucket_s = auto_bucket_seconds(h)
+        now = time.time()
+        cutoff = now - (h * 3600)
         db_path = "/var/lib/pymc_repeater/repeater.db"
         ui_chs = _load_ui().get("channels", [])
         ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
@@ -3044,30 +3082,12 @@ class WM1303API:
         try:
             ch_id_map = _get_ui_channel_id_map()
             with _db_conn(db_path) as conn:
-                conn.row_factory = _sq3.Row
                 for idx, ch_cfg in enumerate(ui_chs):
                     ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
                     letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
-                    rows = conn.execute(
-                        "SELECT timestamp, rx_count, tx_count FROM packet_activity "
-                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
-                        (ch_id, cutoff)
-                    ).fetchall()
-                    # Bucket the data
-                    buckets = {}
-                    for row in rows:
-                        bk = int(row["timestamp"] / bucket_s) * bucket_s
-                        if bk not in buckets:
-                            buckets[bk] = {"rx": [], "tx": []}
-                        buckets[bk]["rx"].append(row["rx_count"] or 0)
-                        buckets[bk]["tx"].append(row["tx_count"] or 0)
-                    timeseries = []
-                    for bk_ts in sorted(buckets.keys()):
-                        bk = buckets[bk_ts]
-                        # Delta within bucket (last - first)
-                        rx_delta = sum(bk["rx"])  # Sum of deltas in bucket
-                        tx_delta = sum(bk["tx"])  # Sum of deltas in bucket
-                        timeseries.append({"t": bk_ts, "rx": rx_delta, "tx": tx_delta})
+                    rows = tiered_packet_activity_query(conn, ch_id, cutoff, now, bucket_s)
+                    timeseries = [{"t": r["bucket_ts"], "rx": r["total_rx_count"] or 0,
+                                   "tx": r["total_tx_count"] or 0} for r in rows]
                     result_channels.append({
                         "id": ch_id,
                         "label": ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}")),
@@ -3077,27 +3097,26 @@ class WM1303API:
                 # --- Channel E (SX1261) ---
                 _che_cfg = _load_ui().get("channel_e", {})
                 if _che_cfg.get("enabled", False):
-                    che_rows = conn.execute(
-                        "SELECT timestamp, rx_count, tx_count FROM packet_activity "
-                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
-                        ("channel_e", cutoff)
-                    ).fetchall()
-                    che_buckets = {}
-                    for row in che_rows:
-                        bk = int(row["timestamp"] / bucket_s) * bucket_s
-                        if bk not in che_buckets:
-                            che_buckets[bk] = {"rx": [], "tx": []}
-                        che_buckets[bk]["rx"].append(row["rx_count"] or 0)
-                        che_buckets[bk]["tx"].append(row["tx_count"] or 0)
-                    che_ts = []
-                    for bk_ts in sorted(che_buckets.keys()):
-                        bk = che_buckets[bk_ts]
-                        che_ts.append({"t": bk_ts, "rx": sum(bk["rx"]), "tx": sum(bk["tx"])})
+                    che_rows = tiered_packet_activity_query(conn, "channel_e", cutoff, now, bucket_s)
+                    che_ts = [{"t": r["bucket_ts"], "rx": r["total_rx_count"] or 0,
+                               "tx": r["total_tx_count"] or 0} for r in che_rows]
                     result_channels.append({
                         "id": "channel_e",
                         "label": _che_cfg.get("name", _che_cfg.get("friendly_name", "Channel E")),
                         "color": "#f97316",
                         "data": che_ts
+                    })
+                # --- Channel F (chan_Lora_std on RF0) ---
+                _chf_cfg = _load_ui().get("channel_f", {})
+                if _chf_cfg.get("enabled", False):
+                    chf_rows = tiered_packet_activity_query(conn, "channel_f", cutoff, now, bucket_s)
+                    chf_ts = [{"t": r["bucket_ts"], "rx": r["total_rx_count"] or 0,
+                               "tx": r["total_tx_count"] or 0} for r in chf_rows]
+                    result_channels.append({
+                        "id": "channel_f",
+                        "label": _chf_cfg.get("name", _chf_cfg.get("friendly_name", "Channel F")),
+                        "color": "#a855f7",
+                        "data": chf_ts
                     })
             return _j({"hours": h, "bucket_seconds": bucket_s, "channels": result_channels})
         except Exception as e:
@@ -3105,26 +3124,16 @@ class WM1303API:
             return _j({"error": str(e), "hours": h, "channels": []})
 
     def _crc_error_rate(self, **params):
-        """GET /api/wm1303/crc_error_rate - Per-channel CRC error rate from crc_error_rate table."""
-        import sqlite3 as _sq3
+        """GET /api/wm1303/crc_error_rate - Per-channel CRC error rate (tiered)."""
         hours_str = params.get("hours", "1")
         try:
             h = min(int(hours_str), 168)
         except (ValueError, TypeError):
             h = 1
         channel_id = params.get("channel_id", None)
-        # Bucket sizes: 1h->1min, 6h->5min, 24h->15min, 72h->1h, 168h->4h
-        if h <= 1:
-            bucket_s = 60
-        elif h <= 6:
-            bucket_s = 300
-        elif h <= 24:
-            bucket_s = 900
-        elif h <= 72:
-            bucket_s = 3600
-        else:
-            bucket_s = 14400
-        cutoff = time.time() - (h * 3600)
+        bucket_s = auto_bucket_seconds(h)
+        now = time.time()
+        cutoff = now - (h * 3600)
         db_path = "/var/lib/pymc_repeater/repeater.db"
         ui_chs = _load_ui().get("channels", [])
         ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
@@ -3134,33 +3143,15 @@ class WM1303API:
         try:
             ch_id_map = _get_ui_channel_id_map()
             with _db_conn(db_path) as conn:
-                conn.row_factory = _sq3.Row
                 for idx, ch_cfg in enumerate(ui_chs):
                     ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
                     if channel_id and ch_id != channel_id:
                         continue
                     letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
-                    rows = conn.execute(
-                        "SELECT timestamp, crc_error_count, crc_disabled_count FROM crc_error_rate "
-                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
-                        (ch_id, cutoff)
-                    ).fetchall()
-                    # Bucket the data
-                    buckets = {}
-                    for row in rows:
-                        bk = int(row["timestamp"] / bucket_s) * bucket_s
-                        if bk not in buckets:
-                            buckets[bk] = {"err": [], "dis": []}
-                        buckets[bk]["err"].append(row["crc_error_count"] or 0)
-                        buckets[bk]["dis"].append(row["crc_disabled_count"] or 0)
-                    timeseries = []
-                    for bk_ts in sorted(buckets.keys()):
-                        bk = buckets[bk_ts]
-                        timeseries.append({
-                            "t": bk_ts,
-                            "crc_error": sum(bk["err"]),
-                            "crc_disabled": sum(bk["dis"])
-                        })
+                    rows = tiered_crc_error_rate_query(conn, ch_id, cutoff, now, bucket_s)
+                    timeseries = [{"t": r["bucket_ts"],
+                                   "crc_error": r["total_crc_errors"] or 0,
+                                   "crc_disabled": r["total_crc_disabled"] or 0} for r in rows]
                     result_channels.append({
                         "id": ch_id,
                         "label": ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}")),
@@ -3168,23 +3159,11 @@ class WM1303API:
                         "data": timeseries
                     })
                 # Also check for 'unknown' channel
-                unk_rows = conn.execute(
-                    "SELECT timestamp, crc_error_count, crc_disabled_count FROM crc_error_rate "
-                    "WHERE channel_id = 'unknown' AND timestamp > ? ORDER BY timestamp",
-                    (cutoff,)
-                ).fetchall()
+                unk_rows = tiered_crc_error_rate_query(conn, "unknown", cutoff, now, bucket_s)
                 if unk_rows:
-                    unk_buckets = {}
-                    for row in unk_rows:
-                        bk = int(row["timestamp"] / bucket_s) * bucket_s
-                        if bk not in unk_buckets:
-                            unk_buckets[bk] = {"err": [], "dis": []}
-                        unk_buckets[bk]["err"].append(row["crc_error_count"] or 0)
-                        unk_buckets[bk]["dis"].append(row["crc_disabled_count"] or 0)
-                    unk_ts = []
-                    for bk_ts in sorted(unk_buckets.keys()):
-                        bk = unk_buckets[bk_ts]
-                        unk_ts.append({"t": bk_ts, "crc_error": sum(bk["err"]), "crc_disabled": sum(bk["dis"])})
+                    unk_ts = [{"t": r["bucket_ts"],
+                               "crc_error": r["total_crc_errors"] or 0,
+                               "crc_disabled": r["total_crc_disabled"] or 0} for r in unk_rows]
                     result_channels.append({
                         "id": "unknown",
                         "label": "Unknown",
@@ -3198,93 +3177,61 @@ class WM1303API:
 
 
     def _packet_metrics(self, **params):
-        """GET /api/wm1303/packet_metrics - Per-packet RX/TX metrics per channel for spectrum charts.
+        """GET /api/wm1303/packet_metrics - Per-packet RX/TX metrics per channel (tiered).
 
         Returns per-channel per-bucket arrays:
           rx_bytes (sum), tx_bytes (sum), tx_airtime_ms (sum), tx_wait_ms (sum),
           rx_hops (avg), rx_crc_ok (count), rx_crc_err (count).
         """
-        import sqlite3 as _sq3
         hours_str = params.get("hours", "24")
         try:
             h = min(int(hours_str), 168)
         except (ValueError, TypeError):
             h = 24
-        # Same bucket sizes as packet_activity
-        if h <= 1:
-            bucket_s = 60
-        elif h <= 6:
-            bucket_s = 300
-        elif h <= 24:
-            bucket_s = 900
-        elif h <= 72:
-            bucket_s = 3600
-        else:
-            bucket_s = 14400
-        cutoff = time.time() - (h * 3600)
+        bucket_s = auto_bucket_seconds(h)
+        now = time.time()
+        cutoff = now - (h * 3600)
         db_path = "/var/lib/pymc_repeater/repeater.db"
         ui_chs = _load_ui().get("channels", [])
         ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
         ch_colors = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b",
                      "#f472b6", "#fb923c", "#06b6d4", "#a3e635"]
 
-        def _agg_channel(conn, ch_id):
-            rows = conn.execute(
-                "SELECT CAST(timestamp / ? AS INTEGER) * ? AS bk, direction, length, "
-                "       airtime_ms, wait_time_ms, hop_count, crc_ok "
-                "FROM packet_metrics WHERE channel_id = ? AND timestamp > ? ORDER BY bk",
-                (bucket_s, bucket_s, ch_id, cutoff)
-            ).fetchall()
+        def _agg_channel_tiered(conn, ch_id):
+            rows = tiered_packet_metrics_query(conn, ch_id, cutoff, now, bucket_s)
+            # Pivot by bucket_ts, combining rx and tx direction rows
             buckets = {}
             for r in rows:
-                bk = int(r["bk"])
+                bk = r["bucket_ts"]
                 b = buckets.setdefault(bk, {
                     "rx_bytes": 0, "tx_bytes": 0,
                     "tx_airtime_ms": 0.0, "tx_wait_ms": 0.0,
-                    "rx_hops_sum": 0, "rx_hops_n": 0,
-                    "rx_crc_ok": 0, "rx_crc_err": 0,
+                    "rx_hops_avg": None, "rx_crc_ok": 0, "rx_crc_err": 0,
                 })
-                _dir = r["direction"]
-                _len = r["length"] or 0
-                _ok = bool(r["crc_ok"])
+                _dir = r.get("direction", "")
+                _sc = r.get("sample_count") or 0
+                _crc_err = r.get("crc_error_count") or 0
                 if _dir == "rx":
-                    if _ok:
-                        # Only count CRC-valid RX as real traffic bytes.
-                        # CRC errors are tracked separately in rx_crc_err_ratio.
-                        b["rx_bytes"] += _len
-                        b["rx_crc_ok"] += 1
-                        _hop = r["hop_count"]
-                        if _hop is not None:
-                            # MeshCore path_len field supports up to 63 hops (6-bit mask).
-                            # In large mesh networks, 10+ hops is entirely plausible.
-                            # Display as "number of transmissions to reach me":
-                            # path_len=0 (direct from node) -> 1 transmission
-                            # path_len=1 (one repeater)     -> 2 transmissions
-                            _hop_int = int(_hop)
-                            if 0 <= _hop_int <= 63:
-                                b["rx_hops_sum"] += _hop_int + 1
-                                b["rx_hops_n"] += 1
-                    else:
-                        b["rx_crc_err"] += 1
+                    b["rx_bytes"] += r.get("total_bytes") or 0
+                    b["rx_crc_err"] += _crc_err
+                    b["rx_crc_ok"] += max(0, _sc - _crc_err)
+                    _hop = r.get("avg_hop_count")
+                    if _hop is not None:
+                        # avg_hop_count from tiered is already the average hop_count
+                        # The original adds +1 (path_len=0 → 1 transmission)
+                        b["rx_hops_avg"] = float(_hop) + 1.0
                 elif _dir == "tx":
-                    b["tx_bytes"] += _len
-                    b["tx_airtime_ms"] += float(r["airtime_ms"] or 0)
-                    b["tx_wait_ms"] += float(r["wait_time_ms"] or 0)
+                    b["tx_bytes"] += r.get("total_bytes") or 0
+                    b["tx_airtime_ms"] += float(r.get("total_airtime_ms") or 0)
             series = []
             for bk_ts in sorted(buckets.keys()):
                 b = buckets[bk_ts]
-                rx_hops_avg = (b["rx_hops_sum"] / b["rx_hops_n"]) if b["rx_hops_n"] > 0 else None
                 _total_rx = b["rx_crc_ok"] + b["rx_crc_err"]
-                # Option B: ratio = 0 when no valid RX packets (cleaner baseline than 1.0 or null).
-                # Only 1.0 when there IS real RX traffic that's failing CRC.
                 if b["rx_crc_ok"] > 0:
-                    # Normal case: there's valid traffic, compute real error ratio
                     crc_err_ratio = b["rx_crc_err"] / _total_rx
                 elif b["rx_bytes"] > 0 or b["tx_bytes"] > 0:
-                    # Channel active (any RX/TX) but no valid decodes yet — show 0 baseline
                     crc_err_ratio = 0.0
                 else:
-                    # Channel completely idle — show gap
                     crc_err_ratio = None
                 series.append({
                     "t": bk_ts,
@@ -3292,7 +3239,7 @@ class WM1303API:
                     "tx_bytes": b["tx_bytes"],
                     "tx_airtime_ms": round(b["tx_airtime_ms"], 1),
                     "tx_wait_ms": round(b["tx_wait_ms"], 1),
-                    "rx_hops": round(rx_hops_avg, 2) if rx_hops_avg is not None else None,
+                    "rx_hops": round(b["rx_hops_avg"], 2) if b["rx_hops_avg"] is not None else None,
                     "rx_crc_ok": b["rx_crc_ok"],
                     "rx_crc_err": b["rx_crc_err"],
                     "rx_crc_err_ratio": round(crc_err_ratio, 3) if crc_err_ratio is not None else None,
@@ -3303,11 +3250,10 @@ class WM1303API:
         try:
             ch_id_map = _get_ui_channel_id_map()
             with _db_conn(db_path) as conn:
-                conn.row_factory = _sq3.Row
                 for idx, ch_cfg in enumerate(ui_chs):
                     ch_id = ch_id_map.get(idx, "channel_" + chr(97 + idx))
                     letter = ch_letters[idx] if idx < len(ch_letters) else str(idx + 1)
-                    series = _agg_channel(conn, ch_id)
+                    series = _agg_channel_tiered(conn, ch_id)
                     result_channels.append({
                         "id": ch_id,
                         "label": ch_cfg.get("name", ch_cfg.get("friendly_name", f"Channel {letter}")),
@@ -3317,12 +3263,22 @@ class WM1303API:
                 # Channel E (SX1261)
                 _che_cfg = _load_ui().get("channel_e", {})
                 if _che_cfg.get("enabled", False):
-                    series_e = _agg_channel(conn, "channel_e")
+                    series_e = _agg_channel_tiered(conn, "channel_e")
                     result_channels.append({
                         "id": "channel_e",
                         "label": _che_cfg.get("name", _che_cfg.get("friendly_name", "Channel E")),
                         "color": "#f97316",
                         "data": series_e,
+                    })
+                # Channel F (chan_Lora_std on RF0)
+                _chf_cfg = _load_ui().get("channel_f", {})
+                if _chf_cfg.get("enabled", False):
+                    series_f = _agg_channel_tiered(conn, "channel_f")
+                    result_channels.append({
+                        "id": "channel_f",
+                        "label": _chf_cfg.get("name", _chf_cfg.get("friendly_name", "Channel F")),
+                        "color": "#a855f7",
+                        "data": series_f,
                     })
             return _j({"hours": h, "bucket_seconds": bucket_s, "channels": result_channels})
         except Exception as e:
@@ -3340,7 +3296,7 @@ class WM1303API:
         ui_chs = _load_ui().get("channels", [])
         ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
                      "channel_c": "#10b981", "channel_d": "#f59e0b",
-                     "channel_e": "#f97316"}
+                     "channel_e": "#f97316", "channel_f": "#a855f7"}
         ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
         result_channels = []
         try:
@@ -3438,6 +3394,51 @@ class WM1303API:
                         "color": "#f97316",
                         "timeseries": che_ts
                     })
+                # --- Channel F (chan_Lora_std on RF0) ---
+                _chf_cfg = _load_ui().get("channel_f", {})
+                if _chf_cfg.get("enabled", False):
+                    chf_rows = conn.execute(
+                        "SELECT timestamp, tx_count, tx_failed, lbt_blocked, "
+                        "tx_airtime_ms, tx_bytes FROM channel_stats_history "
+                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
+                        ("channel_f", cutoff)
+                    ).fetchall()
+                    chf_ts = []
+                    if len(chf_rows) >= 2:
+                        chf_buckets = {}
+                        for i in range(1, len(chf_rows)):
+                            prev, cur = chf_rows[i-1], chf_rows[i]
+                            bk = int(cur["timestamp"] / bucket_s) * bucket_s
+                            tx_d = max(0, (cur["tx_count"] or 0) - (prev["tx_count"] or 0))
+                            fail_d = max(0, (cur["tx_failed"] or 0) - (prev["tx_failed"] or 0))
+                            lbt_d = max(0, (cur["lbt_blocked"] or 0) - (prev["lbt_blocked"] or 0))
+                            air_d = max(0, (cur["tx_airtime_ms"] or 0) - (prev["tx_airtime_ms"] or 0))
+                            bytes_d = max(0, (cur["tx_bytes"] or 0) - (prev["tx_bytes"] or 0))
+                            if bk not in chf_buckets:
+                                chf_buckets[bk] = {"tx_sent": 0, "tx_failed": 0, "lbt_blocked": 0,
+                                                   "airtime_ms": 0.0, "tx_bytes": 0}
+                            chf_buckets[bk]["tx_sent"] += tx_d
+                            chf_buckets[bk]["tx_failed"] += fail_d
+                            chf_buckets[bk]["lbt_blocked"] += lbt_d
+                            chf_buckets[bk]["airtime_ms"] += air_d
+                            chf_buckets[bk]["tx_bytes"] += bytes_d
+                        for bk_ts in sorted(chf_buckets.keys()):
+                            b = chf_buckets[bk_ts]
+                            if b["tx_sent"] > 0 or b["tx_failed"] > 0 or b["lbt_blocked"] > 0:
+                                chf_ts.append({
+                                    "timestamp": bk_ts,
+                                    "tx_sent": b["tx_sent"],
+                                    "tx_failed": b["tx_failed"],
+                                    "lbt_blocked": b["lbt_blocked"],
+                                    "airtime_ms": round(b["airtime_ms"], 1),
+                                    "tx_bytes": b["tx_bytes"]
+                                })
+                    result_channels.append({
+                        "name": _chf_cfg.get("name", _chf_cfg.get("friendly_name", "Channel F")),
+                        "channel_id": "channel_f",
+                        "color": "#a855f7",
+                        "timeseries": chf_ts
+                    })
             return _j({"hours": h, "bucket_minutes": 1, "channels": result_channels})
         except Exception as e:
             logger.error("tx_activity error: %s", e)
@@ -3455,7 +3456,7 @@ class WM1303API:
         ui_chs = _load_ui().get("channels", [])
         ch_colors = {"channel_a": "#3b82f6", "channel_b": "#8b5cf6",
                      "channel_c": "#10b981", "channel_d": "#f59e0b",
-                     "channel_e": "#f97316"}
+                     "channel_e": "#f97316", "channel_f": "#a855f7"}
         ch_letters = ["A", "B", "C", "D", "E", "F", "G", "H"]
         result_channels = []
         summary = {}
@@ -3524,6 +3525,36 @@ class WM1303API:
                         "active": True,
                         "timeseries": che_ts,
                         "total": che_total
+                    })
+                # Also add channel_f if enabled (chan_Lora_std on RF0)
+                _chf_cfg = _load_ui().get("channel_f", {})
+                if _chf_cfg.get("enabled", False):
+                    chf_rows = conn.execute(
+                        "SELECT timestamp, count FROM origin_channel_stats "
+                        "WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp",
+                        ("channel_f", cutoff)
+                    ).fetchall()
+                    chf_ts = []
+                    chf_total = 0
+                    if chf_rows:
+                        chf_buckets = {}
+                        for row in chf_rows:
+                            bk = int(row["timestamp"] / bucket_s) * bucket_s
+                            if bk not in chf_buckets:
+                                chf_buckets[bk] = 0
+                            chf_buckets[bk] += row["count"]
+                        for bk_ts in sorted(chf_buckets.keys()):
+                            cnt = chf_buckets[bk_ts]
+                            chf_total += cnt
+                            chf_ts.append({"timestamp": bk_ts, "count": cnt})
+                    summary["channel_f"] = chf_total
+                    result_channels.append({
+                        "name": _chf_cfg.get("name", _chf_cfg.get("friendly_name", "Channel F")),
+                        "channel_id": "channel_f",
+                        "color": "#a855f7",
+                        "active": True,
+                        "timeseries": chf_ts,
+                        "total": chf_total
                     })
             # Add live (unflushed) counts from bridge engine
             try:
@@ -3805,9 +3836,15 @@ class WM1303API:
             _P("/home/pi/wm1303_pf/bridge_conf.json").write_text(json.dumps(gc, indent=2))
             ui = _load_ui()
             che_ui = ui.setdefault("channel_e", {})
+            # Note: sync_word is intentionally NOT accepted here. It is a
+            # device-wide setting stored at the top-level of wm1303_ui.json
+            # and managed via /api/wm1303/sync_word. Any sync_word value in
+            # the request body is silently ignored.
             for key in ["name", "friendly_name", "boosted_rx", "preamble_length", "cad_enabled", "tx_power", "lbt_enabled", "lbt_threshold"]:
                 if key in body:
                     che_ui[key] = body[key]
+            # Defensive cleanup: drop any leftover per-channel sync_word
+            che_ui.pop("sync_word", None)
             che_ui["enabled"] = lora_rx["enable"]
             che_ui["lbt_enabled"] = lbt.get("enable", False)
             che_ui["lbt_threshold"] = lbt.get("rssi_target", -80)
@@ -3830,6 +3867,403 @@ class WM1303API:
         except Exception as ex:
             logger.error("_channel_e_post: %s", ex)
             return _j({"status": "error", "reason": str(ex)})
+
+    # ---------------------------------------------------------------
+    # Channel F endpoints (Issue #1 multi-region BW250/500 support)
+    # ---------------------------------------------------------------
+    # Channel F = chan_Lora_std on RF0, runs in PARALLEL with channels A-D
+    # (chan_multiSF_0-3). Supports BW125/250/500 single-SF reception.
+    # UI-only persistence: wm1303_backend.py reads channel_f from
+    # wm1303_ui.json and generates chan_Lora_std dynamically. We do NOT
+    # write to global_conf.json from here (unlike channel_e which also
+    # writes the SX1261 lora_rx block).
+    # ---------------------------------------------------------------
+    def _channel_f_get(self):
+        """Return Channel F (chan_Lora_std) configuration (SSOT: wm1303_ui.json)."""
+        try:
+            ui = _load_ui()
+            chf = ui.get("channel_f", {})
+            cr_raw = chf.get("coding_rate", "4/5")
+            if isinstance(cr_raw, int):
+                cr_str = {1: "4/5", 2: "4/6", 3: "4/7", 4: "4/8"}.get(cr_raw, "4/5")
+            else:
+                cr_str = str(cr_raw) if cr_raw else "4/5"
+            result = {
+                "status": "ok",
+                "enabled": chf.get("enabled", False),
+                "enable": chf.get("enabled", False),
+                "active": chf.get("enabled", False),
+                "frequency": chf.get("frequency", 869525000),
+                "bandwidth": chf.get("bandwidth", 250000),
+                "spreading_factor": chf.get("spreading_factor", 9),
+                "coding_rate": cr_str,
+                "name": chf.get("name", chf.get("friendly_name", "Channel F")),
+                "friendly_name": chf.get("friendly_name", "Channel F"),
+                "preamble_length": chf.get("preamble_length", 16),
+                "tx_power": chf.get("tx_power", 22),
+                "lbt_enabled": chf.get("lbt_enabled", False),
+                "lbt_threshold": chf.get("lbt_threshold", -80),
+                "lbt_rssi_target": chf.get("lbt_rssi_target", chf.get("lbt_threshold", -80)),
+                "cad_enabled": chf.get("cad_enabled", False),
+                "boosted_rx": chf.get("boosted_rx", False),
+            }
+            return _j(result)
+        except Exception as ex:
+            logger.error("_channel_f_get: %s", ex)
+            return _j({"status": "error", "reason": str(ex)})
+
+    def _channel_f_post(self):
+        """Save Channel F (chan_Lora_std) configuration to wm1303_ui.json only.
+
+        The backend (wm1303_backend.py _generate_bridge_conf) reads channel_f
+        from wm1303_ui.json on each (re)start and constructs chan_Lora_std
+        dynamically with the correct if-offset, bandwidth and SF. Therefore
+        no global_conf.json write is required here. Pass restart=true in the
+        body to apply changes via systemctl restart pymc-repeater.
+        """
+        try:
+            body = json.loads(cherrypy.request.body.read())
+            restart = body.pop("restart", False)
+
+            # Validation: bandwidth must be one of the chan_Lora_std-supported values
+            bw_in = body.get("bandwidth")
+            if bw_in is not None:
+                try:
+                    bw_val = int(bw_in)
+                except (TypeError, ValueError):
+                    return _j({"status": "error", "reason": "bandwidth must be integer Hz"})
+                if bw_val not in (125000, 250000, 500000):
+                    return _j({
+                        "status": "error",
+                        "reason": "bandwidth must be 125000, 250000 or 500000 Hz",
+                    })
+
+            # Validation: spreading_factor 5..12
+            sf_in = body.get("spreading_factor")
+            if sf_in is not None:
+                try:
+                    sf_val = int(sf_in)
+                except (TypeError, ValueError):
+                    return _j({"status": "error", "reason": "spreading_factor must be integer"})
+                if sf_val < 5 or sf_val > 12:
+                    return _j({
+                        "status": "error",
+                        "reason": "spreading_factor must be in range 5..12",
+                    })
+
+            ui = _load_ui()
+            chf_ui = ui.setdefault("channel_f", {})
+
+            # enable/enabled aliases
+            if "enabled" in body or "enable" in body:
+                chf_ui["enabled"] = bool(body.get("enabled", body.get("enable", False)))
+
+            if "frequency" in body:
+                chf_ui["frequency"] = int(body["frequency"])
+            if "bandwidth" in body:
+                chf_ui["bandwidth"] = int(body["bandwidth"])
+            if "spreading_factor" in body:
+                chf_ui["spreading_factor"] = int(body["spreading_factor"])
+            if "coding_rate" in body:
+                _cr_val = body["coding_rate"]
+                _cr_i2s = {1: "4/5", 2: "4/6", 3: "4/7", 4: "4/8"}
+                if isinstance(_cr_val, int) and _cr_val in _cr_i2s:
+                    chf_ui["coding_rate"] = _cr_i2s[_cr_val]
+                else:
+                    chf_ui["coding_rate"] = str(_cr_val) if _cr_val else "4/5"
+
+            # Note: sync_word is intentionally NOT accepted here. It is a
+            # device-wide setting stored at the top-level of wm1303_ui.json
+            # and managed via /api/wm1303/sync_word. Any sync_word value in
+            # the request body is silently ignored.
+            for key in (
+                "name",
+                "friendly_name",
+                "preamble_length",
+                "tx_power",
+                "lbt_enabled",
+                "lbt_threshold",
+                "lbt_rssi_target",
+                "cad_enabled",
+                "boosted_rx",
+            ):
+                if key in body:
+                    chf_ui[key] = body[key]
+
+            # Defensive cleanup: drop any leftover per-channel sync_word
+            chf_ui.pop("sync_word", None)
+
+            _save_ui(ui)
+            logger.info(
+                "channel_f config saved: enabled=%s freq=%s bw=%s sf=%s",
+                chf_ui.get("enabled"),
+                chf_ui.get("frequency"),
+                chf_ui.get("bandwidth"),
+                chf_ui.get("spreading_factor"),
+            )
+
+            if restart:
+                import subprocess as _sp_r, threading as _thr_r
+                def _do_restart():
+                    import time as _t
+                    _t.sleep(1)
+                    _sp_r.run(["sudo", "systemctl", "restart", _SVC_NAME],
+                              capture_output=True, timeout=30)
+                _thr_r.Thread(target=_do_restart, daemon=True).start()
+
+            return _j({"status": "ok", "restart": restart})
+        except Exception as ex:
+            logger.error("_channel_f_post: %s", ex)
+            return _j({"status": "error", "reason": str(ex)})
+
+    # ---------------------------------------------------------------
+    # Region & Preset endpoints (Issue #4 multi-region support)
+    # ---------------------------------------------------------------
+    def _regions_get(self):
+        """GET /api/wm1303/regions - list all available regulatory regions.
+
+        Returns a JSON array of region summaries (code, label, tx_freq_min/max, etc.).
+        """
+        try:
+            from pymc_core.hardware.region_config import (
+                REGION_PRESETS as _REGIONS,
+                get_region_summary as _summary,
+            )
+        except Exception as ex:
+            logger.warning("_regions_get: region_config not available: %s", ex)
+            return _j({"regions": [], "error": "region_config module not available"})
+        try:
+            out = []
+            for code in _REGIONS.keys():
+                out.append(_summary(code))
+            return _j({"regions": out, "count": len(out)})
+        except Exception as ex:
+            logger.error("_regions_get: %s", ex)
+            return _j({"regions": [], "error": str(ex)})
+
+    def _region_get(self):
+        """GET /api/wm1303/region - return the currently selected region from UI config."""
+        try:
+            ui = _load_ui()
+            r = ui.get("region", "EU868")
+            if isinstance(r, str):
+                r = {"code": r.upper(), "tx_freq_min": None, "tx_freq_max": None}
+            elif isinstance(r, dict):
+                r = {
+                    "code": str(r.get("code", "EU868")).upper(),
+                    "tx_freq_min": r.get("tx_freq_min"),
+                    "tx_freq_max": r.get("tx_freq_max"),
+                }
+            # Add summary info for the active region
+            try:
+                from pymc_core.hardware.region_config import (
+                    get_region_summary as _summary,
+                    get_tx_bounds as _bounds,
+                )
+                r["summary"] = _summary(r["code"])
+                _mn, _mx = _bounds(
+                    r["code"],
+                    custom_min=r.get("tx_freq_min"),
+                    custom_max=r.get("tx_freq_max"),
+                )
+                r["resolved_tx_freq_min"] = _mn
+                r["resolved_tx_freq_max"] = _mx
+            except Exception as ex:
+                logger.debug("_region_get: summary unavailable: %s", ex)
+            return _j(r)
+        except Exception as ex:
+            logger.error("_region_get: %s", ex)
+            return _j({"code": "EU868", "error": str(ex)})
+
+    def _region_post(self):
+        """POST/PUT /api/wm1303/region - update the regulatory region in UI config.
+
+        Body JSON: {"code": "AU915", optional: "tx_freq_min": 915000000, "tx_freq_max": 928000000}
+        For CUSTOM region, tx_freq_min and tx_freq_max must be provided.
+        """
+        try:
+            body = _body()
+            code = str(body.get("code", "")).strip().upper()
+            if not code:
+                cherrypy.response.status = 400
+                return _j({"status": "error", "reason": "missing 'code' field"})
+            # Validate region code against known regions
+            try:
+                from pymc_core.hardware.region_config import REGION_PRESETS as _REGIONS
+                if code not in _REGIONS:
+                    cherrypy.response.status = 400
+                    return _j({
+                        "status": "error",
+                        "reason": "unknown region code",
+                        "valid_codes": list(_REGIONS.keys()),
+                    })
+            except Exception:
+                pass  # region_config not available, accept anyway
+            # For CUSTOM, require frequency bounds
+            _custom_min = body.get("tx_freq_min")
+            _custom_max = body.get("tx_freq_max")
+            if code == "CUSTOM":
+                if not _custom_min or not _custom_max:
+                    cherrypy.response.status = 400
+                    return _j({
+                        "status": "error",
+                        "reason": "CUSTOM region requires tx_freq_min and tx_freq_max",
+                    })
+            # Persist to UI config
+            ui = _load_ui()
+            ui["region"] = {
+                "code": code,
+                "tx_freq_min": int(_custom_min) if _custom_min else None,
+                "tx_freq_max": int(_custom_max) if _custom_max else None,
+            }
+            _save_ui(ui)
+            logger.info("_region_post: region updated to %s", code)
+            return _j({"status": "ok", "region": ui["region"]})
+        except Exception as ex:
+            logger.error("_region_post: %s", ex)
+            cherrypy.response.status = 500
+            return _j({"status": "error", "reason": str(ex)})
+
+    # ---------------------------------------------------------------
+    # Sync word endpoints (device-wide LoRa network sync word)
+    # ---------------------------------------------------------------
+    # sync_word is a DEVICE-WIDE setting stored at the top level of
+    # wm1303_ui.json (NOT per-channel). HAL v2.10 exposes lorawan_public
+    # as a board-level flag (lgw_conf_board_t).
+    #
+    # SX1302 hardware supports ONLY two sync word values:
+    #   - Private (0x1424 / 5156)  -> lorawan_public = false
+    #   - Public  (0x3444 / 13380) -> lorawan_public = true
+    # The HAL function sx1302_lora_syncword() hard-codes the peak positions
+    # for these two values only; any other value is undefined behavior and
+    # breaks interoperability with MeshCore and standard LoRa hardware.
+    # Custom sync words are therefore NOT accepted by this API.
+    # ---------------------------------------------------------------
+    _SYNC_WORD_PRIVATE = 5156   # 0x1424
+    _SYNC_WORD_PUBLIC = 13380   # 0x3444
+
+    def _sync_word_get(self):
+        """GET /api/wm1303/sync_word - return the device-wide LoRa sync word.
+
+        Returns: {"value": int, "mode": "private|public", "hex": "0xNNNN"}
+
+        Legacy configs with mode=="custom" are normalized to Private for
+        backward compatibility (SX1302 hardware cannot honor Custom).
+        """
+        try:
+            ui = _load_ui()
+            sw = ui.get("sync_word")
+            if isinstance(sw, dict):
+                value = int(sw.get("value", self._SYNC_WORD_PRIVATE))
+                mode = str(sw.get("mode", "private")).lower()
+            elif isinstance(sw, int):
+                # Legacy/compat: bare integer at top level
+                value = int(sw)
+                mode = "private"
+            else:
+                value = self._SYNC_WORD_PRIVATE
+                mode = "private"
+            # Normalize: only Private/Public are valid. Any other value
+            # (including legacy "custom") falls back to Private.
+            if value == self._SYNC_WORD_PUBLIC:
+                mode = "public"
+            else:
+                # Anything else -> Private (covers legacy custom configs)
+                value = self._SYNC_WORD_PRIVATE
+                mode = "private"
+            return _j({
+                "value": value,
+                "mode": mode,
+                "hex": "0x{:04X}".format(value & 0xFFFF),
+            })
+        except Exception as ex:
+            logger.error("_sync_word_get: %s", ex)
+            return _j({
+                "value": self._SYNC_WORD_PRIVATE,
+                "mode": "private",
+                "hex": "0x1424",
+                "error": str(ex),
+            })
+
+    def _sync_word_post(self):
+        """POST/PUT /api/wm1303/sync_word - update the device-wide LoRa sync word.
+
+        Body JSON: {"mode": "private|public", optional "restart": bool}
+
+        - Private: value forced to 0x1424 (5156)
+        - Public:  value forced to 0x3444 (13380)
+
+        Custom sync words are NOT supported: SX1302 hardware can only set
+        the board-level lorawan_public flag, which selects between these
+        two predefined values. Requests with mode=="custom" return HTTP 400.
+        """
+        try:
+            body = _body()
+            restart = bool(body.pop("restart", False))
+            mode = str(body.get("mode", "")).strip().lower()
+            if mode == "custom":
+                cherrypy.response.status = 400
+                return _j({
+                    "status": "error",
+                    "reason": "custom mode not supported, hardware limitation",
+                })
+            if mode not in ("private", "public"):
+                cherrypy.response.status = 400
+                return _j({
+                    "status": "error",
+                    "reason": "mode must be one of: private, public",
+                })
+            if mode == "private":
+                value = self._SYNC_WORD_PRIVATE
+            else:  # public
+                value = self._SYNC_WORD_PUBLIC
+            ui = _load_ui()
+            ui["sync_word"] = {"value": int(value), "mode": mode}
+            _save_ui(ui)
+            logger.info("_sync_word_post: device sync_word updated to 0x%04X (%s)", value, mode)
+            if restart:
+                import subprocess as _sp_r, threading as _thr_r
+                def _do_restart():
+                    import time as _t
+                    _t.sleep(1)
+                    _sp_r.run(["sudo", "systemctl", "restart", _SVC_NAME],
+                              capture_output=True, timeout=30)
+                _thr_r.Thread(target=_do_restart, daemon=True).start()
+            return _j({
+                "status": "ok",
+                "sync_word": {
+                    "value": int(value),
+                    "mode": mode,
+                    "hex": "0x{:04X}".format(value & 0xFFFF),
+                },
+                "restart": restart,
+            })
+        except Exception as ex:
+            logger.error("_sync_word_post: %s", ex)
+            cherrypy.response.status = 500
+            return _j({"status": "error", "reason": str(ex)})
+
+    def _presets_get(self):
+        """GET /api/wm1303/presets - return community channel presets.
+
+        Reads /etc/pymc_repeater/presets.json (deployed by installer) or falls back
+        to /opt/pymc_repeater/presets.json. Returns the parsed JSON content.
+        """
+        from pathlib import Path as _Path
+        _candidates = [
+            _Path("/etc/pymc_repeater/presets.json"),
+            _Path("/opt/pymc_repeater/presets.json"),
+        ]
+        for p in _candidates:
+            if p.exists():
+                try:
+                    import json as _json
+                    data = _json.loads(p.read_text())
+                    return _j(data)
+                except Exception as ex:
+                    logger.error("_presets_get: error reading %s: %s", p, ex)
+                    return _j({"presets": [], "error": str(ex)})
+        return _j({"presets": [], "note": "presets.json not deployed"})
 
 # --- Background unified 60s recorder (packet_activity + cad + origin + crc) ---
 # Memory optimization (v2.4.6): Previously two separate daemon threads ran

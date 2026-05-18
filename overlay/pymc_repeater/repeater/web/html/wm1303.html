@@ -38,6 +38,15 @@ select.inp option{background:#1e293b;color:var(--tx)}
 .bmu{background:rgba(255,255,255,.08);color:var(--txm);border:1px solid var(--bdr)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .pls{animation:pulse 2s infinite}
+@keyframes traceFlash{0%{background:rgba(99,102,241,0.45);box-shadow:0 0 18px rgba(99,102,241,0.6)}50%{background:rgba(99,102,241,0.18);box-shadow:0 0 8px rgba(99,102,241,0.25)}100%{background:transparent;box-shadow:none}}
+.trace-flash{animation:traceFlash 2.4s ease-out 1}
+.trace-related{outline:2px solid #a78bfa !important;outline-offset:-2px;background:rgba(167,139,250,0.10) !important}
+.trace-dim{opacity:0.30;transition:opacity 0.2s}
+.trace-cat-tab{padding:5px 12px;border-radius:14px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.03);color:var(--txm);transition:all 0.15s;user-select:none;display:inline-flex;align-items:center;gap:5px}
+.trace-cat-tab:hover{background:rgba(255,255,255,0.07);border-color:rgba(255,255,255,0.20)}
+.trace-cat-tab.active{background:rgba(99,102,241,0.20);color:#c7d2fe;border-color:rgba(99,102,241,0.55)}
+.trace-cat-count{background:rgba(255,255,255,0.10);border-radius:8px;padding:0 5px;font-size:10px;color:inherit}
+.trace-cat-tab.active .trace-cat-count{background:rgba(199,210,254,0.20)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
 .dok{background:#22c55e;box-shadow:0 0 6px #22c55e}.der{background:#ef4444;box-shadow:0 0 6px #ef4444}.dwa{background:#f59e0b;box-shadow:0 0 6px #f59e0b}.dmu{background:rgba(255,255,255,.3)}
 .tgl{position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0}
@@ -185,7 +194,7 @@ select.ci option{background:#1e293b}
       </div>
     </div>
 
-    <!-- RF Center Frequency (shared RF1-Only (Half-Duplex)) -->
+    <!-- RF Center Frequency (shared RF1-Only (Half-Duplex)) + Region & Regulatory -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
       <div class="sc p-4" style="border-left:3px solid var(--acc)">
         <div class="flex items-center justify-between mb-3">
@@ -199,6 +208,56 @@ select.ci option{background:#1e293b}
           <input type="text" pattern="[0-9]*[.]?[0-9]*" class="ci" lang="en" id="rf-shared-freq" placeholder="869.525" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" onchange="updateRfPreview()">
         </div>
         <div class="text-xs mt-2 p-2 rounded" style="background:var(--bgr);color:var(--txm)" id="rf-shared-range">Range: -- to -- MHz</div>
+      </div>
+
+      <!-- Region & Regulatory (Issue #4 multi-region support) -->
+      <div class="sc p-4" id="region-config-card" style="border-left:3px solid #f59e0b">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <span class="font-semibold text-sm" style="color:#f59e0b">Region &amp; Regulatory</span>
+            <span class="bdg text-xs" id="region-status" style="background:rgba(245,158,11,0.15);color:#f59e0b">--</span>
+          </div>
+          <div class="flex gap-2">
+            <button class="btn pri sm" onclick="saveRegion(false)" title="Save region"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>
+            <button class="btn sec sm" onclick="saveRegion(true)" title="Save and restart service"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>Save &amp; Restart</button>
+          </div>
+        </div>
+        <div class="mb-2">
+          <label class="text-xs" style="color:var(--txm)">Regulatory region (controls TX freq bounds &amp; SX1261 image calibration)</label>
+          <select class="ci" id="region-code" onchange="onRegionChange()" style="width:100%">
+            <option value="">Loading...</option>
+          </select>
+        </div>
+        <div class="grid grid-cols-2 gap-2 mb-2">
+          <div>
+            <label class="text-xs" style="color:var(--txm)">TX freq min (MHz)</label>
+            <input type="text" class="ci" lang="en" id="region-tx-min" pattern="[0-9]*[.]?[0-9]*" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" readonly style="width:100%">
+          </div>
+          <div>
+            <label class="text-xs" style="color:var(--txm)">TX freq max (MHz)</label>
+            <input type="text" class="ci" lang="en" id="region-tx-max" pattern="[0-9]*[.]?[0-9]*" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" readonly style="width:100%">
+          </div>
+        </div>
+        <div class="text-xs mt-2 p-2 rounded" style="background:var(--bgr);color:var(--txm)" id="region-info">Select region to view bounds &amp; bands</div>
+
+        <!-- Device-wide LoRa Network Sync Word -->
+        <hr style="border:none;border-top:1px solid var(--brd);margin:12px 0 8px 0">
+        <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <div class="flex items-center gap-2">
+            <span class="font-semibold text-xs" style="color:#f59e0b">LoRa Network Sync Word</span>
+            <span class="text-xs" style="color:var(--txm)">(device-wide)</span>
+          </div>
+          <div class="flex gap-2">
+            <button class="btn pri sm" onclick="saveSyncWord(false)" title="Save sync word"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>
+            <button class="btn sec sm" onclick="saveSyncWord(true)" title="Save and restart service"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>Save &amp; Restart</button>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+          <select class="ci" id="dev-sw-mode" onchange="onDevSyncWordModeChange()" style="width:auto;min-width:160px">
+            <option value="private">Private (0x1424)</option>
+            <option value="public">Public (0x3444)</option>
+          </select>
+        </div>
       </div>
     </div>
 
@@ -267,6 +326,9 @@ select.ci option{background:#1e293b}
       <input class="ci" id="che-frequency" type="text" lang="en" pattern="[0-9]*[.]?[0-9]*" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" style="width:100%">
       <select class="ci" id="che-bandwidth" style="width:100%">
         <option value="62500" selected>62.5</option>
+        <option value="125000">125</option>
+        <option value="250000">250</option>
+        <option value="500000">500</option>
       </select>
       <select class="ci" id="che-sf" style="width:100%">
         <option value="7">7</option>
@@ -285,13 +347,64 @@ select.ci option{background:#1e293b}
       <input class="ci" id="che-preamble" type="number" min="6" max="65535" value="17" style="width:100%">
       <input class="ci" id="che-lbt-rssi" type="number" min="-120" max="0" value="-80" style="width:100%">
       <label class="tgl"><input type="checkbox" id="che-lbt-enabled" checked><span class="tsl"></span></label>
-      <select class="ci" id="che-tx-power" onchange=""><option value='12'>12</option><option value='14' selected>14</option><option value='17'>17</option><option value='20'>20</option><option value='27'>27</option></select>
+      <select class="ci" id="che-tx-power" style="width:100%"></select>
       <label class="tgl"><input type="checkbox" id="che-boosted-rx"><span class="tsl"></span></label>
       <label class="tgl"><input type="checkbox" id="che-enable" checked><span class="tsl"></span></label>
     </div>
-    <div class="mt-2 text-xs" style="color:var(--txm)"><span style="color:#ef4444">&#9679;</span> Channel E &mdash; Dedicated LoRa RX radio. TX uses RF1 (SX1250) via pkt_fwd.</div>
+    <!-- Sync Word is now device-wide; managed in the REGION & REGULATORY panel -->
+    <div class="mt-2 text-xs" style="color:var(--txm)"><span style="color:#ef4444">&#9679;</span> Channel E &mdash; Dedicated LoRa RX radio. TX uses RF1 (SX1250) via pkt_fwd. Sync word is configured device-wide (see REGION &amp; REGULATORY panel).</div>
   </div>
 
+  <!-- Channel F Configuration (chan_Lora_std on RF0, parallel to A-D) -->
+  <div class="gl p-5 mb-4" id="ch-f-section" style="border-left:4px solid #a855f7">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div><div class="stl mb-0">Channel F &mdash; chan_Lora_std on RF0 (parallel with A-D)</div><p class="text-xs mt-1" style="color:var(--txm)">Single-SF wideband channel on RF0. Supports BW125/250/500 kHz (Issue #1 multi-region BW250 support) &mdash; Save &amp; restart to apply.</p></div>
+      <div class="flex gap-2">
+        <button class="btn sec sm" onclick="loadChF()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9H3"/><path d="M3 3v6h6"/></svg>Reload</button>
+        <button class="btn pri sm" onclick="saveChF(false)"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>
+        <button class="btn sec sm" onclick="saveChF(true)" title="Save and restart service"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>Save &amp; Restart</button>
+      </div>
+    </div>
+    <!-- Column headers matching Channel Configuration -->
+    <div class="hidden sm:grid text-xs font-medium px-1 mb-1 gap-1" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 68px 52px 44px 32px;color:var(--txm)">
+      <span>Channel</span><span>Channel Name</span><span>Freq (MHz)</span><span>BW (kHz)</span><span>SF</span><span>CR</span><span>Preamble</span><span>LBT (dBm)</span><span>LBT</span><span>TX (dBm)</span><span>RX Boost</span><span>Active</span>
+    </div>
+    <!-- Single row for Channel F -->
+    <div class="crow con" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 68px 52px 44px 32px">
+      <span class="bdg text-xs" style="background:rgba(168,85,247,0.15);color:#a855f7;white-space:nowrap;text-align:center;padding:6px 4px;text-transform:none;">Channel F</span>
+      <input class="ci" id="chf-name" type="text" value="Channel F" style="width:100%">
+      <input class="ci" id="chf-frequency" type="text" lang="en" pattern="[0-9]*[.]?[0-9]*" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" style="width:100%">
+      <select class="ci" id="chf-bandwidth" style="width:100%">
+        <option value="125000">125</option>
+        <option value="250000" selected>250</option>
+        <option value="500000">500</option>
+      </select>
+      <select class="ci" id="chf-sf" style="width:100%">
+        <option value="5">5</option>
+        <option value="6">6</option>
+        <option value="7">7</option>
+        <option value="8">8</option>
+        <option value="9" selected>9</option>
+        <option value="10">10</option>
+        <option value="11">11</option>
+        <option value="12">12</option>
+      </select>
+      <select class="ci" id="chf-cr" style="width:100%">
+        <option value="4/5" selected>4/5</option>
+        <option value="4/6">4/6</option>
+        <option value="4/7">4/7</option>
+        <option value="4/8">4/8</option>
+      </select>
+      <input class="ci" id="chf-preamble" type="number" min="6" max="65535" value="16" style="width:100%">
+      <input class="ci" id="chf-lbt-rssi" type="number" min="-120" max="0" value="-80" style="width:100%">
+      <label class="tgl"><input type="checkbox" id="chf-lbt-enabled"><span class="tsl"></span></label>
+      <select class="ci" id="chf-tx-power" style="width:100%"></select>
+      <label class="tgl"><input type="checkbox" id="chf-boosted-rx"><span class="tsl"></span></label>
+      <label class="tgl"><input type="checkbox" id="chf-enable"><span class="tsl"></span></label>
+    </div>
+    <!-- Sync Word is now device-wide; managed in the REGION & REGULATORY panel -->
+    <div class="mt-2 text-xs" style="color:var(--txm)"><span style="color:#a855f7">&#9679;</span> Channel F &mdash; chan_Lora_std on RF0. Runs in parallel with channels A-D. Recommended for AU915/US915 BW250 or wider-band use cases. Sync word is configured device-wide (see REGION &amp; REGULATORY panel).</div>
+  </div>
 
   <div id="tx-summary-bar" class="gl p-4 mb-4" style="background:rgba(99,102,241,0.06);border:1px solid var(--acc);border-radius:8px;">
     <div class="flex items-center justify-between flex-wrap gap-3">
@@ -406,7 +519,7 @@ select.ci option{background:#1e293b}
   <div class="grid grid-cols-3 gap-4 mb-4">
     <div class="gl p-4 text-center">
       <div class="text-3xl font-bold" style="color:#fb923c" id="dd-hal-echo">0</div>
-      <div class="text-xs mt-1" style="color:var(--txm)">HAL Echo</div>
+      <div class="text-xs mt-1" style="color:var(--txm)">Self Echo (RF)</div>
     </div>
     <div class="gl p-4 text-center">
       <div class="text-3xl font-bold" style="color:#a78bfa" id="dd-multi-demod">0</div>
@@ -415,6 +528,17 @@ select.ci option{background:#1e293b}
     <div class="gl p-4 text-center">
       <div class="text-3xl font-bold" style="color:#38bdf8" id="dd-companion">0</div>
       <div class="text-xs mt-1" style="color:var(--txm)">Companion</div>
+    </div>
+  </div>
+  <!-- v2.5.x: path-based echo split -->
+  <div class="grid grid-cols-2 gap-4 mb-4">
+    <div class="gl p-4 text-center">
+      <div class="text-3xl font-bold" style="color:#c084fc" id="dd-mesh-echo">0</div>
+      <div class="text-xs mt-1" style="color:var(--txm)">Mesh Echo (neighbour)</div>
+    </div>
+    <div class="gl p-4 text-center">
+      <div class="text-3xl font-bold" style="color:#94a3b8" id="dd-unknown-echo">0</div>
+      <div class="text-xs mt-1" style="color:var(--txm)">Unknown Echo</div>
     </div>
   </div>
   <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -740,7 +864,7 @@ function toast(msg,type,dur){
   G('toasts').appendChild(e);
   setTimeout(()=>{e.style.animation='sOut .3s ease forwards';setTimeout(()=>e.remove(),300);},dur);
 }
-const TABS={status:function(){try{loadStatus();}catch(e){console.error('loadStatus err:',e);}},dedup:function(){try{dedupLoad();}catch(e){console.error('dedupLoad err:',e);}},channels:function(){try{loadCh();loadChE();loadTxQueues();}catch(e){console.error('loadCh err:',e);G('tab-channels').innerHTML='<h3 style="color:red">Error: '+e.message+'</h3>';}},ifchains:function(){try{renderIfChains(true);}catch(e){console.error('renderIfChains err:',e);}},bridge:function(){try{loadBr();}catch(e){console.error('loadBr err:',e);}},logs:function(){try{startLogs();dbgCheckStatus();}catch(e){console.error('startLogs err:',e);}},spectrum:function(){try{specLoad();}catch(e){console.error('specLoad err:',e);}},'adv-config':function(){try{loadAdvConfig();}catch(e){console.error('loadAdvConfig err:',e);}}};
+const TABS={status:function(){try{loadStatus();}catch(e){console.error('loadStatus err:',e);}},dedup:function(){try{dedupLoad();}catch(e){console.error('dedupLoad err:',e);}},channels:function(){try{loadCh();loadChE();loadChF();loadRegions();loadSyncWord();loadTxQueues();}catch(e){console.error('loadCh err:',e);G('tab-channels').innerHTML='<h3 style="color:red">Error: '+e.message+'</h3>';}},ifchains:function(){try{renderIfChains(true);}catch(e){console.error('renderIfChains err:',e);}},bridge:function(){try{loadBr();}catch(e){console.error('loadBr err:',e);}},logs:function(){try{startLogs();dbgCheckStatus();}catch(e){console.error('startLogs err:',e);}},spectrum:function(){try{specLoad();}catch(e){console.error('specLoad err:',e);}},'adv-config':function(){try{loadAdvConfig();}catch(e){console.error('loadAdvConfig err:',e);}}};
 function showTab(name,btn){
   console.log('showTab called:',name);
   document.querySelectorAll('.tp').forEach(p=>p.classList.remove('active'));
@@ -1269,6 +1393,112 @@ function loadTxQueues(){
       }
       html+='</div>';
     }
+    // --- Channel F card if enabled (chan_Lora_std on SX1302 RF0) ---
+    for(var fi=0;fi<liveChs.length;fi++){
+      var fLive=liveChs[fi];
+      if(!fLive.is_chan_lora_std)continue;
+      var fName=fLive.name||fLive.friendly_name||'Channel F';
+      var fFreq=(fLive.frequency||0)/1e6;
+      var fBw=(fLive.bandwidth||250000)/1000;
+      var fSf=fLive.spreading_factor||9;
+      var fCr=fLive.coding_rate||'4/5';
+      var fCol='#a855f7'; // violet
+      var fTxtC='var(--tx)';
+      var fRxPkts=fLive.rx_packets||0;
+      var fRssi=fLive.rssi_last!=null?fLive.rssi_last:-120;
+      var fSnr=fLive.snr_last!=null?fLive.snr_last:0;
+      var fNfLbtAvg=fLive.noise_floor_lbt_avg;
+      var fNf=(fNfLbtAvg!=null)?fNfLbtAvg:((fLive.noise_floor!=null&&fLive.noise_floor!==-120)?fLive.noise_floor:null);
+      var fTxPkts=fLive.tx_packets||0;
+      var fDutyPct=fLive.tx_duty_pct||0;
+      var fQ=queues['channel_f']||{};
+      var fPending=fQ.pending||fLive.queue_pending||0;
+      var fSent=fQ.total_sent||fTxPkts;
+      var fFailed=fQ.total_failed||fLive.tx_failed||0;
+      var fAvgAirtime=fQ.avg_airtime_ms||fLive.avg_tx_airtime_ms||0;
+      var fAvgSend=fQ.avg_send_ms||fLive.avg_tx_send_ms||0;
+      var fAvgWait=fQ.avg_wait_ms||fLive.avg_tx_wait_ms||0;
+      var fTotalAir=fQ.total_airtime_ms||fLive.total_tx_airtime_ms||0;
+      totalRx+=fRxPkts;
+      totalTx+=fTxPkts;
+      totalAirtimeMs+=fTotalAir;
+      totalDutySum+=fDutyPct;
+      activeCh++;
+      var fRssiStr,fSnrStr,fNoiseStr,fNoiseColor,fRssiC,fSnrC;
+      if(fRxPkts===0){
+        fRssiStr='--'; fSnrStr='--';
+        fRssiC='var(--txm)'; fSnrC='var(--txm)';
+      } else {
+        fRssiStr=fRssi.toFixed(1)+' dBm';
+        fSnrStr=fSnr.toFixed(1)+' dB';
+        fRssiC=fRssi>-90?'#22c55e':fRssi>-110?'#f59e0b':'#ef4444';
+        fSnrC=fSnr>5?'#22c55e':fSnr>0?'#f59e0b':'#ef4444';
+      }
+      if(fNf!=null){
+        fNoiseStr=fNf.toFixed(1)+' dBm';
+        fNoiseColor=fNf<-110?'#22c55e':fNf<-90?'#f59e0b':'#ef4444';
+      } else {
+        fNoiseStr='--'; fNoiseColor='var(--txm)';
+      }
+      html+='<div style="border:1px solid '+fCol+';border-radius:8px;padding:14px;background:rgba(168,85,247,0.06);">';
+      html+='<div class="flex items-center justify-between mb-2">';
+      html+='<span style="font-weight:600;color:'+fCol+';font-size:13px;">'+esc(fName)+'</span>';
+      html+='<span style="background:rgba(168,85,247,0.15);color:#a855f7;font-size:10px;padding:2px 6px;border-radius:4px;">SX1302 RF0</span>';
+      html+='</div>';
+      html+='<div style="font-size:11px;color:var(--txm);margin-bottom:10px;">'+fFreq.toFixed(3)+' MHz &middot; SF'+fSf+' &middot; BW'+fBw+'kHz &middot; CR'+esc(fCr)+'</div>';
+      html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:12px;">';
+      html+='<div style="color:var(--txm)">RX Packets</div><div style="color:#22c55e;font-weight:500;">'+fRxPkts+'</div>';
+      html+='<div style="color:var(--txm)">TX Packets</div><div style="color:'+fCol+';font-weight:500;">'+fTxPkts+'</div>';
+      html+='<div style="color:var(--txm)">Pending</div><div style="color:'+fTxtC+';font-weight:500;">'+fPending+'</div>';
+      html+='<div style="color:var(--txm)">Sent</div><div style="color:#22c55e;font-weight:500;">'+fSent+'</div>';
+      html+='<div style="color:var(--txm)">Failed</div><div style="color:'+(fFailed>0?'#ef4444':'var(--txm)')+';font-weight:500;">'+fFailed+'</div>';
+      html+='<div style="color:var(--txm)" title="TX duty cycle">TX Duty</div><div style="font-weight:600;color:'+_dutyColor(fDutyPct)+';">'+(fDutyPct).toFixed(3)+' %</div>';
+      html+='<div style="color:var(--txm)">RSSI</div><div style="color:'+fRssiC+';font-weight:500;">'+fRssiStr+'</div>';
+      html+='<div style="color:var(--txm)">SNR</div><div style="color:'+fSnrC+';font-weight:500;">'+fSnrStr+'</div>';
+      html+='<div style="color:var(--txm)">Noise Floor</div><div style="color:'+fNoiseColor+';font-weight:500;">'+fNoiseStr+'</div>';
+      html+='<div style="color:var(--txm)" title="LoRa time-on-air">Avg Airtime</div>';
+      html+='<div style="color:#a78bfa;font-weight:500;">'+_fmtMs(fAvgAirtime)+' ms</div>';
+      html+='<div style="color:var(--txm)" title="Wall-clock send time">Avg Send</div>';
+      html+='<div style="color:'+fTxtC+'">'+_fmtMs(fAvgSend)+' ms</div>';
+      html+='<div style="color:var(--txm)" title="Queue wait time">Avg Wait</div>';
+      html+='<div style="color:'+fTxtC+'">'+_fmtMs(fAvgWait)+' ms</div>';
+      html+='<div style="color:var(--txm)">Total Airtime</div>';
+      html+='<div style="color:#a78bfa;font-weight:500;">'+_fmtAirtimeTotal(fTotalAir)+'</div>';
+      var fLbtBlocked=fLive.lbt_blocked||0;
+      var fLbtPassed=fLive.lbt_passed||0;
+      var fLbtSkipped=fLive.lbt_skipped||0;
+      var fLbtLastRssi=fLive.lbt_last_rssi;
+      var fLbtEnabled=(fLbtBlocked+fLbtPassed)>0;
+      if(fLbtEnabled){
+        var fLbtColor=fLbtBlocked>0?'#f59e0b':'#22c55e';
+        var fLbtText=fLbtBlocked>0?(fLbtBlocked+' blocked / '+fLbtPassed+' passed'):(fLbtPassed>0?fLbtPassed+' passed':'--');
+        if(fLbtSkipped>0&&fLbtPassed===0&&fLbtBlocked===0)fLbtText='skipped ('+fLbtSkipped+')';
+        html+='<div style="color:var(--txm)" title="Software LBT (Listen Before Talk)">LBT</div>';
+        html+='<div style="color:'+fLbtColor+';font-weight:500;">'+fLbtText+'</div>';
+        if(fLbtLastRssi!==null&&fLbtLastRssi!==undefined){
+          html+='<div style="color:var(--txm)">LBT RSSI</div>';
+          html+='<div style="color:var(--txm);font-weight:500;">'+fLbtLastRssi.toFixed(1)+' dBm</div>';
+        }
+      }
+      var fCadClear=fLive.cad_clear||0;
+      var fCadDetected=fLive.cad_detected||0;
+      if(fCadClear>0||fCadDetected>0){
+        var fCadColor=fCadDetected>0?'#f59e0b':'#22c55e';
+        var fCadText=fCadDetected>0?(fCadDetected+' detected / '+fCadClear+' clear'):(fCadClear>0?fCadClear+' clear':'--');
+        html+='<div style="color:var(--txm)" title="Channel Activity Detection">CAD</div>';
+        html+='<div style="color:'+fCadColor+';font-weight:500;">'+fCadText+'</div>';
+      }
+      html+='</div>';
+      var fLastParts=[];
+      if(fLive.last_rx){fLastParts.push('Last RX: '+_fmtAgo(fLive.last_rx));}
+      if(fLive.last_tx){fLastParts.push('Last TX: '+_fmtAgo(fLive.last_tx));}
+      if(fLastParts.length){
+        html+='<div style="font-size:10px;color:var(--txm);margin-top:6px;border-top:1px solid var(--brd);padding-top:6px;">'+fLastParts.join(' &middot; ')+'</div>';
+      } else {
+        html+='<div style="font-size:10px;color:var(--txm);margin-top:6px;border-top:1px solid var(--brd);padding-top:6px;">Channel F &mdash; chan_Lora_std on SX1302 RF0</div>';
+      }
+      html+='</div>';
+    }
     g.innerHTML=html||'<div class="text-sm" style="color:var(--txm)">No channels</div>';
     // Update totals
     var eRx=document.getElementById('live-total-rx');
@@ -1611,21 +1841,32 @@ function buildChDropdown(i,ch){
 function renderCh(){
   const l=G('ch-list');
   if(!chData.length){l.innerHTML='<div class="text-center py-8" style="color:var(--txm)">No channels. Add one or apply a preset.</div>';return;}
+  // TX power: 16 LUT entries (12..27 dBm) per WM1303 hardware LUT
+  function _txPwrOpts(cur){
+    var s=parseInt(cur||22);var o='';
+    for(var v=12; v<=27; v++){o+='<option value="'+v+'"'+(v===s?' selected':'')+'>'+v+'</option>';}
+    return o;
+  }
+  // Sync word is configured DEVICE-WIDE in the REGION & REGULATORY panel; not per-channel.
   l.innerHTML=chData.map((ch,i)=>`<div class="crow${ch.active?' con':''}" style="grid-template-columns:140px 1fr 108px 82px 52px 58px 72px 68px 44px 68px 52px 44px 32px">
     <select class="ci" style="font-weight:500" onchange="chData[${i}].friendly_name=this.value;renderCh()">${buildChDropdown(i,ch)}</select>
     <input class="ci" value="${esc(ch.name)}" onchange="chData[${i}].name=this.value" placeholder="name">
     <input class="ci" lang="en" type="text" pattern="[0-9]*[.]?[0-9]*" value="${(ch.frequency/1e6).toFixed(3)}" inputmode="decimal" oninput="this.value=this.value.replace(/,/g,'.')" onchange="chData[${i}].frequency=Math.round(parseFloat(this.value.replace(/,/g,'.'))*1e6)">
-    <select class="ci" onchange="chData[${i}].bandwidth=parseInt(this.value)">${mkSel(BW,ch.bandwidth,v=>v/1000)}</select>
+    <input class="ci" type="text" value="125" readonly title="Channels A-D = chan_multiSF_0-3 (hardware constraint: BW125 only)" style="background:var(--bgr);cursor:not-allowed;text-align:center">
     <select class="ci" onchange="chData[${i}].spreading_factor=parseInt(this.value)">${mkSel(SF,ch.spreading_factor)}</select>
     <select class="ci" onchange="chData[${i}].coding_rate=this.value">${mkSel(CR,ch.coding_rate)}</select>
     <input class="ci" type="number" min="6" max="65535" value="${ch.preamble_length||17}" onchange="chData[${i}].preamble_length=parseInt(this.value)">
     <input class="ci" type="number" min="-120" max="0" value="${ch.lbt_rssi_target||-80}" onchange="chData[${i}].lbt_rssi_target=parseInt(this.value)">
     <div style="display:flex;align-items:center;justify-content:center"><label class="tgl"><input type="checkbox" ${ch.lbt_enabled?' checked':''} onchange="chData[${i}].lbt_enabled=this.checked;renderCh()"><span class="tsl"></span></label></div>
-    <select class="ci" onchange="chData[${i}].tx_power=parseInt(this.value)"><option value='12' ${(ch.tx_power||14)==12?'selected':''}>12</option><option value='14' ${(ch.tx_power||14)==14?'selected':''}>14</option><option value='17' ${(ch.tx_power||14)==17?'selected':''}>17</option><option value='20' ${(ch.tx_power||14)==20?'selected':''}>20</option><option value='27' ${(ch.tx_power||14)==27?'selected':''}>27</option></select>
+    <select class="ci" onchange="chData[${i}].tx_power=parseInt(this.value)">${_txPwrOpts(ch.tx_power||22)}</select>
     <div></div>
     <div style="display:flex;align-items:center;justify-content:center"><label class="tgl"><input type="checkbox" ${ch.active?'checked':''}  onchange="chData[${i}].active=this.checked;renderCh()"><span class="tsl"></span></label></div>
     <button class="btn ber ic" onclick="chData.splice(${i},1);renderCh()" title="Delete"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
   </div>`).join('');
+  // Force BW to 125000 for A-D (hardware constraint chan_multiSF)
+  chData.forEach(function(c){c.bandwidth=125000;});
+  // Defensive: sync_word is device-wide, never per-channel; strip any stale field
+  chData.forEach(function(c){ if(c && 'sync_word' in c){ delete c.sync_word; } });
 }
 function addCh(){var _fn='Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[chData.length];chData.push({name:'ch-new',friendly_name:_fn,frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,tx_power:14,lbt_rssi_target:-80,lbt_enabled:false,active:false});renderCh();G('ch-list').lastElementChild?.scrollIntoView({behavior:'smooth'});}
 // -- Channel E load/save --
@@ -1643,11 +1884,13 @@ async function loadChE(){
     G('che-preamble').value=d.preamble_length||17;
     G('che-lbt-rssi').value=d.lbt_rssi_target||-80;
     G('che-lbt-enabled').checked=!!d.lbt_enabled;
-    G('che-tx-power').value=d.tx_power||14;
+    fillTxPowerDropdown('che-tx-power', d.tx_power||22);
     G('che-boosted-rx').checked=d.boosted_rx!==false;
+    // sync_word is device-wide; loaded via loadSyncWord() in the REGION & REGULATORY panel
   }catch(e){console.error('loadChE err:',e);}
 }
 async function saveChE(restart){
+  // sync_word is device-wide and saved via the REGION & REGULATORY panel; not sent here.
   var body={
     enable:G('che-enable').checked,
     name:G('che-name').value||'Channel E',
@@ -1658,7 +1901,7 @@ async function saveChE(restart){
     preamble_length:parseInt(G('che-preamble').value)||17,
     lbt_rssi_target:parseInt(G('che-lbt-rssi').value)||-80,
     lbt_enabled:G('che-lbt-enabled').checked,
-    tx_power:parseInt(G('che-tx-power').value)||14,
+    tx_power:parseInt(G('che-tx-power').value)||22,
     boosted_rx:G('che-boosted-rx').checked,
     restart:!!restart
   };
@@ -1672,6 +1915,213 @@ async function saveChE(restart){
       setTimeout(()=>{if(overlay.parentNode)overlay.parentNode.removeChild(overlay);loadChE();loadTxQueues();},26000);
     }
   }catch(e){toast('Save error: '+e.message,'err');}
+}
+// -- Region & Regulatory load/save (Issue #4 multi-region support) --
+let regionList=[];let regionCurrent={code:'EU868'};
+async function loadRegions(){
+  try{
+    var r=await api('GET','/api/wm1303/regions');
+    regionList=r.regions||[];
+    var sel=G('region-code');if(!sel)return;
+    sel.innerHTML=regionList.map(function(rg){
+      return '<option value="'+esc(rg.code)+'">'+esc(rg.code)+' \u2014 '+esc(rg.label||rg.description||rg.code)+'</option>';
+    }).join('');
+    // After options loaded, fetch current selection
+    await loadRegion();
+  }catch(e){console.error('loadRegions err:',e);}
+}
+async function loadRegion(){
+  try{
+    var r=await api('GET','/api/wm1303/region');
+    regionCurrent=r||{code:'EU868'};
+    var sel=G('region-code');if(sel)sel.value=(r.code||'EU868').toUpperCase();
+    var st=G('region-status');if(st)st.textContent=(r.code||'EU868').toUpperCase();
+    var mn=r.resolved_tx_freq_min!=null?r.resolved_tx_freq_min:(r.tx_freq_min!=null?r.tx_freq_min:null);
+    var mx=r.resolved_tx_freq_max!=null?r.resolved_tx_freq_max:(r.tx_freq_max!=null?r.tx_freq_max:null);
+    G('region-tx-min').value=(mn!=null)?(mn/1e6).toFixed(3):'';
+    G('region-tx-max').value=(mx!=null)?(mx/1e6).toFixed(3):'';
+    applyRegionEditableState();
+    renderRegionInfo();
+  }catch(e){console.error('loadRegion err:',e);}
+}
+function onRegionChange(){
+  // Update displayed bounds from regionList summary; if CUSTOM, leave fields editable
+  var code=G('region-code').value;
+  var entry=regionList.find(function(rg){return rg.code===code;});
+  if(entry){
+    var mn=entry.tx_freq_min;var mx=entry.tx_freq_max;
+    G('region-tx-min').value=(mn!=null)?(mn/1e6).toFixed(3):'';
+    G('region-tx-max').value=(mx!=null)?(mx/1e6).toFixed(3):'';
+  }
+  applyRegionEditableState();
+  renderRegionInfo();
+}
+function applyRegionEditableState(){
+  var code=G('region-code').value;
+  var isCustom=(code==='CUSTOM');
+  var mn=G('region-tx-min');var mx=G('region-tx-max');
+  if(isCustom){mn.removeAttribute('readonly');mx.removeAttribute('readonly');}
+  else{mn.setAttribute('readonly','readonly');mx.setAttribute('readonly','readonly');}
+}
+function renderRegionInfo(){
+  var code=G('region-code').value;
+  var entry=regionList.find(function(rg){return rg.code===code;});
+  var box=G('region-info');if(!box)return;
+  if(!entry){box.textContent='Select region to view bounds & bands';return;}
+  var bands=Array.isArray(entry.bands)?entry.bands:[];
+  var bandsStr=bands.length?bands.map(function(b){return (b.name||'')+': '+(b.tx_freq_min/1e6).toFixed(3)+'-'+(b.tx_freq_max/1e6).toFixed(3)+' MHz';}).join(' | '):'';
+  box.innerHTML='<b>'+esc(entry.code)+'</b> &mdash; '+esc(entry.label||entry.description||'')+(bandsStr?'<br>Bands: '+esc(bandsStr):'')+(code==='CUSTOM'?'<br><span style="color:#f59e0b">CUSTOM region: edit TX freq min/max above.</span>':'');
+}
+async function saveRegion(restart){
+  try{
+    var code=G('region-code').value;
+    if(!code){toast('No region selected','err');return;}
+    var body={code:code};
+    if(code==='CUSTOM'){
+      var mn=parseFloat((G('region-tx-min').value||'').replace(/,/g,'.'));
+      var mx=parseFloat((G('region-tx-max').value||'').replace(/,/g,'.'));
+      if(isNaN(mn)||isNaN(mx)||mn<=0||mx<=mn){toast('CUSTOM requires valid tx_freq_min/max (MHz, max > min)','err');return;}
+      body.tx_freq_min=Math.round(mn*1e6);
+      body.tx_freq_max=Math.round(mx*1e6);
+    }
+    if(restart)body.restart=true;
+    var r=await api('POST','/api/wm1303/region',body);
+    if(r.status==='ok'||r.code){
+      toast('Region saved'+(restart?' \u2014 restarting...':''),'ok');
+      if(restart){
+        var overlay=document.createElement('div');overlay.className='gl';overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);flex-direction:column;gap:16px';
+        overlay.innerHTML='<div class="spn" style="width:48px;height:48px;border-width:4px"></div><div style="color:white;font-size:18px;font-weight:600">Restarting WM1303 service...</div><div style="color:#94a3b8;font-size:13px">Please wait ~25 seconds</div>';
+        document.body.appendChild(overlay);
+        setTimeout(function(){if(overlay.parentNode)overlay.parentNode.removeChild(overlay);loadRegion();},26000);
+      } else {
+        loadRegion();
+      }
+    } else {
+      toast('Save failed: '+(r.reason||r.error||'unknown'),'err');
+    }
+  }catch(e){toast('Save error: '+e.message,'err');}
+}
+// -- Channel F load/save (chan_Lora_std on RF0, Issue #1) --
+let chfData={};
+async function loadChF(){
+  try{
+    var d=await api('GET','/api/wm1303/channel_f');
+    chfData=d;
+    G('chf-enable').checked=!!(d.enabled||d.enable);
+    G('chf-name').value=d.name||d.friendly_name||'Channel F';
+    G('chf-frequency').value=((d.frequency||869525000)/1e6).toFixed(3);
+    G('chf-bandwidth').value=String(d.bandwidth||250000);
+    G('chf-sf').value=String(d.spreading_factor||9);
+    G('chf-cr').value=d.coding_rate||'4/5';
+    G('chf-preamble').value=d.preamble_length||16;
+    G('chf-lbt-rssi').value=d.lbt_rssi_target||d.lbt_threshold||-80;
+    G('chf-lbt-enabled').checked=!!d.lbt_enabled;
+    // populate TX power dropdown (12..27 dBm, 16 LUT entries)
+    fillTxPowerDropdown('chf-tx-power', d.tx_power||22);
+    G('chf-boosted-rx').checked=!!d.boosted_rx;
+    // sync_word is device-wide; loaded via loadSyncWord() in the REGION & REGULATORY panel
+  }catch(e){console.error('loadChF err:',e);}
+}
+async function saveChF(restart){
+  // sync_word is device-wide and saved via the REGION & REGULATORY panel; not sent here.
+  var body={
+    enabled:G('chf-enable').checked,
+    name:G('chf-name').value||'Channel F',
+    friendly_name:G('chf-name').value||'Channel F',
+    frequency:Math.round(parseFloat((G('chf-frequency').value||'869.525').replace(/,/g,'.'))*1e6),
+    bandwidth:parseInt(G('chf-bandwidth').value),
+    spreading_factor:parseInt(G('chf-sf').value),
+    coding_rate:G('chf-cr').value,
+    preamble_length:parseInt(G('chf-preamble').value)||16,
+    lbt_rssi_target:parseInt(G('chf-lbt-rssi').value)||-80,
+    lbt_threshold:parseInt(G('chf-lbt-rssi').value)||-80,
+    lbt_enabled:G('chf-lbt-enabled').checked,
+    tx_power:parseInt(G('chf-tx-power').value)||22,
+    boosted_rx:G('chf-boosted-rx').checked,
+    restart:!!restart
+  };
+  try{
+    var r=await api('POST','/api/wm1303/channel_f',body);
+    toast(r.status==='ok'?'Channel F config saved'+(restart?' \u2014 restarting...':''):'Save failed: '+(r.reason||'unknown'),r.status==='ok'?'ok':'err');
+    if(restart){
+      var overlay=document.createElement('div');overlay.className='gl';overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);flex-direction:column;gap:16px';
+      overlay.innerHTML='<div class="spn" style="width:48px;height:48px;border-width:4px"></div><div style="color:white;font-size:18px;font-weight:600">Restarting WM1303 service...</div><div style="color:#94a3b8;font-size:13px">Please wait ~25 seconds</div>';
+      document.body.appendChild(overlay);
+      setTimeout(function(){if(overlay.parentNode)overlay.parentNode.removeChild(overlay);loadChF();loadTxQueues();},26000);
+    }
+  }catch(e){toast('Save error: '+e.message,'err');}
+}
+// -- Sync word UI helpers (Private 0x1424=5156, Public 0x3444=13380) --
+// SX1302 hardware supports only Private/Public via the board-level
+// lorawan_public flag. Custom sync words are NOT hardware-supported and have
+// been removed from the UI.
+function fillTxPowerDropdown(elemId, selected){
+  // 16 LUT entries (12..27 dBm) — required by WM1303 hardware LUT
+  var el=G(elemId);if(!el)return;
+  var s=parseInt(selected||22);
+  var html='';
+  for(var v=12; v<=27; v++){
+    html+='<option value="'+v+'"'+(v===s?' selected':'')+'>'+v+'</option>';
+  }
+  el.innerHTML=html;
+}
+// -- Device-wide Sync Word UI helpers --
+// sync_word is DEVICE-WIDE (top-level in wm1303_ui.json), not per-channel.
+// HAL v2.10 exposes lorawan_public as a board-level flag (lgw_conf_board_t).
+// Only Private (0x1424) and Public (0x3444) are hardware-supported.
+function setDevSyncWordUI(value, mode){
+  var modeEl=G('dev-sw-mode');
+  if(!modeEl)return;
+  var v=parseInt(value);
+  if(isNaN(v))v=5156;
+  var m=(mode||'').toLowerCase();
+  // Defensive: legacy 'custom' configs fall back to Private.
+  if(m!=='public')m='private';
+  // Re-derive from value when possible (recover from corrupt mode field).
+  if(v===13380)m='public';
+  else m='private';
+  modeEl.value=m;
+}
+function onDevSyncWordModeChange(){
+  // No-op: only Private/Public are valid; nothing to toggle.
+  var modeEl=G('dev-sw-mode');
+  if(!modeEl)return;
+  if(modeEl.value!=='private'&&modeEl.value!=='public')modeEl.value='private';
+}
+function getDevSyncWordPayload(){
+  var modeEl=G('dev-sw-mode');
+  if(!modeEl)return {mode:'private'};
+  var m=modeEl.value||'private';
+  if(m!=='public')m='private';
+  return {mode:m};
+}
+async function loadSyncWord(){
+  try{
+    var d=await api('GET','/api/wm1303/sync_word');
+    // Defensive: treat legacy 'custom' mode from old configs as Private.
+    var mode=(d.mode||'private').toLowerCase();
+    if(mode!=='public')mode='private';
+    setDevSyncWordUI(d.value!=null?d.value:5156, mode);
+  }catch(e){console.error('loadSyncWord err:',e);}
+}
+async function saveSyncWord(restart){
+  var payload=getDevSyncWordPayload();
+  payload.restart=!!restart;
+  try{
+    var r=await api('POST','/api/wm1303/sync_word',payload);
+    if(r.status==='ok'){
+      var hexStr=r.sync_word&&r.sync_word.hex?(' ('+r.sync_word.hex+')'):'';
+      toast('Sync word saved'+hexStr+(restart?' \u2014 restarting...':''),'ok');
+      if(restart){
+        var overlay=document.createElement('div');overlay.className='gl';overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);flex-direction:column;gap:16px';
+        overlay.innerHTML='<div class="spn" style="width:48px;height:48px;border-width:4px"></div><div style="color:white;font-size:18px;font-weight:600">Restarting WM1303 service...</div><div style="color:#94a3b8;font-size:13px">Please wait ~25 seconds</div>';
+        document.body.appendChild(overlay);
+        setTimeout(function(){if(overlay.parentNode)overlay.parentNode.removeChild(overlay);loadSyncWord();},26000);
+      }
+    }else{
+      toast('Sync word save failed: '+(r.reason||'unknown'),'err');
+    }
+  }catch(e){toast('Sync word save error: '+e.message,'err');}
 }
 function renderIfChains(doFetch){
   if(doFetch){
@@ -1747,7 +2197,7 @@ async function saveCh(restart){
   }
 }
 let bRules=[];
-async function loadBr(){if(!chData.length){try{const _cr=await fetch("/api/wm1303/channels");const _cj=await _cr.json();chData=normCh(Array.isArray(_cj)?_cj:(_cj.channels||[]));}catch(_e){}}if(!cheData.frequency){try{cheData=await api('GET','/api/wm1303/channel_e');}catch(_e2){}}try{const d=await api("GET","/api/wm1303/bridge");bRules=d.rules||d||[];}catch(e){bRules=[{id:"r1",from:"n1",to:"n2",filter:"all",enabled:true}];}renderBr();}
+async function loadBr(){if(!chData.length){try{const _cr=await fetch("/api/wm1303/channels");const _cj=await _cr.json();chData=normCh(Array.isArray(_cj)?_cj:(_cj.channels||[]));}catch(_e){}}if(!cheData.frequency){try{cheData=await api('GET','/api/wm1303/channel_e');}catch(_e2){}}if(!chfData||!chfData.frequency){try{chfData=await api('GET','/api/wm1303/channel_f');}catch(_e3){}}try{const d=await api("GET","/api/wm1303/bridge");bRules=d.rules||d||[];}catch(e){bRules=[{id:"r1",from:"n1",to:"n2",filter:"all",enabled:true}];}renderBr();}
 const MC_PKT_TYPES=['REQ','RESPONSE','TXT_MSG','ACK','ADVERT','GRP_TXT','GRP_DATA','ANON_REQ','PATH','TRACE','MULTIPART','CONTROL','RAW_CUSTOM'];
 function togglePktTypes(i){var el=G('pkt-types-'+i);if(el)el.style.display=el.style.display==='none'?'flex':'none';}
 function setPktType(i,t,checked){if(!bRules[i].packet_types)bRules[i].packet_types=[];var pt=bRules[i].packet_types;if(t==='ALL'){bRules[i].packet_types=[];renderBr();return;}if(checked){if(pt.indexOf(t)===-1)pt.push(t);}else{bRules[i].packet_types=pt.filter(x=>x!==t);}renderBr();}
@@ -1756,7 +2206,9 @@ function renderBr(){
   if(!bRules.length){l.innerHTML='<div class="text-center py-8" style="color:var(--txm)">No rules. Add a forwarding rule.</div>';return;}
   const chOpts=(chData||[]).length ? '<optgroup label="IF Channels">'+(chData||[]).map(ch=>'<option value="'+esc(ch.name)+'">'+esc(ch.name||ch.friendly_name)+' ('+((ch.frequency||0)/1e6).toFixed(3)+' MHz)</option>').join('')+'</optgroup>' : '';
   const cheOpt=cheData&&cheData.frequency ? '<optgroup label="Channel E"><option value="channel_e">'+(cheData.name||cheData.friendly_name||'Channel E')+' ('+(cheData.frequency/1e6).toFixed(3)+' MHz)</option></optgroup>' : '';
-  const nO='<option value="">Select endpoint...</option>'+chOpts+cheOpt+'<option value="repeater">&#128251; Repeater</option>';
+  // Channel F only shown when enabled (chan_Lora_std runs in parallel with A-D)
+  const chfOpt=(chfData&&chfData.frequency&&(chfData.enabled||chfData.enable)) ? '<optgroup label="Channel F"><option value="channel_f">'+(chfData.name||chfData.friendly_name||'Channel F')+' ('+(chfData.frequency/1e6).toFixed(3)+' MHz)</option></optgroup>' : '';
+  const nO='<option value="">Select endpoint...</option>'+chOpts+cheOpt+chfOpt+'<option value="repeater">&#128251; Repeater</option>';
   // FILTER_DROPDOWN_REMOVED
   l.innerHTML=bRules.map((r,i)=>{
     var pt=r.packet_types||[];
@@ -2738,7 +3190,8 @@ function renderNfCards(channels) {
     "channel_b": "34,197,94",
     "channel_c": "168,85,247",
     "channel_d": "249,115,22",
-    "channel_e": "249,115,22"
+    "channel_e": "249,115,22",
+    "channel_f": "168,85,247"
   };
   var CAD_CH_FALLBACK = ["59,130,246", "34,197,94", "249,115,22", "168,85,247", "99,102,241", "16,185,129"];
 
@@ -3579,9 +4032,12 @@ function renderPmCrcChart(channels) {
     if (G('dd-hal-echo')) G('dd-hal-echo').textContent = (stats.total_hal_tx_echo || 0).toLocaleString();
     if (G('dd-multi-demod')) G('dd-multi-demod').textContent = (stats.total_multi_demod || 0).toLocaleString();
     if (G('dd-companion')) G('dd-companion').textContent = (stats.total_companion_dedup || 0).toLocaleString();
+    // v2.5.x: path-based echo split (mesh-echo / unknown-echo cards)
+    if (G('dd-mesh-echo')) G('dd-mesh-echo').textContent = (stats.total_hal_mesh_echo || 0).toLocaleString();
+    if (G('dd-unknown-echo')) G('dd-unknown-echo').textContent = (stats.total_hal_unknown_echo || 0).toLocaleString();
     var ratio = stats.dedup_ratio || 0;
     if (G('dd-ratio')) G('dd-ratio').textContent = (ratio * 100).toFixed(1) + '%';
-    var total = (stats.total_forwarded||0) + (stats.total_duplicate||0) + (stats.total_tx_echo||0) + (stats.total_filtered||0) + (stats.total_hal_tx_echo||0) + (stats.total_multi_demod||0) + (stats.total_companion_dedup||0);
+    var total = (stats.total_forwarded||0) + (stats.total_duplicate||0) + (stats.total_tx_echo||0) + (stats.total_filtered||0) + (stats.total_hal_tx_echo||0) + (stats.total_hal_mesh_echo||0) + (stats.total_hal_unknown_echo||0) + (stats.total_multi_demod||0) + (stats.total_companion_dedup||0);
     if (G('dd-total')) G('dd-total').textContent = total.toLocaleString();
     if (G('dd-active')) G('dd-active').textContent = (stats.dedup_seen_active || 0).toLocaleString();
     if (G('dd-buffered')) G('dd-buffered').textContent = (stats.dedup_events_buffered || 0).toLocaleString();
@@ -3654,6 +4110,22 @@ function renderPmCrcChart(channels) {
         data: buckets.map(function(b) { return b.hal_tx_echo || 0; }),
         backgroundColor: 'rgba(251, 146, 60, 0.7)',
         borderColor: 'rgba(251, 146, 60, 1)',
+        borderWidth: 1,
+        borderRadius: 2,
+      },
+      {
+        label: 'Mesh Echo',
+        data: buckets.map(function(b) { return b.hal_mesh_echo || 0; }),
+        backgroundColor: 'rgba(192, 132, 252, 0.7)',
+        borderColor: 'rgba(192, 132, 252, 1)',
+        borderWidth: 1,
+        borderRadius: 2,
+      },
+      {
+        label: 'Unknown Echo',
+        data: buckets.map(function(b) { return b.hal_unknown_echo || 0; }),
+        backgroundColor: 'rgba(148, 163, 184, 0.7)',
+        borderColor: 'rgba(148, 163, 184, 1)',
         borderWidth: 1,
         borderRadius: 2,
       },
@@ -4067,6 +4539,33 @@ function renderPmCrcChart(channels) {
 </script>
 <!-- TRACING TAB -->
 <div id="tab-tracing" class="tp">
+  <!-- v2.5.0+: Trace stats dashboard - quick overview of recent traces -->
+  <div class="gl p-5 mb-4" id="traceStatsPanel" style="display:none">
+    <div class="flex items-center justify-between mb-3">
+      <div class="stl mb-0">Trace Overview</div>
+      <div class="text-xs" style="color:var(--txm)" id="traceStatsWindow">Last 0 traces</div>
+    </div>
+    <div id="traceStatsGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px"></div>
+  </div>
+  <!-- v2.5.0+: Trace analytics panel - performance heatmap + duration histogram -->
+  <div class="gl p-5 mb-4" id="traceAnalyticsPanel" style="display:none">
+    <div class="flex items-center justify-between mb-3">
+      <div class="stl mb-0">Trace Analytics</div>
+      <div class="text-xs" style="color:var(--txm)">Performance heatmap (avg time per step) · Duration histogram</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px">
+      <div>
+        <div class="text-xs font-semibold mb-1" style="color:var(--txm)">🔥 Performance Heatmap</div>
+        <div id="traceHeatmapNoData" style="display:none;text-align:center;padding:30px 0;color:var(--txm);font-size:11px">No data</div>
+        <div style="position:relative;height:240px"><canvas id="traceHeatmapChart"></canvas></div>
+      </div>
+      <div>
+        <div class="text-xs font-semibold mb-1" style="color:var(--txm)">⏱ Duration Histogram</div>
+        <div id="traceHistogramNoData" style="display:none;text-align:center;padding:30px 0;color:var(--txm);font-size:11px">No data</div>
+        <div style="position:relative;height:240px"><canvas id="traceHistogramChart"></canvas></div>
+      </div>
+    </div>
+  </div>
   <div class="gl p-5 mb-4">
     <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
       <div class="stl mb-0">Packet Duration Timeline</div>
@@ -4086,6 +4585,8 @@ function renderPmCrcChart(channels) {
           <option value="partial">Partial</option>
           <option value="error">Error</option>
           <option value="echo_dedup">Echo/Dedup</option>
+          <option value="self_echo">Self-Echo (RF)</option>
+          <option value="mesh_echo">Mesh-Echo (neighbor)</option>
           <option value="dedup">Dedup</option>
           <option value="filtered">Filtered</option>
         </select>
@@ -4096,6 +4597,7 @@ function renderPmCrcChart(channels) {
           <option value="channel_c">channel_c</option>
           <option value="channel_d">channel_d</option>
           <option value="channel_e">channel_e</option>
+          <option value="channel_f">channel_f</option>
           <option value="repeater">repeater</option>
         </select>
         <input type="text" id="traceFilterSrc" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" placeholder="Src" style="width:60px" oninput="_traceApplySearch()">
@@ -4111,6 +4613,10 @@ function renderPmCrcChart(channels) {
           <input type="checkbox" id="traceAutoRefresh" onchange="traceToggleAuto()" class="accent-indigo-500">
           Auto
         </label>
+        <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer select-none" title="Group similar traces (same status/type/step sequence/TX targets) into a single row with a \u00D7 N count badge">
+          <input type="checkbox" id="traceGroupSimilar" onchange="_traceApplySearch()" class="accent-indigo-500">
+          Group
+        </label>
         <select id="traceAutoInterval" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" onchange="traceToggleAuto()">
           <option value="3">3s</option>
           <option value="5">5s</option>
@@ -4121,12 +4627,70 @@ function renderPmCrcChart(channels) {
         <button class="btn sec sm" onclick="traceLoad()"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9H3"/><path d="M3 3v6h6"/></svg>Refresh</button>
       </div>
     </div>
+    <!-- v2.5.0+: Category quick-filter tabs (All / Forwarded / Echoes / Discarded / Errors / Slow) + Export -->
+    <div id="traceCategoryTabs" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+      <span data-cat="all" class="trace-cat-tab active" onclick="_traceSetCategory('all')">All <span class="trace-cat-count" data-cat-count="all">0</span></span>
+      <span data-cat="forwarded" class="trace-cat-tab" onclick="_traceSetCategory('forwarded')">✅ Forwarded <span class="trace-cat-count" data-cat-count="forwarded">0</span></span>
+      <span data-cat="echoes" class="trace-cat-tab" onclick="_traceSetCategory('echoes')">🔁 Echoes <span class="trace-cat-count" data-cat-count="echoes">0</span></span>
+      <span data-cat="discarded" class="trace-cat-tab" onclick="_traceSetCategory('discarded')">⚠ Discarded <span class="trace-cat-count" data-cat-count="discarded">0</span></span>
+      <span data-cat="errors" class="trace-cat-tab" onclick="_traceSetCategory('errors')">❌ Errors <span class="trace-cat-count" data-cat-count="errors">0</span></span>
+      <span data-cat="slow" class="trace-cat-tab" onclick="_traceSetCategory('slow')">🐌 Slow <span class="trace-cat-count" data-cat-count="slow">0</span></span>
+      <div style="flex:1"></div>
+      <button id="traceExportAllBtn" class="btn sec sm" title="Download all currently visible traces as JSON" onclick="_traceExportVisible()">⬇ Export</button>
+      <button id="traceClearRelatedBtn" class="btn sec sm" style="display:none" title="Clear related-hash highlight" onclick="_traceClearRelated()">✕ Clear highlight</button>
+    </div>
     <div id="traceNoData" style="display:none;text-align:center;padding:40px 0;color:var(--txm)">
       <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="margin:0 auto 12px;opacity:0.4"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
       <div>No packet traces recorded yet</div>
       <div style="font-size:12px;margin-top:4px">Traces will appear as packets flow through the bridge</div>
     </div>
     <div id="traceList"></div>
+  </div>
+  <!-- v2.5.0+: Phase 5 - Step-by-step playback modal -->
+  <div id="tracePlayModal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.75);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:20px">
+    <div style="background:#1f2937;border:1px solid rgba(255,255,255,0.12);border-radius:14px;width:100%;max-width:720px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.6)">
+      <!-- Header -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,0.08)">
+        <div>
+          <div style="font-size:14px;font-weight:600;color:#e2e8f0">▶ Trace Playback</div>
+          <div id="tracePlayHeaderInfo" style="font-size:11px;color:#94a3b8;margin-top:2px;font-family:monospace">--</div>
+        </div>
+        <button class="btn sec sm" onclick="_tracePlayClose()" title="Close playback">✕ Close</button>
+      </div>
+      <!-- Controls -->
+      <div style="padding:12px 18px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <button id="tracePlayPlayBtn" class="btn sec sm" onclick="_tracePlayToggle()" title="Play / Pause">⏸ Pause</button>
+        <button class="btn sec sm" onclick="_tracePlayRestart()" title="Restart playback from start">↻ Restart</button>
+        <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:#94a3b8">
+          Speed:
+          <select id="tracePlaySpeed" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" onchange="_tracePlaySetSpeed()">
+            <option value="0.1">0.1x (very slow)</option>
+            <option value="0.25">0.25x (slow)</option>
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x (real-time)</option>
+            <option value="2">2x</option>
+            <option value="5">5x</option>
+            <option value="10">10x</option>
+            <option value="25">25x</option>
+            <option value="50">50x</option>
+            <option value="100">100x (very fast)</option>
+          </select>
+        </label>
+        <div style="flex:1;min-width:120px">
+          <div style="position:relative;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden">
+            <div id="tracePlayProgress" style="position:absolute;top:0;left:0;height:100%;width:0%;background:linear-gradient(to right, #818cf8, #a78bfa);transition:width 0.1s linear"></div>
+          </div>
+          <div id="tracePlayProgressLabel" style="font-size:10px;color:#94a3b8;text-align:right;margin-top:2px;font-family:monospace">0.0 / 0.0 ms</div>
+        </div>
+      </div>
+      <!-- Step playback area -->
+      <div id="tracePlayStepArea" style="flex:1;overflow-y:auto;padding:14px 18px;min-height:240px;max-height:60vh"></div>
+      <!-- Footer status -->
+      <div style="padding:8px 18px;border-top:1px solid rgba(255,255,255,0.06);font-size:10px;color:#94a3b8;display:flex;justify-content:space-between">
+        <span id="tracePlayStepCounter">0 / 0 steps</span>
+        <span id="tracePlayStatus">Ready</span>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -4146,6 +4710,10 @@ function renderPmCrcChart(channels) {
     fetch(url).then(function(r){ return r.json(); }).then(function(data){
       if (data.error) { console.error('Trace API error:', data.error); return; }
       _traceData = data.traces || [];
+      // v2.5.x bugfix: expose _traceData on window so the trace playback (Phase 5)
+      // and other deferred lookups can access the latest dataset. _traceData is
+      // declared inside an IIFE so it is NOT automatically a window property.
+      window._traceData = _traceData;
       _renderTraces(_traceData);
       _renderTraceDurationChart(_traceData);
     }).catch(function(e){ console.error('Trace fetch error:', e); });
@@ -4167,9 +4735,1002 @@ function renderPmCrcChart(channels) {
   function _statusBadge(color, text) {
     return '<span style="position:absolute;top:-5px;right:-7px;font-size:8px;background:' + color + ';color:#0a0a0a;border-radius:6px;padding:0 3px;line-height:1.3;font-weight:800;border:1px solid rgba(0,0,0,0.4)">' + text + '</span>';
   }
+  // ===========================================================
+  // v2.5.0+: Phase 1 trace UI helpers
+  //   - Packet type icons, slow trace classification, echo count,
+  //     TX target extraction, aggregate stats + dashboard renderer
+  // ===========================================================
+  function _packetTypeIcon(type) {
+    if (!type) return '\u2753';
+    var t = String(type).toUpperCase();
+    var ICONS = {
+      'GRP_TXT':       '\uD83D\uDCE2',
+      'TXT_MSG':       '\uD83D\uDCAC',
+      'ADVERT':        '\uD83D\uDCE1',
+      'TRACE':         '\uD83D\uDD0D',
+      'ACK':           '\u2705',
+      'REQ':           '\u2753',
+      'RESPONSE':      '\u21A9\uFE0F',
+      'RESP':          '\u21A9\uFE0F',
+      'PATH':          '\uD83D\uDD00',
+      'GRP_DATA':      '\uD83D\uDCE6',
+      'ANON_REQ':      '\uD83D\uDC64',
+      'MULTIPART_TXT': '\uD83D\uDCDD',
+      'RAW_CUSTOM':    '\uD83D\uDD27'
+    };
+    return ICONS[t] || '\u2753';
+  }
+  function _traceSpeedClass(totalMs) {
+    if (totalMs === undefined || totalMs === null) return 'normal';
+    if (totalMs < 200) return 'fast';
+    if (totalMs < 500) return 'normal';
+    if (totalMs < 2000) return 'warn';
+    return 'slow';
+  }
+  function _traceSpeedColor(cls) {
+    if (cls === 'fast') return '#22d3ee';
+    if (cls === 'warn') return '#fbbf24';
+    if (cls === 'slow') return '#ef4444';
+    return '';
+  }
+  function _traceSpeedIcon(cls) {
+    if (cls === 'fast') return '\u26A1';
+    if (cls === 'warn') return '\uD83D\uDC22';
+    if (cls === 'slow') return '\uD83D\uDC0C';
+    return '';
+  }
+  function _traceEchoCount(t) {
+    if (!t || !t.steps) return 0;
+    var n = 0;
+    for (var i = 0; i < t.steps.length; i++) {
+      var nm = t.steps[i].name;
+      if (nm === 'echo_dedup' || nm === 'self_echo' || nm === 'mesh_echo') n++;
+    }
+    return n;
+  }
+  function _traceSelfEchoCount(t) {
+    if (!t || !t.steps) return 0;
+    var n = 0;
+    for (var i = 0; i < t.steps.length; i++) {
+      var nm = t.steps[i].name;
+      // 'echo_dedup' is the legacy step name (still used for multi-demod dups);
+      // 'self_echo' is the explicit RF-feedback echo introduced in v2.5.x
+      if (nm === 'self_echo' || nm === 'echo_dedup') n++;
+    }
+    return n;
+  }
+  function _traceMeshEchoCount(t) {
+    if (!t || !t.steps) return 0;
+    var n = 0;
+    for (var i = 0; i < t.steps.length; i++) {
+      if (t.steps[i].name === 'mesh_echo') n++;
+    }
+    return n;
+  }
+  function _traceTxTargets(t) {
+    if (!t || !t.steps) return [];
+    var seen = {};
+    var targets = [];
+    for (var i = 0; i < t.steps.length; i++) {
+      var s = t.steps[i];
+      // v2.5.0+: extract target channel from detail strings since the API
+      // doesn't include a `channel` field on individual steps. Two reliable
+      // sources: tx_send ("TX on <name> (rule: ...)") and tx_enqueue
+      // ("Queued TX <src> \u2192 <target> (rule: ...)").
+      var nm = s.name || '';
+      var det = s.detail || '';
+      var tgt = null;
+      if (nm === 'tx_send') {
+        var m1 = det.match(/^TX on ([^\s\n]+)/);
+        if (m1) tgt = m1[1];
+      } else if (nm === 'tx_enqueue') {
+        var m2 = det.match(/Queued TX [^\s\n]+ \u2192 ([^\s\n(]+)/);
+        if (m2) tgt = m2[1];
+      }
+      if (tgt && !seen[tgt]) {
+        seen[tgt] = true;
+        targets.push(tgt);
+      }
+    }
+    return targets;
+  }
+  function _traceComputeStats(traces) {
+    var s = {
+      total: 0, forwarded: 0, echoes: 0,
+      self_echoes: 0, mesh_echoes: 0, unknown_echoes: 0,
+      self_echo_traces: 0, mesh_echo_traces: 0, unknown_echo_traces: 0,
+      dropped: 0, errors: 0,
+      avg_ms: 0, slow_count: 0, fast_count: 0,
+      type_counts: {}, channel_counts: {}, top_type: '-', top_channel: '-',
+      first_t: null, last_t: null, total_steps: 0
+    };
+    if (!traces || traces.length === 0) return s;
+    s.total = traces.length;
+    var sumMs = 0, sumCount = 0;
+    for (var i = 0; i < traces.length; i++) {
+      var t = traces[i];
+      var st = t.status;
+      if (st === 'ok' || st === 'partial') s.forwarded++;
+      else if (st === 'echo_dedup' || st === 'self_echo' || st === 'mesh_echo') s.echoes++;
+      else if (st === 'dedup' || st === 'filtered') s.dropped++;
+      else if (st === 'error') s.errors++;
+      // Per-step echo counting (separate self / mesh / unknown).
+      // Also track per-trace flags so we can show "N events across M traces".
+      var _hasSelf = false, _hasMesh = false, _hasUnknown = false;
+      if (t.steps && t.steps.length) {
+        for (var __ei = 0; __ei < t.steps.length; __ei++) {
+          var __nm = t.steps[__ei].name;
+          if (__nm === 'self_echo' || __nm === 'echo_dedup') { s.self_echoes++; _hasSelf = true; }
+          else if (__nm === 'mesh_echo') { s.mesh_echoes++; _hasMesh = true; }
+          else if (__nm === 'unknown_echo') { s.unknown_echoes++; _hasUnknown = true; }
+        }
+      }
+      if (_hasSelf) s.self_echo_traces++;
+      if (_hasMesh) s.mesh_echo_traces++;
+      if (_hasUnknown) s.unknown_echo_traces++;
+      if (typeof t.total_ms === 'number') {
+        sumMs += t.total_ms; sumCount++;
+        var cls = _traceSpeedClass(t.total_ms);
+        if (cls === 'slow' || cls === 'warn') s.slow_count++;
+        if (cls === 'fast') s.fast_count++;
+      }
+      var ty = t.type || '?';
+      s.type_counts[ty] = (s.type_counts[ty] || 0) + 1;
+      var ch = t.channel || '?';
+      s.channel_counts[ch] = (s.channel_counts[ch] || 0) + 1;
+      if (t.first_seen) {
+        var tt = new Date(t.first_seen).getTime();
+        if (!isNaN(tt)) {
+          if (s.first_t === null || tt < s.first_t) s.first_t = tt;
+          if (s.last_t === null || tt > s.last_t) s.last_t = tt;
+        }
+      }
+      s.total_steps += (t.steps && t.steps.length) || 0;
+    }
+    s.avg_ms = sumCount > 0 ? sumMs / sumCount : 0;
+    var topT = '-', topTc = 0;
+    for (var k in s.type_counts) {
+      if (s.type_counts[k] > topTc) { topT = k; topTc = s.type_counts[k]; }
+    }
+    s.top_type = topT;
+    var topC = '-', topCc = 0;
+    for (var k2 in s.channel_counts) {
+      if (s.channel_counts[k2] > topCc) { topC = k2; topCc = s.channel_counts[k2]; }
+    }
+    s.top_channel = topC;
+    return s;
+  }
+  function _renderStatCard(icon, value, label, color, sub) {
+    color = color || '#a78bfa';
+    var subHtml = sub ? '<div style="font-size:10px;color:var(--txm);margin-top:2px">' + sub + '</div>' : '';
+    return '<div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:10px 12px">'
+         +   '<div style="display:flex;align-items:center;gap:6px;font-size:10px;color:var(--txm);text-transform:uppercase;letter-spacing:0.5px">'
+         +     '<span style="font-size:14px">' + icon + '</span>' + label
+         +   '</div>'
+         +   '<div style="font-size:20px;font-weight:600;color:' + color + ';margin-top:2px;font-variant-numeric:tabular-nums">' + value + '</div>'
+         +   subHtml
+         + '</div>';
+  }
+  function _renderTraceStats(stats) {
+    var panel = document.getElementById('traceStatsPanel');
+    var grid = document.getElementById('traceStatsGrid');
+    var win = document.getElementById('traceStatsWindow');
+    if (!panel || !grid) return;
+    if (!stats || stats.total === 0) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+    if (win) {
+      var winTxt = 'Last ' + stats.total + ' traces';
+      if (stats.first_t && stats.last_t && stats.last_t > stats.first_t) {
+        var spanS = Math.round((stats.last_t - stats.first_t) / 1000);
+        if (spanS < 60) winTxt += ' \u2022 span ' + spanS + 's';
+        else if (spanS < 3600) winTxt += ' \u2022 span ' + Math.round(spanS / 60) + 'm';
+        else winTxt += ' \u2022 span ' + (spanS / 3600).toFixed(1) + 'h';
+      }
+      win.textContent = winTxt;
+    }
+    var html = '';
+    html += _renderStatCard('\uD83D\uDCE6', stats.total, 'Total Traces', '#a78bfa');
+    html += _renderStatCard('\u2705', stats.forwarded, 'Forwarded Traces', '#34d399',
+                (stats.total > 0 ? Math.round(stats.forwarded / stats.total * 100) + '% of traces' : ''));
+    // Self-echoes (RF feedback / own TX heard back) — show event count + trace count
+    var _selfSub = (stats.self_echoes || 0) === 0 ? 'RF feedback events' :
+                   stats.self_echoes + ' event' + (stats.self_echoes === 1 ? '' : 's') +
+                   ' \u00B7 in ' + (stats.self_echo_traces || 0) + ' trace' + ((stats.self_echo_traces || 0) === 1 ? '' : 's');
+    html += _renderStatCard('\uD83D\uDD01', stats.self_echoes || 0, 'Self-Echo Events', '#60a5fa', _selfSub);
+    // Mesh-echoes — only show if any
+    if ((stats.mesh_echoes || 0) > 0) {
+      var _meshSub = stats.mesh_echoes + ' event' + (stats.mesh_echoes === 1 ? '' : 's') +
+                     ' \u00B7 in ' + (stats.mesh_echo_traces || 0) + ' trace' + ((stats.mesh_echo_traces || 0) === 1 ? '' : 's');
+      html += _renderStatCard('\uD83D\uDD00', stats.mesh_echoes, 'Mesh-Echo Events', '#a78bfa', _meshSub);
+    }
+    // Unknown-echoes — only show if any (rare hash collision / unparsable type)
+    if ((stats.unknown_echoes || 0) > 0) {
+      var _unkSub = stats.unknown_echoes + ' event' + (stats.unknown_echoes === 1 ? '' : 's') +
+                    ' \u00B7 in ' + (stats.unknown_echo_traces || 0) + ' trace' + ((stats.unknown_echo_traces || 0) === 1 ? '' : 's');
+      html += _renderStatCard('\u2754', stats.unknown_echoes, 'Unknown-Echo Events', '#94a3b8', _unkSub);
+    }
+    html += _renderStatCard('\u26A0\uFE0F', stats.dropped, 'Dropped/Dedup', '#f97316',
+                (stats.total > 0 ? Math.round(stats.dropped / stats.total * 100) + '% of traces' : ''));
+    if (stats.errors > 0) {
+      html += _renderStatCard('\u274C', stats.errors, 'Errors', '#ef4444');
+    }
+    html += _renderStatCard('\u23F1', stats.avg_ms.toFixed(0) + 'ms', 'Avg Duration', '#67e8f9',
+                stats.slow_count > 0 ? stats.slow_count + ' slow / ' + stats.fast_count + ' fast' : '');
+    html += _renderStatCard(_packetTypeIcon(stats.top_type), stats.top_type, 'Top Type', '#f472b6',
+                stats.type_counts[stats.top_type] + ' \u00D7');
+    html += _renderStatCard('\uD83D\uDCE1', _traceFriendlyName(stats.top_channel), 'Top Channel', '#22d3ee',
+                stats.channel_counts[stats.top_channel] + ' \u00D7');
+    grid.innerHTML = html;
+  }
+  // ===========================================================
+  // v2.5.0+: Phase 2 trace UI helpers
+  //   - Mini timeline sparkline (compact step visualization)
+  //   - Hop path diagram (visual mesh routing path)
+  // ===========================================================
+  function _renderTraceMiniTimeline(t) {
+    if (!t || !t.steps || t.steps.length === 0) return '';
+    // Determine total span (max elapsed_ms across steps)
+    var maxMs = 0;
+    for (var i = 0; i < t.steps.length; i++) {
+      var em = t.steps[i].elapsed_ms;
+      if (typeof em === 'number' && em > maxMs) maxMs = em;
+    }
+    if (maxMs <= 0) maxMs = 1;
+    // Build dot HTML for each step, positioned by elapsed_ms / maxMs
+    var dotsHtml = '';
+    for (var j = 0; j < t.steps.length; j++) {
+      var s = t.steps[j];
+      var em2 = (typeof s.elapsed_ms === 'number') ? s.elapsed_ms : 0;
+      var pct = (em2 / maxMs) * 100;
+      if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+      var meta = _stepMeta(s.name);
+      var col = meta.color || '#9ca3af';
+      // Slightly larger size for status warnings/errors
+      var sz = 6;
+      var bd = '1px solid rgba(0,0,0,0.35)';
+      if (s.status === 'warning') { sz = 7; bd = '1px solid #fbbf24'; }
+      else if (s.status === 'error') { sz = 8; bd = '1.5px solid #ef4444'; }
+      else if (s.status === 'partial') { sz = 7; bd = '1px solid #fbbf24'; }
+      var tip = (s.name || '?') + '  \u2022  ' + em2.toFixed(1) + 'ms';
+      if (s.status && s.status !== 'ok') tip += '  \u2022  ' + s.status;
+      dotsHtml += '<span title="' + tip + '" style="position:absolute;left:calc(' + pct.toFixed(2) + '% - ' + (sz/2) + 'px);top:50%;transform:translateY(-50%);width:' + sz + 'px;height:' + sz + 'px;background:' + col + ';border:' + bd + ';border-radius:50%;box-shadow:0 0 4px ' + col + '88;cursor:help"></span>';
+    }
+    // Phase labels above the bar (subtle, optional)
+    var labelHtml = '<span style="font-size:9px;color:var(--txm);font-family:monospace;flex:0 0 auto;margin-right:6px;letter-spacing:0.4px" title="Step timeline (sparkline) - hover dots for step details">\u2261 ' + t.steps.length + ' steps  \u2022  ' + maxMs.toFixed(0) + 'ms</span>';
+    return '<div style="display:flex;align-items:center;padding:2px 8px 6px 14px">'
+         +   labelHtml
+         +   '<div style="position:relative;flex:1;height:10px;background:linear-gradient(to right, rgba(255,255,255,0.04), rgba(255,255,255,0.08));border-radius:5px;border:1px solid rgba(255,255,255,0.05)">'
+         +     dotsHtml
+         +   '</div>'
+         + '</div>';
+  }
+  function _renderHopDiagram(t) {
+    if (!t) return '';
+    var src = t.src_hash ? String(t.src_hash).toUpperCase() : null;
+    var dst = t.dst_hash ? String(t.dst_hash).toUpperCase() : null;
+    var hops = (t.path_hashes || []).map(function(h){ return String(h || '').toUpperCase(); });
+    if (!src && !dst && hops.length === 0) return '';
+    // Build node list: src -> hops... -> dst
+    var nodes = [];
+    if (src) nodes.push({label: src, type: 'src', tip: 'Source: ' + src});
+    for (var i = 0; i < hops.length; i++) {
+      var hp = hops[i];
+      if (!hp) continue;
+      // Suppress redundant hop equal to src or dst (already shown)
+      if (hp === src && i === 0) continue;
+      if (hp === dst && i === hops.length - 1) continue;
+      nodes.push({label: hp, type: 'hop', tip: 'Hop ' + (i+1) + ': ' + hp});
+    }
+    if (dst) nodes.push({label: dst, type: 'dst', tip: 'Destination: ' + dst});
+    else nodes.push({label: '*', type: 'broadcast', tip: 'Broadcast (no specific destination)'});
+    // Render as flex of pills with arrows between
+    var COLORS = {
+      src:       {bg:'rgba(34,197,94,0.18)',  fg:'#34d399', bd:'rgba(34,197,94,0.55)'},
+      hop:       {bg:'rgba(251,191,36,0.15)', fg:'#fbbf24', bd:'rgba(251,191,36,0.45)'},
+      dst:       {bg:'rgba(59,130,246,0.18)', fg:'#60a5fa', bd:'rgba(59,130,246,0.55)'},
+      broadcast: {bg:'rgba(167,139,250,0.18)',fg:'#a78bfa', bd:'rgba(167,139,250,0.55)'}
+    };
+    var html = '<div style="margin-top:8px;padding:10px 12px;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:6px">';
+    html += '<div style="font-size:10px;color:var(--txm);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">\uD83D\uDDFA Hop Path (' + hops.length + ' hops)</div>';
+    html += '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px">';
+    for (var n = 0; n < nodes.length; n++) {
+      var nd = nodes[n];
+      var c = COLORS[nd.type] || COLORS.hop;
+      var labelTxt = nd.label;
+      var labelHtml2 = nd.type === 'src' ? '\uD83D\uDCE4 ' : (nd.type === 'dst' ? '\uD83D\uDCE5 ' : (nd.type === 'broadcast' ? '\uD83D\uDCE3 ' : '\u2937 '));
+      html += '<span title="' + nd.tip + '" style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;background:' + c.bg + ';color:' + c.fg + ';border:1px solid ' + c.bd + ';border-radius:12px;font-family:monospace;font-size:11px;font-weight:600">' + labelHtml2 + labelTxt + '</span>';
+      if (n < nodes.length - 1) {
+        html += '<span style="color:var(--txm);font-size:11px">\u2192</span>';
+      }
+    }
+    html += '</div>';
+    if (typeof t.hash_size === 'number' && t.hash_size > 0) {
+      html += '<div style="margin-top:6px;font-size:10px;color:var(--txm)">Path hash size: ' + t.hash_size + ' byte' + (t.hash_size === 1 ? '' : 's') + ' / hop</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  // ===========================================================
+  // v2.5.0+: Phase 3 trace UI helpers
+  //   - Step performance heatmap (avg time per step name)
+  //   - Duration histogram (distribution of total_ms)
+  //   - Group similar traces (fingerprint-based grouping)
+  // ===========================================================
+  var _traceHeatmapChart = null;
+  var _traceHistogramChart = null;
+  function _computeStepHeatmap(traces) {
+    // For each step name, accumulate the time SPENT in that step:
+    //   delta = step.elapsed_ms - prev_step.elapsed_ms
+    // v2.5.x+: collects all samples for robust median/p95, adds phase
+    //          for category grouping, and sorts by count DESC so the
+    //          most frequent steps surface at the top of the heatmap.
+    // Returns: [{name, phase, avg_ms, median_ms, p95_ms, max_ms, count}].
+    var acc = {};
+    if (!traces) return [];
+    for (var i = 0; i < traces.length; i++) {
+      var t = traces[i];
+      if (!t.steps || t.steps.length === 0) continue;
+      // Sort steps chronologically (defensive copy + sort by elapsed_ms)
+      var ss = t.steps.slice().sort(function(a, b) {
+        var ea = (typeof a.elapsed_ms === 'number') ? a.elapsed_ms : 0;
+        var eb = (typeof b.elapsed_ms === 'number') ? b.elapsed_ms : 0;
+        return ea - eb;
+      });
+      var prev = 0;
+      for (var j = 0; j < ss.length; j++) {
+        var s = ss[j];
+        var em = (typeof s.elapsed_ms === 'number') ? s.elapsed_ms : 0;
+        var dt = em - prev;
+        if (dt < 0) dt = 0;
+        var nm = s.name || '?';
+        if (!acc[nm]) acc[nm] = {samples: [], max: 0};
+        acc[nm].samples.push(dt);
+        if (dt > acc[nm].max) acc[nm].max = dt;
+        prev = em;
+      }
+    }
+    function _percentile(sorted, p) {
+      if (!sorted.length) return 0;
+      if (sorted.length === 1) return sorted[0];
+      var idx = (p / 100) * (sorted.length - 1);
+      var lo = Math.floor(idx);
+      var hi = Math.ceil(idx);
+      if (lo === hi) return sorted[lo];
+      var frac = idx - lo;
+      return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+    }
+    var rows = [];
+    for (var k in acc) {
+      var samples = acc[k].samples.slice().sort(function(a, b){ return a - b; });
+      var sum = 0;
+      for (var sx = 0; sx < samples.length; sx++) sum += samples[sx];
+      var avg = samples.length ? sum / samples.length : 0;
+      var meta = (typeof _stepMeta === 'function') ? _stepMeta(k) : {phase: 'Other'};
+      rows.push({
+        name: k,
+        phase: (meta && meta.phase) || 'Other',
+        avg_ms: avg,
+        median_ms: _percentile(samples, 50),
+        p95_ms: _percentile(samples, 95),
+        max_ms: acc[k].max,
+        count: samples.length
+      });
+    }
+    // Sort primarily by count DESC (most-frequent first), then by phase
+    // (groups similar categories visually together), then by avg DESC.
+    var _PHASE_ORDER = {'RX': 0, 'Processing': 1, 'Routing': 2, 'Guard': 3, 'TX': 4, 'Other': 5};
+    rows.sort(function(a, b){
+      if (b.count !== a.count) return b.count - a.count;
+      var pa = (_PHASE_ORDER[a.phase] !== undefined) ? _PHASE_ORDER[a.phase] : 99;
+      var pb = (_PHASE_ORDER[b.phase] !== undefined) ? _PHASE_ORDER[b.phase] : 99;
+      if (pa !== pb) return pa - pb;
+      return b.avg_ms - a.avg_ms;
+    });
+    return rows;
+  }
+  function _computeDurationHistogram(traces) {
+    // Bucket boundaries (ms): 0-50, 50-100, 100-250, 250-500, 500-1000, 1000-2000, 2000-5000, >5000
+    var BUCKETS = [
+      {lo: 0,    hi: 50,    label: '<50',     color: '#22d3ee'},
+      {lo: 50,   hi: 100,   label: '50-100',  color: '#34d399'},
+      {lo: 100,  hi: 250,   label: '100-250', color: '#86efac'},
+      {lo: 250,  hi: 500,   label: '250-500', color: '#fde68a'},
+      {lo: 500,  hi: 1000,  label: '500-1k',  color: '#fbbf24'},
+      {lo: 1000, hi: 2000,  label: '1-2k',    color: '#f59e0b'},
+      {lo: 2000, hi: 5000,  label: '2-5k',    color: '#f97316'},
+      {lo: 5000, hi: Infinity, label: '>5k',  color: '#ef4444'}
+    ];
+    var counts = BUCKETS.map(function(){ return 0; });
+    if (!traces) return {buckets: BUCKETS, counts: counts};
+    for (var i = 0; i < traces.length; i++) {
+      var t = traces[i];
+      if (typeof t.total_ms !== 'number') continue;
+      for (var b = 0; b < BUCKETS.length; b++) {
+        if (t.total_ms >= BUCKETS[b].lo && t.total_ms < BUCKETS[b].hi) {
+          counts[b]++;
+          break;
+        }
+      }
+    }
+    return {buckets: BUCKETS, counts: counts};
+  }
+  function _renderTraceHeatmap(traces) {
+    var canvas = document.getElementById('traceHeatmapChart');
+    var nodata = document.getElementById('traceHeatmapNoData');
+    if (!canvas) return;
+    // Defensive: catch any error inside computation so a single bad trace
+    // can never blank-out the entire Trace Analytics panel.
+    var rows;
+    try {
+      rows = _computeStepHeatmap(traces) || [];
+    } catch(__e) {
+      console.error('[trace] _computeStepHeatmap threw:', __e && __e.message);
+      rows = [];
+    }
+    if (!rows.length) {
+      if (_traceHeatmapChart) { try { _traceHeatmapChart.destroy(); } catch(e){} _traceHeatmapChart = null; }
+      canvas.style.display = 'none';
+      if (nodata) nodata.style.display = 'block';
+      return;
+    }
+    canvas.style.display = '';
+    if (nodata) nodata.style.display = 'none';
+    // Limit to top 12 (rows already sorted by count DESC + phase + avg)
+    if (rows.length > 12) rows = rows.slice(0, 12);
+    // v2.5.x+: enriched labels with count and phase-based grouping.
+    //  - Label suffix "(N\u00D7)" makes rare steps obvious at a glance.
+    //  - Phase icon prefix groups RX/Proc/Routing/Guard/TX visually.
+    //  - Opacity scales by count so dominant steps stand out; rare
+    //    steps fade to suggest "these are outliers".
+    //  - Adds median + p95 datasets for robust performance reading
+    //    (avg can be skewed by a single slow outlier).
+    var maxCount = 0;
+    for (var rc = 0; rc < rows.length; rc++) {
+      if (rows[rc].count > maxCount) maxCount = rows[rc].count;
+    }
+    if (maxCount < 1) maxCount = 1;
+    function _phaseAbbrev(p) {
+      if (p === 'Processing') return 'Proc';
+      if (p === 'Routing') return 'Rt';
+      if (p === 'Guard') return 'Gd';
+      return p || 'Other';
+    }
+    function _hexAlpha(a) {
+      var v = Math.max(0, Math.min(255, Math.round(a * 255)));
+      var s = v.toString(16);
+      return s.length === 1 ? '0' + s : s;
+    }
+    var labels = rows.map(function(r){
+      // e.g. "\uD83D\uDCF6 RX  received (62\u00D7)"
+      var icon = (typeof _phaseIcon === 'function') ? _phaseIcon(r.phase) : '\u2022';
+      return icon + ' ' + _phaseAbbrev(r.phase) + '  ' + r.name + ' (' + r.count + '\u00D7)';
+    });
+    var avgs    = rows.map(function(r){ return +r.avg_ms.toFixed(2); });
+    var medians = rows.map(function(r){ return +r.median_ms.toFixed(2); });
+    var p95s    = rows.map(function(r){ return +r.p95_ms.toFixed(2); });
+    var maxs    = rows.map(function(r){ return +r.max_ms.toFixed(2); });
+    // Phase-based colors for visual grouping; count-weighted opacity.
+    var baseColors = rows.map(function(r){
+      return (typeof _phaseColor === 'function') ? _phaseColor(r.phase) : '#a78bfa';
+    });
+    // Opacity 0.35 (rare) -> 1.0 (most-common). sqrt curve = softer falloff.
+    var alphas = rows.map(function(r){
+      var ratio = r.count / maxCount;
+      return 0.35 + 0.65 * Math.sqrt(ratio);
+    });
+    var avgColors    = baseColors.map(function(c, i){ return c + _hexAlpha(alphas[i]); });
+    var medianColors = baseColors.map(function(c, i){ return c + _hexAlpha(alphas[i] * 0.7); });
+    var p95Colors    = baseColors.map(function(c, i){ return c + _hexAlpha(alphas[i] * 0.5); });
+    var maxColors    = baseColors.map(function(c, i){ return c + _hexAlpha(alphas[i] * 0.25); });
+    var cfg = {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          {label:'Avg \u0394ms',    data: avgs,    backgroundColor: avgColors,    borderColor: baseColors, borderWidth:1, borderRadius:3},
+          {label:'Median \u0394ms', data: medians, backgroundColor: medianColors, borderColor: baseColors, borderWidth:1, borderRadius:3},
+          {label:'P95 \u0394ms',    data: p95s,    backgroundColor: p95Colors,    borderColor: baseColors, borderWidth:1, borderRadius:3},
+          {label:'Max \u0394ms',    data: maxs,    backgroundColor: maxColors,    borderColor: baseColors, borderWidth:1, borderRadius:3}
+        ]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: {labels:{color:'#cbd5e1', font:{size:10}}, position:'bottom'},
+          tooltip: {
+            callbacks: {
+              label: function(ctx) {
+                var r = rows[ctx.dataIndex];
+                if (!r) return '';
+                var v;
+                if (ctx.dataset.label === 'Avg \u0394ms')    { v = r.avg_ms; }
+                else if (ctx.dataset.label === 'Median \u0394ms') { v = r.median_ms; }
+                else if (ctx.dataset.label === 'P95 \u0394ms')    { v = r.p95_ms; }
+                else { v = r.max_ms; }
+                return ctx.dataset.label + ': ' + v.toFixed(2) + ' ms';
+              },
+              afterBody: function(items) {
+                if (!items || !items.length) return '';
+                var r = rows[items[0].dataIndex];
+                if (!r) return '';
+                return ['Phase: ' + r.phase, 'Samples: ' + r.count];
+              }
+            }
+          }
+        },
+        scales: {
+          x: {grid:{color:'rgba(255,255,255,0.05)'}, ticks:{color:'#94a3b8', font:{size:10}}, title:{display:true, text:'\u0394 time per step (ms) \u2014 sorted by frequency', color:'#94a3b8', font:{size:10}}},
+          y: {grid:{display:false}, ticks:{color:'#cbd5e1', font:{size:10, family:'monospace'}}}
+        }
+      }
+    };
+    if (_traceHeatmapChart) {
+      _traceHeatmapChart.data = cfg.data;
+      _traceHeatmapChart.update('none');
+    } else {
+      _traceHeatmapChart = new Chart(canvas.getContext('2d'), cfg);
+    }
+  }
+  function _renderTraceHistogram(traces) {
+    var canvas = document.getElementById('traceHistogramChart');
+    var nodata = document.getElementById('traceHistogramNoData');
+    if (!canvas) return;
+    var hist = _computeDurationHistogram(traces);
+    var sum = 0;
+    for (var i = 0; i < hist.counts.length; i++) sum += hist.counts[i];
+    if (sum === 0) {
+      if (_traceHistogramChart) { try { _traceHistogramChart.destroy(); } catch(e){} _traceHistogramChart = null; }
+      canvas.style.display = 'none';
+      if (nodata) nodata.style.display = 'block';
+      return;
+    }
+    canvas.style.display = '';
+    if (nodata) nodata.style.display = 'none';
+    var labels = hist.buckets.map(function(b){ return b.label + ' ms'; });
+    var data = hist.counts;
+    var colors = hist.buckets.map(function(b){ return b.color; });
+    var cfg = {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{label:'Traces', data: data, backgroundColor: colors, borderColor: colors, borderWidth:1, borderRadius:4}]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: {display:false},
+          tooltip: {
+            callbacks: {
+              label: function(ctx) {
+                var pct = sum > 0 ? (ctx.parsed.y / sum * 100).toFixed(1) : '0';
+                return ctx.parsed.y + ' traces (' + pct + '%)';
+              }
+            }
+          }
+        },
+        scales: {
+          x: {grid:{display:false}, ticks:{color:'#94a3b8', font:{size:10}}, title:{display:true, text:'Total trace duration', color:'#94a3b8', font:{size:10}}},
+          y: {beginAtZero:true, grid:{color:'rgba(255,255,255,0.05)'}, ticks:{color:'#94a3b8', font:{size:10}, stepSize:1, precision:0}}
+        }
+      }
+    };
+    if (_traceHistogramChart) {
+      _traceHistogramChart.data = cfg.data;
+      _traceHistogramChart.update('none');
+    } else {
+      _traceHistogramChart = new Chart(canvas.getContext('2d'), cfg);
+    }
+  }
+  // Compute a fingerprint string for grouping similar traces.
+  // Same status + same step-name sequence + same TX targets => grouped together.
+  function _traceFingerprint(t) {
+    if (!t) return '';
+    var stepNames = (t.steps || []).map(function(s){ return s.name || '?'; }).join('>');
+    var tx = _traceTxTargets(t).join(',');
+    return (t.status || '?') + '|' + (t.type || '?') + '|' + stepNames + '|' + tx;
+  }
+  function _groupTraces(traces) {
+    // Returns array of groups: [{repr_trace, count, members[]}], preserving the order
+    // of the first occurrence of each group.
+    var seen = {};
+    var order = [];
+    for (var i = 0; i < traces.length; i++) {
+      var fp = _traceFingerprint(traces[i]);
+      if (!seen[fp]) {
+        seen[fp] = {repr: traces[i], count: 0, members: []};
+        order.push(fp);
+      }
+      seen[fp].count++;
+      seen[fp].members.push(traces[i]);
+    }
+    return order.map(function(fp){ return seen[fp]; });
+  }
+  // ===========================================================
+  // v2.5.0+: Phase 4 trace UI helpers
+  //   - Category quick-filter tabs
+  //   - Click-hash to highlight related traces
+  //   - Real-time pulse animation for new traces in auto-refresh
+  //   - Trace export (JSON download)
+  // ===========================================================
+  var _traceCategory = 'all';        // active category filter
+  var _traceRelatedHash = null;      // active related-hash highlight
+  var _traceSeenIds = {};            // for new-trace detection in auto-refresh
+  var _traceFirstRenderDone = false; // skip flashing on initial render
+  function _traceClassifyCategory(t) {
+    // Returns set of category labels this trace belongs to.
+    // A single trace can belong to multiple categories.
+    var cats = ['all'];
+    var st = t.status || '';
+    var em = (typeof t.total_ms === 'number') ? t.total_ms : 0;
+    var echoes = _traceEchoCount(t);
+    var isErr = (st === 'error');
+    var isDedup = (st === 'dedup' || st === 'filtered');
+    var isEcho = (st === 'echo_dedup' || st === 'self_echo' || st === 'mesh_echo' || echoes > 0);
+    var isFwd = (!isErr && !isDedup && !isEcho && (st === 'ok' || st === 'partial'));
+    if (isErr) cats.push('errors');
+    if (isDedup) cats.push('discarded');
+    if (isEcho) cats.push('echoes');
+    if (isFwd) cats.push('forwarded');
+    if (em >= 500) cats.push('slow');
+    return cats;
+  }
+  function _traceCategoryFilter(traces, category) {
+    if (!category || category === 'all') return traces.slice();
+    return traces.filter(function(t){
+      return _traceClassifyCategory(t).indexOf(category) !== -1;
+    });
+  }
+  function _traceUpdateCategoryCounts(traces) {
+    var counts = {all: 0, forwarded: 0, echoes: 0, discarded: 0, errors: 0, slow: 0};
+    for (var i = 0; i < traces.length; i++) {
+      var cs = _traceClassifyCategory(traces[i]);
+      for (var j = 0; j < cs.length; j++) {
+        if (counts.hasOwnProperty(cs[j])) counts[cs[j]]++;
+      }
+    }
+    Object.keys(counts).forEach(function(k){
+      var els = document.querySelectorAll('[data-cat-count="' + k + '"]');
+      for (var n = 0; n < els.length; n++) els[n].textContent = counts[k];
+    });
+  }
+  window._traceSetCategory = function(cat) {
+    _traceCategory = cat || 'all';
+    // Update active tab visuals
+    var tabs = document.querySelectorAll('.trace-cat-tab');
+    for (var i = 0; i < tabs.length; i++) {
+      if (tabs[i].getAttribute('data-cat') === _traceCategory) tabs[i].classList.add('active');
+      else tabs[i].classList.remove('active');
+    }
+    if (typeof _traceApplySearch === 'function') _traceApplySearch();
+  };
+  window._traceShowRelated = function(hash) {
+    if (!hash) return;
+    _traceRelatedHash = String(hash).toUpperCase();
+    // Apply visual highlight without re-rendering: dim non-matching, highlight matching
+    var rows = document.querySelectorAll('[data-trace-row="1"]');
+    var anyMatch = false;
+    for (var i = 0; i < rows.length; i++) {
+      var rh = (rows[i].getAttribute('data-trace-hash') || '').toUpperCase();
+      if (rh === _traceRelatedHash) {
+        rows[i].classList.add('trace-related');
+        rows[i].classList.remove('trace-dim');
+        anyMatch = true;
+      } else {
+        rows[i].classList.remove('trace-related');
+        rows[i].classList.add('trace-dim');
+      }
+    }
+    var btn = document.getElementById('traceClearRelatedBtn');
+    if (btn) btn.style.display = anyMatch ? '' : 'none';
+    if (anyMatch && typeof showToast === 'function') {
+      try { showToast('Highlighting related traces for hash ' + _traceRelatedHash, 'info'); } catch(e){}
+    }
+  };
+  window._traceClearRelated = function() {
+    _traceRelatedHash = null;
+    var rows = document.querySelectorAll('[data-trace-row="1"]');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].classList.remove('trace-related');
+      rows[i].classList.remove('trace-dim');
+    }
+    var btn = document.getElementById('traceClearRelatedBtn');
+    if (btn) btn.style.display = 'none';
+  };
+  function _traceFlashNewRows() {
+    // Mark trace rows whose ids are not in _traceSeenIds with a flash animation
+    if (!_traceFirstRenderDone) {
+      // First render after page load -> just record ids without flashing
+      var rows0 = document.querySelectorAll('[data-trace-row="1"]');
+      for (var i = 0; i < rows0.length; i++) {
+        var id0 = rows0[i].getAttribute('data-trace-id');
+        if (id0) _traceSeenIds[id0] = 1;
+      }
+      _traceFirstRenderDone = true;
+      return;
+    }
+    var rows = document.querySelectorAll('[data-trace-row="1"]');
+    var newSeen = {};
+    for (var j = 0; j < rows.length; j++) {
+      var id = rows[j].getAttribute('data-trace-id');
+      if (!id) continue;
+      newSeen[id] = 1;
+      if (!_traceSeenIds[id]) {
+        // New trace -> flash
+        rows[j].classList.add('trace-flash');
+        (function(el){ setTimeout(function(){ try { el.classList.remove('trace-flash'); } catch(e){} }, 2600); })(rows[j]);
+      }
+    }
+    _traceSeenIds = newSeen;
+  }
+  function _traceExportPayload(traces) {
+    return {
+      exported_at: new Date().toISOString(),
+      source: window.location.host || 'pymc_repeater',
+      count: traces.length,
+      traces: traces
+    };
+  }
+  function _traceDownloadJson(filename, payload) {
+    var blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch(e){} }, 100);
+  }
+  window._traceExportVisible = function() {
+    // Export the currently rendered (filtered + categorized) traces to JSON
+    if (!window._traceData || window._traceData.length === 0) {
+      try { showToast('No traces to export', 'warning'); } catch(e){}
+      return;
+    }
+    // Re-apply the same filtering as _renderTraces does, sans grouping
+    var qSrc = (document.getElementById('traceFilterSrc') || {}).value || '';
+    var qDst = (document.getElementById('traceFilterDst') || {}).value || '';
+    var qHop = (document.getElementById('traceFilterHop') || {}).value || '';
+    qSrc = qSrc.trim().toLowerCase(); qDst = qDst.trim().toLowerCase(); qHop = qHop.trim().toLowerCase();
+    var filtered = window._traceData;
+    if (qSrc || qDst || qHop) {
+      filtered = filtered.filter(function(t){
+        if (qSrc && (t.src_hash||'').toLowerCase().indexOf(qSrc) === -1) return false;
+        if (qDst && (t.dst_hash||'').toLowerCase().indexOf(qDst) === -1) return false;
+        if (qHop) {
+          var hopMatch = false;
+          if (t.path_hashes && t.path_hashes.length) {
+            var lh = (t.path_hashes[t.path_hashes.length - 1] || '').toLowerCase();
+            if (lh.indexOf(qHop) !== -1) hopMatch = true;
+          }
+          if (!hopMatch) return false;
+        }
+        return true;
+      });
+    }
+    filtered = _traceCategoryFilter(filtered, _traceCategory);
+    var ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    var fname = 'pymc-traces-' + ts + '-' + filtered.length + '.json';
+    _traceDownloadJson(fname, _traceExportPayload(filtered));
+    try { showToast('Exported ' + filtered.length + ' traces', 'success'); } catch(e){}
+  };
+  window._traceExportSingle = function(traceId) {
+    if (!window._traceData) return;
+    var t = null;
+    for (var i = 0; i < window._traceData.length; i++) {
+      var x = window._traceData[i];
+      var idStr = (x.first_seen || '') + '|' + (x.pkt_hash || '') + '|' + (x.src_hash || '');
+      if (idStr === traceId) { t = x; break; }
+    }
+    if (!t) return;
+    var hash = (t.pkt_hash_full || t.pkt_hash || 'unknown').toUpperCase();
+    var fname = 'pymc-trace-' + hash + '.json';
+    _traceDownloadJson(fname, _traceExportPayload([t]));
+    try { showToast('Exported trace ' + hash, 'success'); } catch(e){}
+  };
+  // ===========================================================
+  // v2.5.0+: Phase 5 trace UI helpers
+  //   - Step-by-step playback modal
+  // ===========================================================
+  var _tracePlayState = null;
+  function _tracePlayFindTrace(traceId) {
+    if (!window._traceData) return null;
+    for (var i = 0; i < window._traceData.length; i++) {
+      var x = window._traceData[i];
+      var idStr = (x.first_seen || '') + '|' + (x.pkt_hash || '') + '|' + (x.src_hash || '');
+      if (idStr === traceId) return x;
+    }
+    return null;
+  }
+  window._tracePlay = function(traceId) {
+    var t = _tracePlayFindTrace(traceId);
+    if (!t) {
+      try { showToast('Trace not found for playback', 'warning'); } catch(e){}
+      return;
+    }
+    if (!t.steps || t.steps.length === 0) {
+      try { showToast('No steps to play for this trace', 'warning'); } catch(e){}
+      return;
+    }
+    // Sort steps chronologically (defensive copy)
+    var sortedSteps = t.steps.slice().sort(function(a, b){
+      var ea = (typeof a.elapsed_ms === 'number') ? a.elapsed_ms : 0;
+      var eb = (typeof b.elapsed_ms === 'number') ? b.elapsed_ms : 0;
+      return ea - eb;
+    });
+    var totalMs = 0;
+    for (var i = 0; i < sortedSteps.length; i++) {
+      var em = sortedSteps[i].elapsed_ms;
+      if (typeof em === 'number' && em > totalMs) totalMs = em;
+    }
+    if (totalMs <= 0) totalMs = 1;
+    // Get speed from selector
+    var spdEl = document.getElementById('tracePlaySpeed');
+    var speed = spdEl ? parseFloat(spdEl.value) : 1.0;
+    if (!isFinite(speed) || speed <= 0) speed = 1.0;
+    _tracePlayState = {
+      trace: t,
+      steps: sortedSteps,
+      totalMs: totalMs,
+      shownIndex: 0,         // number of steps already rendered
+      virtualElapsed: 0,     // accumulated virtual elapsed ms (in trace time)
+      lastRealTime: null,    // last real wall-clock timestamp used for delta
+      paused: false,
+      finished: false,
+      speed: speed,
+      rafId: null
+    };
+    // Show modal
+    var modal = document.getElementById('tracePlayModal');
+    if (modal) modal.style.display = 'flex';
+    // Header info
+    var hashDisp = (t.pkt_hash_full || t.pkt_hash || 'unknown').toUpperCase();
+    var hdr = document.getElementById('tracePlayHeaderInfo');
+    if (hdr) hdr.textContent = hashDisp + '  \u2022  ' + (t.type || '?') + '  \u2022  ' + sortedSteps.length + ' steps  \u2022  ' + totalMs.toFixed(1) + ' ms';
+    var area = document.getElementById('tracePlayStepArea');
+    if (area) area.innerHTML = '';
+    var prog = document.getElementById('tracePlayProgress');
+    if (prog) prog.style.width = '0%';
+    var lbl = document.getElementById('tracePlayProgressLabel');
+    if (lbl) lbl.textContent = '0.0 / ' + totalMs.toFixed(1) + ' ms';
+    var sc = document.getElementById('tracePlayStepCounter');
+    if (sc) sc.textContent = '0 / ' + sortedSteps.length + ' steps';
+    var st = document.getElementById('tracePlayStatus');
+    if (st) st.textContent = 'Playing at ' + speed + 'x';
+    var btn = document.getElementById('tracePlayPlayBtn');
+    if (btn) btn.textContent = '\u23F8 Pause';
+    // Start animation loop
+    _tracePlayState.lastRealTime = performance.now();
+    _tracePlayState.rafId = requestAnimationFrame(_tracePlayTick);
+  };
+  function _tracePlayTick() {
+    var s = _tracePlayState;
+    if (!s) return;
+    var now = performance.now();
+    if (!s.paused && !s.finished) {
+      var dt = now - s.lastRealTime;
+      s.virtualElapsed += dt * s.speed;
+      // Reveal any steps that have arrived
+      while (s.shownIndex < s.steps.length) {
+        var step = s.steps[s.shownIndex];
+        var sem = (typeof step.elapsed_ms === 'number') ? step.elapsed_ms : 0;
+        if (sem <= s.virtualElapsed) {
+          _tracePlayRenderStep(step, s.shownIndex + 1);
+          s.shownIndex++;
+        } else {
+          break;
+        }
+      }
+      // Update progress UI
+      var prog = document.getElementById('tracePlayProgress');
+      var lbl = document.getElementById('tracePlayProgressLabel');
+      var sc = document.getElementById('tracePlayStepCounter');
+      var pct = Math.min(100, (s.virtualElapsed / s.totalMs) * 100);
+      if (prog) prog.style.width = pct.toFixed(1) + '%';
+      if (lbl) lbl.textContent = Math.min(s.virtualElapsed, s.totalMs).toFixed(1) + ' / ' + s.totalMs.toFixed(1) + ' ms';
+      if (sc) sc.textContent = s.shownIndex + ' / ' + s.steps.length + ' steps';
+      // Finished?
+      if (s.shownIndex >= s.steps.length && s.virtualElapsed >= s.totalMs) {
+        s.finished = true;
+        var st = document.getElementById('tracePlayStatus');
+        if (st) st.textContent = '\u2705 Playback complete';
+        var btn = document.getElementById('tracePlayPlayBtn');
+        if (btn) btn.textContent = '\u21BB Restart';
+      }
+    }
+    s.lastRealTime = now;
+    s.rafId = requestAnimationFrame(_tracePlayTick);
+  }
+  function _tracePlayRenderStep(step, n) {
+    var area = document.getElementById('tracePlayStepArea');
+    if (!area) return;
+    var meta = _stepMeta(step.name || '?');
+    var col = (meta && meta.color) ? meta.color : '#a78bfa';
+    var st = step.status || 'ok';
+    var stIcon = '';
+    if (st === 'ok') stIcon = '<span style="color:#34d399">\u2705</span>';
+    else if (st === 'warning' || st === 'partial') stIcon = '<span style="color:#fbbf24">\u26A0</span>';
+    else if (st === 'error') stIcon = '<span style="color:#ef4444">\u274C</span>';
+    else if (st === 'echo_dedup' || st === 'self_echo') stIcon = '<span style="color:#60a5fa">\uD83D\uDD01</span>';
+    else if (st === 'mesh_echo') stIcon = '<span style="color:#a78bfa">\uD83D\uDD00</span>';
+    else if (st === 'dedup') stIcon = '<span style="color:#f97316">\u26A0</span>';
+    else stIcon = '<span style="color:#9ca3af">\u25CB</span>';
+    var em = (typeof step.elapsed_ms === 'number') ? step.elapsed_ms.toFixed(1) : '?';
+    var detail = (step.detail || '').toString();
+    if (detail.length > 200) detail = detail.slice(0, 200) + '...';
+    var detailEsc = detail.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    var html = '<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 10px;margin-bottom:6px;background:' + col + '12;border-left:3px solid ' + col + ';border-radius:4px;animation:fIn 0.4s ease">'
+             +   '<div style="flex:0 0 28px;text-align:center;font-family:monospace;font-size:11px;color:' + col + ';font-weight:700">' + n + '</div>'
+             +   '<div style="flex:0 0 24px;text-align:center">' + stIcon + '</div>'
+             +   '<div style="flex:1;min-width:0">'
+             +     '<div style="font-family:monospace;font-size:12px;color:#e2e8f0;font-weight:600">' + (step.name || '?') + '</div>'
+             +     (detail ? '<div style="font-size:11px;color:#94a3b8;margin-top:2px;word-break:break-word">' + detailEsc + '</div>' : '')
+             +   '</div>'
+             +   '<div style="flex:0 0 70px;text-align:right;font-family:monospace;font-size:11px;color:#94a3b8">' + em + ' ms</div>'
+             + '</div>';
+    area.insertAdjacentHTML('beforeend', html);
+    area.scrollTop = area.scrollHeight;
+  }
+  window._tracePlayToggle = function() {
+    var s = _tracePlayState;
+    if (!s) return;
+    if (s.finished) { _tracePlayRestart(); return; }
+    s.paused = !s.paused;
+    var btn = document.getElementById('tracePlayPlayBtn');
+    var st = document.getElementById('tracePlayStatus');
+    if (s.paused) {
+      if (btn) btn.textContent = '\u25B6 Resume';
+      if (st) st.textContent = 'Paused';
+    } else {
+      if (btn) btn.textContent = '\u23F8 Pause';
+      if (st) st.textContent = 'Playing at ' + s.speed + 'x';
+      s.lastRealTime = performance.now(); // avoid time-jump after long pause
+    }
+  };
+  window._tracePlayRestart = function() {
+    var s = _tracePlayState;
+    if (!s) return;
+    s.shownIndex = 0;
+    s.virtualElapsed = 0;
+    s.paused = false;
+    s.finished = false;
+    s.lastRealTime = performance.now();
+    var area = document.getElementById('tracePlayStepArea');
+    if (area) area.innerHTML = '';
+    var prog = document.getElementById('tracePlayProgress');
+    if (prog) prog.style.width = '0%';
+    var btn = document.getElementById('tracePlayPlayBtn');
+    if (btn) btn.textContent = '\u23F8 Pause';
+    var st = document.getElementById('tracePlayStatus');
+    if (st) st.textContent = 'Playing at ' + s.speed + 'x';
+  };
+  window._tracePlaySetSpeed = function() {
+    var s = _tracePlayState; if (!s) return;
+    var spdEl = document.getElementById('tracePlaySpeed');
+    if (!spdEl) return;
+    var v = parseFloat(spdEl.value);
+    if (!isFinite(v) || v <= 0) return;
+    s.speed = v;
+    s.lastRealTime = performance.now();
+    if (!s.paused && !s.finished) {
+      var st = document.getElementById('tracePlayStatus');
+      if (st) st.textContent = 'Playing at ' + v + 'x';
+    }
+  };
+  window._tracePlayClose = function() {
+    var s = _tracePlayState;
+    if (s && s.rafId != null) {
+      try { cancelAnimationFrame(s.rafId); } catch(e){}
+    }
+    _tracePlayState = null;
+    var modal = document.getElementById('tracePlayModal');
+    if (modal) modal.style.display = 'none';
+  };
   function _statusIcon(s) {
     if (s === 'ok') return '<span style="color:#34d399">\u2705</span>';
-    if (s === 'echo_dedup') return '<span style="position:relative;display:inline-block;color:#34d399">\u2705' + _statusBadge('#60a5fa', 'E') + '</span>';
+    if (s === 'echo_dedup' || s === 'self_echo') return '<span style="position:relative;display:inline-block;color:#34d399">\u2705' + _statusBadge('#60a5fa', 'S') + '</span>';
+    if (s === 'mesh_echo') return '<span style="position:relative;display:inline-block;color:#34d399">\u2705' + _statusBadge('#a78bfa', 'M') + '</span>';
     if (s === 'dedup') return '<span style="position:relative;display:inline-block;color:#34d399">\u2705' + _statusBadge('#f97316', 'D') + '</span>';
     if (s === 'partial') return '<span style="color:#fbbf24">\u26A0\uFE0F</span>';
     if (s === 'error') return '<span style="color:#ef4444">\u274C</span>';
@@ -4177,7 +5738,7 @@ function renderPmCrcChart(channels) {
     return '<span style="color:#9ca3af">\u2753</span>';
   }
   function _statusColor(s) {
-    if (s === 'ok' || s === 'echo_dedup') return '#34d399';
+    if (s === 'ok' || s === 'echo_dedup' || s === 'self_echo' || s === 'mesh_echo') return '#34d399';
     if (s === 'partial') return '#fbbf24';
     if (s === 'dedup') return '#f97316';
     if (s === 'filtered') return '#a78bfa';
@@ -4243,6 +5804,8 @@ function renderPmCrcChart(channels) {
     dedup_check:       {icon:'\uD83D\uDD0E', color:'#3b82f6', phase:'Processing', label:'Dedup check'},
     dedup_skip:        {icon:'\u23ED',       color:'#3b82f6', phase:'Processing', label:'Dedup skip'},
     echo_dedup:        {icon:'\u267B',       color:'#94a3b8', phase:'Processing', label:'Self-echo dedup'},
+    self_echo:         {icon:'\uD83D\uDD01', color:'#60a5fa', phase:'Processing', label:'Self-echo (RF feedback)'},
+    mesh_echo:         {icon:'\uD83D\uDD00', color:'#a78bfa', phase:'Processing', label:'Mesh-echo (neighbor)'},
     dedup_drop:        {icon:'\uD83D\uDED1', color:'#ef4444', phase:'Processing', label:'Dedup drop'},
     bridge_inject:     {icon:'\uD83D\uDC89', color:'#a78bfa', phase:'Processing', label:'Bridge inject'},
     bridge_forward:    {icon:'\uD83D\uDD00', color:'#a78bfa', phase:'Processing', label:'Forward'},
@@ -4526,7 +6089,46 @@ function renderPmCrcChart(channels) {
         return true;
       });
     }
-    return __renderTraces_real(filtered);
+    // v2.5.0+: compute & render aggregate stats above the trace list.
+    // v2.5.x+: panel visibility is ALWAYS set explicitly here so a render
+    // error inside _renderTraceStats can never leave the panel hidden.
+    try {
+      var statsPanel = document.getElementById('traceStatsPanel');
+      if (statsPanel && filtered.length > 0) statsPanel.style.display = 'block';
+      _renderTraceStats(_traceComputeStats(filtered));
+    } catch(e) {
+      console.error('[trace] stats render failed:', e && e.message, e && e.stack);
+    }
+    // v2.5.0+: update category-tab counts using src/dst/hop-filtered set (BEFORE category filter)
+    try { _traceUpdateCategoryCounts(filtered); } catch(e) { console.error('[trace] cat counts failed:', e && e.message); }
+    // v2.5.0+: apply active category filter so analytics + grouping reflect chosen category
+    try { filtered = _traceCategoryFilter(filtered, _traceCategory); } catch(e) { console.error('[trace] cat filter failed:', e && e.message); }
+    // v2.5.0+: render analytics charts (heatmap + histogram) using filtered traces.
+    // v2.5.x+: panel display is force-set BEFORE any rendering so a chart
+    // exception cannot leave the panel hidden.
+    var analyticsPanel = document.getElementById('traceAnalyticsPanel');
+    if (analyticsPanel) {
+      analyticsPanel.style.display = (filtered.length > 0) ? 'block' : 'none';
+    }
+    try { _renderTraceHeatmap(filtered); }   catch(e) { console.error('[trace] heatmap render failed:', e && e.message, e && e.stack); }
+    try { _renderTraceHistogram(filtered); } catch(e) { console.error('[trace] histogram render failed:', e && e.message, e && e.stack); }
+    // v2.5.0+: optionally collapse similar traces into representative groups
+    var grpEl = document.getElementById('traceGroupSimilar');
+    var groupOn = !!(grpEl && grpEl.checked);
+    var renderList = filtered;
+    if (groupOn) {
+      try {
+        var groups = _groupTraces(filtered);
+        renderList = groups.map(function(g){
+          var copy = {};
+          for (var kk in g.repr) copy[kk] = g.repr[kk];
+          copy._group_count = g.count;
+          copy._group_members = g.members;
+          return copy;
+        });
+      } catch(e) { console.warn('trace grouping failed', e); }
+    }
+    return __renderTraces_real(renderList);
   }
 
   // ===========================================================
@@ -4892,9 +6494,12 @@ function renderPmCrcChart(channels) {
     var canvas = document.getElementById('traceDurationChart');
     var nodata = document.getElementById('traceDurationNoData');
     if (!canvas) return;
-    // Filter: keep only traces with total_ms >= 250 ms and a valid timestamp
+    // Filter: keep traces with a duration and a valid timestamp.
+    // Range widened to 50 ms..30 s so fast forwards (most traces are <250 ms)
+    // are visible too; previously the chart often looked empty because most
+    // traces fell below the 250 ms threshold.
     var filtered = (traces || []).filter(function(t){
-      return t && typeof t.total_ms === 'number' && t.total_ms >= 250 && t.total_ms <= 10000 && t.first_seen;
+      return t && typeof t.total_ms === 'number' && t.total_ms >= 50 && t.total_ms <= 30000 && t.first_seen;
     });
     if (filtered.length === 0) {
       if (_traceDurChart) { try { _traceDurChart.destroy(); } catch(e){} _traceDurChart = null; }
@@ -5009,7 +6614,10 @@ function renderPmCrcChart(channels) {
     if (nodata) nodata.style.display = 'none';
     var html = '';
     // v2.4.7+: Extended grid with Hops + Src->Dst columns. Full hash (16 chars).
-    var _TRACE_GRID = 'grid-template-columns:90px 150px 90px 80px 50px 110px 90px 50px;gap:4px 8px';
+    // v2.5.x: widened Channel and Type columns so TX-target chips and echo
+    // badges no longer truncate the visible text. Channel uses 1fr (flexible)
+    // because friendly-name + multiple ↗target chips can grow significantly.
+    var _TRACE_GRID = 'grid-template-columns:88px 130px minmax(140px,1.4fr) minmax(120px,1fr) 46px 130px 86px 44px;gap:4px 10px';
     html += '<div style="display:grid;' + _TRACE_GRID + ';font-size:12px;font-weight:600;color:var(--txm);padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.1);margin-bottom:4px">';
     html += '<div>Time</div>'
          +  '<div style="text-align:center">Hash</div>'
@@ -5024,17 +6632,56 @@ function renderPmCrcChart(channels) {
       var t = traces[i];
       var hc = _hashColor(t.pkt_hash);
       var _traceUid = 'r' + i + '-' + (t.pkt_hash || 'idx') + '-' + String(t.first_seen || '').replace(/[^a-zA-Z0-9]/g, '');
-      html += '<div data-trace-uid="' + _traceUid + '" style="cursor:pointer;border-radius:6px">';
+      // v2.5.0+: speed/slow highlight via left border accent
+      var _spdCls = _traceSpeedClass(t.total_ms);
+      var _spdCol = _traceSpeedColor(_spdCls);
+      var _spdBorder = _spdCol ? ('border-left:3px solid ' + _spdCol + ';') : 'border-left:3px solid transparent;';
+      var _spdRowBg = '';
+      if (_spdCls === 'slow') _spdRowBg = 'background:rgba(239,68,68,0.05);';
+      else if (_spdCls === 'warn') _spdRowBg = 'background:rgba(251,191,36,0.04);';
+      // v2.5.0+: echo badge & TX target detection
+      var _echoN = _traceEchoCount(t);
+      var _selfEchoN = _traceSelfEchoCount(t);
+      var _meshEchoN = _traceMeshEchoCount(t);
+      var _txTargets = _traceTxTargets(t);
+      // v2.5.0+: Phase 4 - row identifiers for related-highlight, flash-on-new, and category filter
+      var _traceIdAttr = String(t.first_seen || '') + '|' + (t.pkt_hash || '') + '|' + (t.src_hash || '');
+      var _traceHashAttr = (t.pkt_hash_full || t.pkt_hash || '').toUpperCase();
+      html += '<div data-trace-uid="' + _traceUid + '" data-trace-row="1" data-trace-id="' + _traceIdAttr + '" data-trace-hash="' + _traceHashAttr + '" style="cursor:pointer;border-radius:6px;' + _spdBorder + _spdRowBg + '">';
       html += '<div style="display:grid;' + _TRACE_GRID + ';font-size:12px;padding:6px 8px;align-items:center">';
       // Time
-      html += '<div style="color:var(--txm)">' + _fmtTime(t.first_seen) + '</div>';
+      // v2.5.0+: prepend group count badge if this is a grouped representative
+      var _grpBadge = '';
+      if (t._group_count && t._group_count > 1) {
+        _grpBadge = '<span title="' + t._group_count + ' similar traces grouped" style="display:inline-block;font-size:9px;background:rgba(167,139,250,0.22);color:#c4b5fd;border:1px solid rgba(167,139,250,0.5);border-radius:9px;padding:0 5px;margin-right:4px;line-height:1.4;font-weight:700">\u00D7' + t._group_count + '</span>';
+      }
+      html += '<div style="color:var(--txm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + _grpBadge + _fmtTime(t.first_seen) + '</div>';
       // Hash (full 16 chars if available, fallback to short)
       var _hashDisp = (t.pkt_hash_full || t.pkt_hash || '').toUpperCase();
-      html += '<div style="font-family:monospace;font-size:11px;background:' + hc + '22;color:' + hc + ';padding:1px 6px;border-radius:4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + _hashDisp + '">' + _hashDisp + '</div>';
-      // Channel
-      html += '<div style="color:var(--txs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + _traceFriendlyName(t.channel) + '</div>';
-      // Type
-      html += '<div style="color:var(--txs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (t.type || '-') + '</div>';
+      // v2.5.0+: hash is clickable to highlight related traces (same packet bouncing through mesh)
+      html += '<div onclick="event.stopPropagation();_traceShowRelated(\'' + _hashDisp + '\')" title="' + _hashDisp + ' (click to highlight related traces)" style="font-family:monospace;font-size:11px;background:' + hc + '22;color:' + hc + ';padding:1px 6px;border-radius:4px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:cell">' + _hashDisp + '</div>';
+      // Channel + TX target badges (v2.5.0+)
+      var _chHtml = '<span title="Source channel: ' + _traceFriendlyName(t.channel) + '">' + _traceFriendlyName(t.channel) + '</span>';
+      if (_txTargets.length > 0) {
+        var _tgtChips = '';
+        for (var _ti = 0; _ti < _txTargets.length; _ti++) {
+          var _tgtCh = _txTargets[_ti];
+          var _tgtCol = _hashColor('tx_' + _tgtCh);
+          _tgtChips += '<span title="TX target: ' + _traceFriendlyName(_tgtCh) + '" style="display:inline-block;font-size:9px;background:' + _tgtCol + '22;color:' + _tgtCol + ';border:1px solid ' + _tgtCol + '55;border-radius:3px;padding:0 4px;margin-left:3px;line-height:1.4">\u2197' + _traceFriendlyName(_tgtCh) + '</span>';
+        }
+        _chHtml = '<div style="display:flex;align-items:center;gap:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + _chHtml + _tgtChips + '</div>';
+      }
+      html += '<div style="color:var(--txs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + _chHtml + '</div>';
+      // Type with icon + echo badge (v2.5.0+)
+      var _typeIcon = _packetTypeIcon(t.type);
+      var _typeHtml = '<span style="margin-right:4px" title="' + (t.type || '-') + '">' + _typeIcon + '</span>' + (t.type || '-');
+      if (_selfEchoN > 0) {
+        _typeHtml += '<span title="Self-echoes (RF feedback / own TX heard back): ' + _selfEchoN + '" style="display:inline-block;font-size:9px;background:rgba(96,165,250,0.18);color:#60a5fa;border:1px solid rgba(96,165,250,0.5);border-radius:3px;padding:0 4px;margin-left:4px;line-height:1.4">\uD83D\uDD01 ' + _selfEchoN + '</span>';
+      }
+      if (_meshEchoN > 0) {
+        _typeHtml += '<span title="Mesh-echoes (neighbor repeater retransmitted our packet): ' + _meshEchoN + '" style="display:inline-block;font-size:9px;background:rgba(167,139,250,0.18);color:#a78bfa;border:1px solid rgba(167,139,250,0.5);border-radius:3px;padding:0 4px;margin-left:4px;line-height:1.4">\uD83D\uDD00 ' + _meshEchoN + '</span>';
+      }
+      html += '<div style="color:var(--txs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + _typeHtml + '</div>';
       // Hops
       var _hopsVal = (t.hops !== undefined && t.hops !== null) ? t.hops : '-';
       html += '<div style="text-align:center;color:var(--txs);font-family:monospace">' + _hopsVal + '</div>';
@@ -5060,14 +6707,26 @@ function renderPmCrcChart(channels) {
                      + (_lastHop ? '\nLast hop (most recent): ' + _lastHop : '')
                      + '\nDst: ' + (t.dst_hash ? _dstDisp : 'Broadcast (*)');
       html += '<div style="text-align:center;color:var(--txs);font-family:monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + _pathTitle + '">' + _pathText + '</div>';
-      // Duration
-      html += '<div style="text-align:right;white-space:nowrap;font-family:monospace;color:var(--txs)">' + (t.total_ms !== undefined ? t.total_ms.toFixed(1) + 'ms' : '-') + '</div>';
+      // Duration with speed-class color (v2.5.0+)
+      var _durColor = _spdCol || 'var(--txs)';
+      var _durIcon = _traceSpeedIcon(_spdCls);
+      var _durIconHtml = _durIcon ? ('<span style="margin-right:3px;font-size:10px" title="' + _spdCls + ' (' + (t.total_ms||0).toFixed(0) + 'ms)">' + _durIcon + '</span>') : '';
+      html += '<div style="text-align:right;white-space:nowrap;font-family:monospace;color:' + _durColor + '">' + _durIconHtml + (t.total_ms !== undefined ? t.total_ms.toFixed(1) + 'ms' : '-') + '</div>';
       // Status
       html += '<div style="text-align:center">' + _statusIcon(t.status) + '</div>';
       html += '</div>';
+      // v2.5.0+: Mini timeline sparkline (compact step visualization, always visible)
+      html += _renderTraceMiniTimeline(t);
       html += '<div id="trace-detail-' + _traceUid + '" data-trace-detail="1" style="display:none;padding:4px 8px 12px 20px;border-bottom:1px solid rgba(255,255,255,0.06)">';
+      // v2.5.0+: Export single trace as JSON (Phase 4)
+      html += '<div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:6px">'
+           +   '<button class="btn sec sm" onclick="event.stopPropagation();_tracePlay(\'' + _traceIdAttr.replace(/'/g, "\\'") + '\')" title="Play this trace step-by-step">\u25B6 Play</button>'
+           +   '<button class="btn sec sm" onclick="event.stopPropagation();_traceExportSingle(\'' + _traceIdAttr.replace(/'/g, "\\'") + '\')" title="Download this trace as JSON">\u2B07 Export trace</button>'
+           + '</div>';
       // v2.4.7+: Packet metadata panel (full hash, hops, path, src->dst, payload hex+ASCII)
       html += _tracingRenderMetadataPanel(t);
+      // v2.5.0+: Visual hop path diagram (Src -> hops -> Dst as colored pills)
+      html += _renderHopDiagram(t);
       if (t.steps && t.steps.length > 0) {
         // WM1303 v2.1.6: chronological sort safety net. Steps emitted nearly
         // simultaneously (e.g. lbt_check / cad_check / tx_send) may arrive
@@ -5268,6 +6927,9 @@ function renderPmCrcChart(channels) {
       var el = document.getElementById('trace-detail-' + hash);
       if (el) el.style.display = 'block';
     });
+    // v2.5.0+: Phase 4 - flash newly arrived traces (auto-refresh) and re-apply related highlight if active
+    try { _traceFlashNewRows(); } catch(e) { console.warn('trace flash failed', e); }
+    try { if (_traceRelatedHash) _traceShowRelated(_traceRelatedHash); } catch(e) { console.warn('related re-apply failed', e); }
   }
   var _origShowTabTrace = window.showTab;
   window.showTab = function(name, btn) {
