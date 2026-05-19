@@ -34,36 +34,42 @@ PI_USER="pi"
 CONFIG_DIR="/etc/pymc_repeater"
 UI_JSON="${CONFIG_DIR}/wm1303_ui.json"
 
+# --- Early parse of --non-interactive flag and WM1303_REGION env var ---------
+# Must happen BEFORE self-reexec so we can skip reexec when not needed.
+_EARLY_NON_INTERACTIVE=0
+for arg in "$@"; do
+    if [ "${arg}" = "--non-interactive" ] || [ "${arg}" = "-y" ]; then
+        _EARLY_NON_INTERACTIVE=1
+    fi
+done
+# If WM1303_REGION is set, the user already chose a region — no need for interactive wizard
+if [ -n "${WM1303_REGION}" ]; then
+    _EARLY_NON_INTERACTIVE=1
+fi
+
 # --- Self-reexec for interactive wizard when piped from curl -----------------
 # When run as `curl ... | sudo bash`, stdin is the pipe (no TTY), so the
 # interactive wizard cannot prompt the user. Fix: download ourselves to a temp
 # file and re-exec with the real TTY as stdin.
-# The _WM1303_REEXEC marker prevents infinite loops.
-if [ ! -t 0 ] && [ -z "${_WM1303_REEXEC}" ]; then
+# Skip reexec if: already reexeced, non-interactive requested, or region preset via env.
+if [ ! -t 0 ] && [ -z "${_WM1303_REEXEC}" ] && [ "${_EARLY_NON_INTERACTIVE}" -eq 0 ]; then
     _SELF="/tmp/wm1303_bootstrap_$$.sh"
     # We're being piped — download a fresh copy for re-execution
     if command -v curl &>/dev/null; then
-        curl -sSL "${BOOTSTRAP_RAW_URL}" -o "${_SELF}"
+        curl -sSL "${BOOTSTRAP_RAW_URL}" -o "${_SELF}" 2>/dev/null
     elif command -v wget &>/dev/null; then
-        wget -qO "${_SELF}" "${BOOTSTRAP_RAW_URL}"
+        wget -qO "${_SELF}" "${BOOTSTRAP_RAW_URL}" 2>/dev/null
     else
-        # No curl or wget after pipe consumed — cannot re-exec interactively
-        echo "  ⚠ No TTY detected and cannot re-download for interactive mode."
-        echo "    Continuing in non-interactive mode (region defaults to EU868)."
-        echo "    To select a region: WM1303_REGION=AU915 curl -sSL ... | sudo bash"
         _SELF=""
     fi
-    if [ -n "${_SELF}" ] && [ -f "${_SELF}" ] && [ -e /dev/tty ]; then
+    # Only reexec if /dev/tty is truly readable (not just exists)
+    if [ -n "${_SELF}" ] && [ -f "${_SELF}" ] && [ -r /dev/tty ] && bash -c 'echo ok </dev/tty' &>/dev/null; then
         chmod +x "${_SELF}"
         export _WM1303_REEXEC=1
-        # Preserve any env vars (WM1303_REGION, etc.) and pass all args
         exec bash "${_SELF}" "$@" </dev/tty
-    elif [ -n "${_SELF}" ] && [ -f "${_SELF}" ]; then
-        # /dev/tty not available (headless SSH, CI/CD, Docker, etc.)
-        echo "  ⚠ No TTY available for interactive wizard."
-        echo "    To select a region: WM1303_REGION=AU915 curl -sSL ... | sudo bash"
-        echo "    Supported: EU868 US915 AU915 AS923 IN865 JP920 KR920"
-        rm -f "${_SELF}"
+    else
+        # /dev/tty not usable — clean up and continue non-interactive
+        rm -f "${_SELF}" 2>/dev/null
     fi
 fi
 # Clean up reexec marker
@@ -76,8 +82,11 @@ for arg in "$@"; do
         NON_INTERACTIVE=1
     fi
 done
-# If stdin is STILL not a TTY after reexec attempt (e.g. /dev/tty unavailable),
-# fall back to non-interactive mode.
+# If WM1303_REGION is set via env, also non-interactive
+if [ -n "${WM1303_REGION}" ]; then
+    NON_INTERACTIVE=1
+fi
+# If stdin is STILL not a TTY after reexec attempt, fall back to non-interactive.
 if [ ! -t 0 ]; then
     NON_INTERACTIVE=1
 fi
