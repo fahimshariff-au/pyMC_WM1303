@@ -349,72 +349,74 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
         _sync_word_value, _sync_word_mode, _lorawan_public,
     )
 
+    # ---- Determine RF center frequency ----
+    # Priority order:
+    #   1. manual_center_hz (from rf_center_freq_mhz in wm1303_ui.json)
+    #   2. Auto-calculate from active channel frequencies
+    #   3. Region-based default (from region_config.py)
+    #   4. Fallback to EU868 center (869525000 Hz)
+    # This ensures the service starts even when ALL channels are disabled
+    # (e.g. fresh install where user has not configured channels yet).
+
     active_freqs = []  # track for logging
-    if not all_ui_channels:
-        logger.warning('_generate_bridge_conf: no channels in UI config, '
-                      'falling back to channels arg')
-        # Fallback: use passed-in channels (legacy behavior)
-        active_freqs = [int(cfg['frequency']) for cfg in channels.values()]
-        if not active_freqs:
-            # No A-D channels — try channel_e/f frequencies for center calc
-            _ef_freqs = []
-            try:
-                with open(UI_JSON_PATH, 'r') as _ef_fh:
-                    _ui_raw = json.loads(_ef_fh.read())
-                _che = _ui_raw.get('channel_e', {})
-                _chf = _ui_raw.get('channel_f', {})
-                if _che.get('enabled') and _che.get('frequency'):
-                    _ef_freqs.append(int(_che['frequency']))
-                if _chf.get('enabled') and _chf.get('frequency'):
-                    _ef_freqs.append(int(_chf['frequency']))
-            except Exception as _ef_ex:
-                logger.warning('_generate_bridge_conf: channel_e/f freq fallback error: %s', _ef_ex)
-            if _ef_freqs:
-                active_freqs = _ef_freqs
-                logger.info('_generate_bridge_conf: using channel_e/f frequencies '
-                           'for center calc (no A-D channels): %s', active_freqs)
-            else:
-                raise ValueError('No channels configured')
-        auto_center = sum(active_freqs) // len(active_freqs)
-    else:
+    auto_center = 0
+
+    # Collect active frequencies for auto-center calculation
+    if all_ui_channels:
         # Compute center from ACTIVE channels only — inactive channels don't
         # need IF chain slots and should not shift the center frequency.
         active_freqs = [int(ch.get('frequency', 0))
                         for ch in all_ui_channels
                         if ch.get('active', False) and ch.get('frequency', 0)]
-        if not active_freqs:
-            # No active A-D channels — try channel_e/f frequencies
-            try:
-                with open(UI_JSON_PATH, 'r') as _ef_fh2:
-                    _ui_raw2 = json.loads(_ef_fh2.read())
-                _che2 = _ui_raw2.get('channel_e', {})
-                _chf2 = _ui_raw2.get('channel_f', {})
-                if _che2.get('enabled') and _che2.get('frequency'):
-                    active_freqs.append(int(_che2['frequency']))
-                if _chf2.get('enabled') and _chf2.get('frequency'):
-                    active_freqs.append(int(_chf2['frequency']))
-            except Exception as _ef_ex2:
-                logger.warning('_generate_bridge_conf: channel_e/f freq fallback error: %s', _ef_ex2)
-            if not active_freqs:
-                # Still empty — fall back to all defined A-D frequencies
-                active_freqs = [int(ch.get('frequency', 0))
-                               for ch in all_ui_channels if ch.get('frequency', 0)]
-            if active_freqs:
-                logger.info('_generate_bridge_conf: using channel_e/f frequencies '
-                           'for center calc (no active A-D channels): %s', active_freqs)
-        if not active_freqs:
-            raise ValueError('No channel frequencies found in UI config')
-        auto_center = sum(active_freqs) // len(active_freqs)
+    elif channels:
+        # Legacy fallback: use passed-in channels dict
+        active_freqs = [int(cfg['frequency']) for cfg in channels.values()
+                        if cfg.get('frequency')]
 
-    # Use manual RF center frequency if set, otherwise use auto-calculated
+    # If no A-D channels active, try channel_e/f frequencies
+    if not active_freqs:
+        try:
+            if UI_JSON_PATH.exists():
+                _ui_raw_ef = json.loads(UI_JSON_PATH.read_text())
+                _che_ef = _ui_raw_ef.get('channel_e', {})
+                _chf_ef = _ui_raw_ef.get('channel_f', {})
+                if _che_ef.get('enabled') and _che_ef.get('frequency'):
+                    active_freqs.append(int(_che_ef['frequency']))
+                if _chf_ef.get('enabled') and _chf_ef.get('frequency'):
+                    active_freqs.append(int(_chf_ef['frequency']))
+        except Exception as _ef_ex:
+            logger.warning('_generate_bridge_conf: channel_e/f freq read error: %s', _ef_ex)
+
+    if active_freqs:
+        auto_center = sum(active_freqs) // len(active_freqs)
+        logger.info('_generate_bridge_conf: auto_center=%d Hz from %d active channel(s): %s',
+                    auto_center, len(active_freqs), active_freqs)
+
+    # Determine final center frequency
     if manual_center_hz:
         center = manual_center_hz
         logger.info('_generate_bridge_conf: center=%d Hz (MANUAL from rf_center_freq_mhz=%.3f MHz)',
                     center, manual_center_hz / 1_000_000)
-    else:
+    elif auto_center:
         center = auto_center
         logger.info('_generate_bridge_conf: center=%d Hz (AUTO from %d active channels)',
                     center, len(active_freqs))
+    else:
+        # No channels active AND no manual center set.
+        # Use region-based default center frequency so the service can start.
+        _region_defaults = {
+            'EU868': 869_525_000, 'US915': 915_500_000,
+            'AU915': 915_275_000, 'AS923': 923_200_000,
+            'IN865': 866_000_000, 'JP920': 923_200_000,
+            'KR920': 922_100_000,
+        }
+        center = _region_defaults.get(region_code, 869_525_000)
+        logger.warning(
+            '_generate_bridge_conf: no active channels and no rf_center_freq_mhz set. '
+            'Using region %s default center=%d Hz. '
+            'Radio will idle until channels are configured via the UI.',
+            region_code, center,
+        )
 
     # Validate channel frequencies against SX1302 IF range.
     # max_if_offset = (RF_RX_BW / 2) − (channel_BW / 2)
@@ -764,7 +766,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 'spread_factor': int(_chf_sf),
                 'sync_word': int(_sync_word_value) & 0xFFFF,
             },
-            'chan_FSK':       {'enable': True, 'radio': 0, 'if': 0,
+            'chan_FSK':       {'enable': False, 'radio': 0, 'if': 0,
                               'bandwidth': 125000, 'datarate': 50000},
             # SX1261 companion chip for LBT (Listen Before Talk)
             'sx1261_conf': {

@@ -1,101 +1,56 @@
 {
-  "channels": [
-    {
-      "name": "local-test",
-      "frequency": 869462000,
-      "active": true,
-      "preamble_length": 17,
-      "friendly_name": "Channel A",
-      "lbt_rssi_target": -80,
-      "tx_power": 27,
-      "lbt_enabled": true,
-      "cad_enabled": false,
-      "lbt_threshold": -80,
-      "spreading_factor": 10,
-      "coding_rate": "4/5",
-      "bandwidth": 125000
-    }
-  ],
-  "channel_e": {
-    "friendly_name": "EU-Narrow",
-    "boosted_rx": true,
-    "preamble_length": 17,
-    "cad_enabled": false,
-    "tx_power": 27,
-    "enabled": true,
-    "frequency": 869618000,
-    "bandwidth": 62500,
-    "spreading_factor": 8,
-    "coding_rate": "4/5",
-    "lbt_enabled": true,
-    "lbt_threshold": -80,
-    "name": "EU-Narrow",
-    "lbt_rssi_target": -80
-  },
-  "channel_f": {
-    "friendly_name": "Wideband",
-    "name": "Wideband",
-    "enabled": false,
-    "frequency": 869525000,
-    "bandwidth": 250000,
-    "spreading_factor": 9,
-    "coding_rate": "4/5",
-    "preamble_length": 16,
-    "tx_power": 22,
-    "lbt_enabled": true,
-    "lbt_threshold": -80,
-    "lbt_rssi_target": -80,
-    "cad_enabled": false,
-    "boosted_rx": false
-  },
-  "region": {
-    "code": "EU868",
-    "tx_freq_min": null,
-    "tx_freq_max": null
-  },
-  "rf_center_freq_mhz": 869.525,
-  "bridge": {
-    "rules": [
-      {
-        "name": "channel_e_to_rep",
-        "from": "channel_e",
-        "to": "repeater",
-        "enabled": true,
-        "tx_delay_ms": 0
-      },
-      {
-        "name": "rep_to_channel_e",
-        "from": "repeater",
-        "to": "channel_e",
-        "enabled": true,
-        "tx_delay_ms": 0
-      },
-      {
-        "name": "rep_to_cha",
-        "from": "repeater",
-        "to": "local-test",
-        "enabled": true,
-        "tx_delay_ms": 0
-      },
-      {
-        "name": "cha_to_rep",
-        "from": "local-test",
-        "to": "repeater",
-        "enabled": true,
-        "tx_delay_ms": 0
-      }
-    ]
-  },
-  "hal_advanced": {
-    "agc_reload_interval_s": 30
-  },
-  "adv_config": {
+    "channels": [],
+    "channel_e": {
+        "friendly_name": "Channel E",
+        "name": "Channel E",
+        "enabled": false,
+        "frequency": 0,
+        "bandwidth": 125000,
+        "spreading_factor": 8,
+        "coding_rate": "4/5",
+        "preamble_length": 17,
+        "tx_power": 22,
+        "lbt_enabled": false,
+        "lbt_threshold": -80,
+        "lbt_rssi_target": -80,
+        "cad_enabled": false,
+        "boosted_rx": true
+    },
+    "channel_f": {
+        "friendly_name": "Channel F",
+        "name": "Channel F",
+        "enabled": false,
+        "frequency": 0,
+        "bandwidth": 250000,
+        "spreading_factor": 9,
+        "coding_rate": "4/5",
+        "preamble_length": 16,
+        "tx_power": 22,
+        "lbt_enabled": false,
+        "lbt_threshold": -80,
+        "lbt_rssi_target": -80,
+        "cad_enabled": false,
+        "boosted_rx": false
+    },
+    "region": {
+        "code": "",
+        "tx_freq_min": null,
+        "tx_freq_max": null
+    },
+    "rf_center_freq_mhz": null,
+    "bridge": {
+        "rules": []
+    },
     "hal_advanced": {
-      "agc_reload_interval_s": 300
+        "agc_reload_interval_s": 300
+    },
+    "adv_config": {
+        "hal_advanced": {
+            "agc_reload_interval_s": 300
+        }
+    },
+    "sync_word": {
+        "value": 5156,
+        "mode": "private"
     }
-  },
-  "sync_word": {
-    "value": 5156,
-    "mode": "private"
-  }
 }

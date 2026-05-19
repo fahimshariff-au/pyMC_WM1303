@@ -1664,7 +1664,7 @@ function renderCh(){
     <select class="ci" onchange="chData[${i}].spreading_factor=parseInt(this.value)">${mkSel(SF,ch.spreading_factor)}</select>
     <select class="ci" onchange="chData[${i}].coding_rate=this.value">${mkSel(CR,ch.coding_rate)}</select>
     <input class="ci" type="number" min="6" max="65535" value="${ch.preamble_length||17}" onchange="chData[${i}].preamble_length=parseInt(this.value)">
-    <input class="ci" type="number" min="-120" max="0" value="${ch.lbt_rssi_target||-80}" onchange="chData[${i}].lbt_rssi_target=parseInt(this.value)">
+    <input class="ci" type="number" min="-120" max="0" value="${ch.lbt_threshold||ch.lbt_rssi_target||-80}" onchange="var v=parseInt(this.value);chData[${i}].lbt_threshold=v;chData[${i}].lbt_rssi_target=v">
     <div style="display:flex;align-items:center;justify-content:center"><label class="tgl"><input type="checkbox" ${ch.lbt_enabled?' checked':''} onchange="chData[${i}].lbt_enabled=this.checked;renderCh()"><span class="tsl"></span></label></div>
     <select class="ci" onchange="chData[${i}].tx_power=parseInt(this.value)">${_txPwrOpts(ch.tx_power||22)}</select>
     <div></div>
@@ -1676,7 +1676,7 @@ function renderCh(){
   // Defensive: sync_word is device-wide, never per-channel; strip any stale field
   chData.forEach(function(c){ if(c && 'sync_word' in c){ delete c.sync_word; } });
 }
-function addCh(){var _fn='Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[chData.length];chData.push({name:'ch-new',friendly_name:_fn,frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,tx_power:14,lbt_rssi_target:-80,lbt_enabled:false,active:false});renderCh();G('ch-list').lastElementChild?.scrollIntoView({behavior:'smooth'});}
+function addCh(){var _fn='Channel '+'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[chData.length];chData.push({name:'ch-new',friendly_name:_fn,frequency:868100000,bandwidth:125000,spreading_factor:7,coding_rate:'4/5',preamble_length:17,tx_power:14,lbt_threshold:-80,lbt_rssi_target:-80,lbt_enabled:false,active:false});renderCh();G('ch-list').lastElementChild?.scrollIntoView({behavior:'smooth'});}
 // -- Channel E load/save --
 let cheData={};
 async function loadChE(){
@@ -1690,7 +1690,7 @@ async function loadChE(){
     G('che-sf').value=String(d.spreading_factor||8);
     G('che-cr').value=d.coding_rate||'4/5';
     G('che-preamble').value=d.preamble_length||17;
-    G('che-lbt-rssi').value=d.lbt_rssi_target||-80;
+    G('che-lbt-rssi').value=d.lbt_threshold||d.lbt_rssi_target||-80;
     G('che-lbt-enabled').checked=!!d.lbt_enabled;
     fillTxPowerDropdown('che-tx-power', d.tx_power||22);
     G('che-boosted-rx').checked=d.boosted_rx!==false;
@@ -1707,6 +1707,7 @@ async function saveChE(restart){
     spreading_factor:parseInt(G('che-sf').value),
     coding_rate:G('che-cr').value,
     preamble_length:parseInt(G('che-preamble').value)||17,
+    lbt_threshold:parseInt(G('che-lbt-rssi').value)||-80,
     lbt_rssi_target:parseInt(G('che-lbt-rssi').value)||-80,
     lbt_enabled:G('che-lbt-enabled').checked,
     tx_power:parseInt(G('che-tx-power').value)||22,

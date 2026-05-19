@@ -1073,7 +1073,8 @@ class WM1303API:
         for i, ch in enumerate(chs):
             ch.setdefault("preamble_length", 17)
             ch.setdefault("friendly_name", "Channel " + (_abc[i] if i < len(_abc) else str(i + 1)))
-            ch.setdefault("lbt_rssi_target", -80)
+            ch.setdefault("lbt_threshold", ch.get("lbt_rssi_target", -80))
+            ch.setdefault("lbt_rssi_target", ch.get("lbt_threshold", -80))
             ch.setdefault("tx_power", 14)
             ch.setdefault("lbt_enabled", False)
             ch.setdefault("cad_enabled", False)

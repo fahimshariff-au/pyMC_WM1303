@@ -28,21 +28,51 @@
 set -e
 
 REPO_URL="https://github.com/HansvanMeer/pyMC_WM1303.git"
+BOOTSTRAP_RAW_URL="https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh"
 INSTALL_DIR="/home/pi/pyMC_WM1303"
 PI_USER="pi"
 CONFIG_DIR="/etc/pymc_repeater"
 UI_JSON="${CONFIG_DIR}/wm1303_ui.json"
 
-# --- Parse --non-interactive flag (also honoured if stdin is not a TTY) ------
+# --- Self-reexec for interactive wizard when piped from curl -----------------
+# When run as `curl ... | sudo bash`, stdin is the pipe (no TTY), so the
+# interactive wizard cannot prompt the user. Fix: download ourselves to a temp
+# file and re-exec with the real TTY as stdin.
+# The _WM1303_REEXEC marker prevents infinite loops.
+if [ ! -t 0 ] && [ -z "${_WM1303_REEXEC}" ]; then
+    _SELF="/tmp/wm1303_bootstrap_$$.sh"
+    # We're being piped — download a fresh copy for re-execution
+    if command -v curl &>/dev/null; then
+        curl -sSL "${BOOTSTRAP_RAW_URL}" -o "${_SELF}"
+    elif command -v wget &>/dev/null; then
+        wget -qO "${_SELF}" "${BOOTSTRAP_RAW_URL}"
+    else
+        # No curl or wget after pipe consumed — cannot re-exec interactively
+        echo "  ⚠ No TTY detected and cannot re-download for interactive mode."
+        echo "    Continuing in non-interactive mode (region defaults to EU868)."
+        echo "    To select a region: WM1303_REGION=AU915 curl -sSL ... | sudo bash"
+        _SELF=""
+    fi
+    if [ -n "${_SELF}" ] && [ -f "${_SELF}" ]; then
+        chmod +x "${_SELF}"
+        export _WM1303_REEXEC=1
+        # Preserve any env vars (WM1303_REGION, etc.) and pass all args
+        exec bash "${_SELF}" "$@" </dev/tty
+    fi
+fi
+# Clean up reexec marker
+unset _WM1303_REEXEC 2>/dev/null || true
+
+# --- Parse --non-interactive flag --------------------------------------------
 NON_INTERACTIVE=0
 for arg in "$@"; do
     if [ "${arg}" = "--non-interactive" ] || [ "${arg}" = "-y" ]; then
         NON_INTERACTIVE=1
     fi
 done
+# If stdin is STILL not a TTY after reexec attempt (e.g. /dev/tty unavailable),
+# fall back to non-interactive mode.
 if [ ! -t 0 ]; then
-    # stdin is not a TTY (e.g. piped from curl). Wizard becomes non-interactive
-    # unless env vars are explicitly set; we still respect WM1303_REGION/WM1303_PRESET.
     NON_INTERACTIVE=1
 fi
 
@@ -138,7 +168,15 @@ run_wizard() {
         echo "  ✓ Region from env: ${WM1303_REGION}"
     elif [ "${NON_INTERACTIVE}" -eq 1 ]; then
         WM1303_REGION="EU868"
-        echo "  ℹ Non-interactive mode: defaulting region to EU868"
+        echo ""
+        echo "  ╔══════════════════════════════════════════════════════════╗"
+        echo "  ║  ⚠  NON-INTERACTIVE MODE                                ║"
+        echo "  ║  Region defaulting to EU868.                             ║"
+        echo "  ║  To set a different region, re-run with:                 ║"
+        echo "  ║    WM1303_REGION=AU915 curl -sSL ... | sudo bash         ║"
+        echo "  ║  Supported: EU868 US915 AU915 AS923 IN865 JP920 KR920    ║"
+        echo "  ╚══════════════════════════════════════════════════════════╝"
+        echo ""
     else
         echo "  Available regions:"
         local i=1
@@ -160,42 +198,19 @@ run_wizard() {
     fi
     echo "  ► Selected region: ${WM1303_REGION}"
 
-    # --- Preset selection -------------------------------------------------
-    local presets_for_region
-    presets_for_region=$(jq -r --arg rg "${WM1303_REGION}" '.presets[] | select(.region==$rg) | .name' "${presets_file}")
-    if [ -z "${presets_for_region}" ]; then
-        echo "  ⚠ No presets for region ${WM1303_REGION}, using EU-Default"
-        WM1303_PRESET="EU-Default"
+    # --- Preset auto-select (1 preset per region in presets v3) -----------
+    # Presets v3 contain only region + rf_center_freq_mhz, no channel configs.
+    # Preset name matches region code, so we auto-select.
+    WM1303_PRESET="${WM1303_PRESET:-${WM1303_REGION}}"
+    local preset_desc
+    preset_desc=$(jq -r --arg n "${WM1303_PRESET}" \
+        '.presets[] | select(.name==$n or .region==$n) | .description // ""' \
+        "${presets_file}" | head -n1)
+    if [ -n "${preset_desc}" ]; then
+        echo "  ► Region preset: ${WM1303_PRESET} — ${preset_desc}"
     else
-        if [ -n "${WM1303_PRESET}" ]; then
-            echo "  ✓ Preset from env: ${WM1303_PRESET}"
-        elif [ "${NON_INTERACTIVE}" -eq 1 ]; then
-            WM1303_PRESET=$(echo "${presets_for_region}" | head -n1)
-            echo "  ℹ Non-interactive mode: using first preset for ${WM1303_REGION}: ${WM1303_PRESET}"
-        else
-            echo ""
-            echo "  Available presets for ${WM1303_REGION}:"
-            local j=1
-            local preset_arr=()
-            while IFS= read -r pr; do
-                preset_arr+=("${pr}")
-                local desc
-                desc=$(jq -r --arg n "${pr}" '.presets[] | select(.name==$n) | .description // ""' "${presets_file}")
-                echo "    ${j}) ${pr} — ${desc}"
-                j=$((j+1))
-            done <<< "${presets_for_region}"
-            echo ""
-            read -rp "  Select preset [1-${#preset_arr[@]}, default 1]: " pr_choice
-            pr_choice=${pr_choice:-1}
-            if ! [[ "${pr_choice}" =~ ^[0-9]+$ ]] || [ "${pr_choice}" -lt 1 ] || [ "${pr_choice}" -gt "${#preset_arr[@]}" ]; then
-                echo "  ⚠ Invalid choice, using first preset"
-                WM1303_PRESET="${preset_arr[0]}"
-            else
-                WM1303_PRESET="${preset_arr[$((pr_choice-1))]}"
-            fi
-        fi
+        echo "  ► Region preset: ${WM1303_PRESET}"
     fi
-    echo "  ► Selected preset: ${WM1303_PRESET}"
 
     # --- Device-wide LoRa network Sync Word ------------------------------
     # WM1303_SYNC_WORD env var accepts only 'private' or 'public'.
@@ -241,10 +256,11 @@ run_wizard() {
     write_wizard_config
 }
 
-# Write wizard output to /etc/pymc_repeater/wm1303_ui.json by merging the
-# preset's channel/channel_e/channel_f defaults plus the chosen region into
-# the template wm1303_ui.json. install.sh's "copy template if missing" step
-# will then leave our wizard-written file untouched.
+# Write wizard output to /etc/pymc_repeater/wm1303_ui.json.
+# Presets v3 contain only region + rf_center_freq_mhz (no channel configs).
+# All channels start disabled — the user configures them via the UI after
+# installation. The template wm1303_ui.json provides the skeleton with
+# disabled channel defaults.
 write_wizard_config() {
     local presets_file="${INSTALL_DIR}/config/presets.json"
     local template="${INSTALL_DIR}/config/wm1303_ui.json"
@@ -254,50 +270,42 @@ write_wizard_config() {
     fi
     mkdir -p "${CONFIG_DIR}"
 
-    # Extract the chosen preset object
-    local preset_obj
-    preset_obj=$(jq --arg n "${WM1303_PRESET}" '.presets[] | select(.name==$n)' "${presets_file}")
-    if [ -z "${preset_obj}" ] || [ "${preset_obj}" = "null" ]; then
-        echo "  ⚠ Preset '${WM1303_PRESET}' not found in presets.json; using template defaults"
-        cp "${template}" "${UI_JSON}"
-        # Still apply region + device-wide sync_word
-        jq --arg code "${WM1303_REGION}" \
-           --arg sw_mode "${WM1303_SYNC_WORD_MODE}" \
-           --argjson sw_value "${WM1303_SYNC_WORD_VALUE}" \
-           '.region = {"code": $code, "tx_freq_min": null, "tx_freq_max": null}
-            | .sync_word = {"value": $sw_value, "mode": $sw_mode}' \
-           "${UI_JSON}" > "${UI_JSON}.tmp" && mv "${UI_JSON}.tmp" "${UI_JSON}"
-        chown ${PI_USER}:${PI_USER} "${UI_JSON}"
-        echo "  ✓ Wrote ${UI_JSON} (region + sync_word only, default preset)"
-        return 0
+    # Start from template (all channels disabled)
+    cp "${template}" "${UI_JSON}"
+
+    # Extract rf_center_freq_mhz from the chosen preset (if available)
+    local rf_center="null"
+    if [ -f "${presets_file}" ]; then
+        local _rc
+        _rc=$(jq -r --arg n "${WM1303_PRESET:-${WM1303_REGION}}" \
+            '.presets[] | select(.name==$n or .region==$n) | .rf_center_freq_mhz // empty' \
+            "${presets_file}" | head -n1)
+        if [ -n "${_rc}" ] && [ "${_rc}" != "null" ]; then
+            rf_center="${_rc}"
+        fi
     fi
 
-    # Build merged config: template + preset channels/channel_e/channel_f + region + sync_word.
-    # sync_word is DEVICE-WIDE (top-level), never per-channel. We always write
-    # the wizard-selected sync_word, ignoring any leftover per-channel values
-    # from older presets.
-    local merged
-    merged=$(jq -n \
-        --slurpfile tpl "${template}" \
-        --argjson preset "${preset_obj}" \
-        --arg region_code "${WM1303_REGION}" \
-        --arg sw_mode "${WM1303_SYNC_WORD_MODE}" \
-        --argjson sw_value "${WM1303_SYNC_WORD_VALUE}" \
-        '
-        ($tpl[0]) as $t
-        | $t
-          + ({"channels": ($preset.channels // $t.channels)})
-          + ({"channel_e": ($preset.channel_e // $t.channel_e)})
-          + ({"channel_f": ($preset.channel_f // $t.channel_f)})
-          + ({"region": {"code": $region_code, "tx_freq_min": null, "tx_freq_max": null}})
-          + ({"sync_word": {"value": $sw_value, "mode": $sw_mode}})
-        ')
+    # Merge region, sync_word, and rf_center_freq_mhz into the config
+    jq --arg code "${WM1303_REGION}" \
+       --arg sw_mode "${WM1303_SYNC_WORD_MODE}" \
+       --argjson sw_value "${WM1303_SYNC_WORD_VALUE}" \
+       --argjson rf_center "${rf_center}" \
+       '.region = {"code": $code, "tx_freq_min": null, "tx_freq_max": null}
+        | .sync_word = {"value": $sw_value, "mode": $sw_mode}
+        | if $rf_center != null then .rf_center_freq_mhz = $rf_center else . end' \
+       "${UI_JSON}" > "${UI_JSON}.tmp" && mv "${UI_JSON}.tmp" "${UI_JSON}"
 
-    echo "${merged}" > "${UI_JSON}"
     chown ${PI_USER}:${PI_USER} "${UI_JSON}"
-    printf "  ✓ Wrote %s with region=%s, preset=%s, sync_word=%s (0x%04X)\n" \
-        "${UI_JSON}" "${WM1303_REGION}" "${WM1303_PRESET}" \
-        "${WM1303_SYNC_WORD_MODE}" "${WM1303_SYNC_WORD_VALUE}"
+    if [ "${rf_center}" != "null" ]; then
+        printf "  ✓ Wrote %s — region=%s, rf_center=%.3f MHz, sync_word=%s (0x%04X)\n" \
+            "${UI_JSON}" "${WM1303_REGION}" "${rf_center}" \
+            "${WM1303_SYNC_WORD_MODE}" "${WM1303_SYNC_WORD_VALUE}"
+    else
+        printf "  ✓ Wrote %s — region=%s, sync_word=%s (0x%04X)\n" \
+            "${UI_JSON}" "${WM1303_REGION}" \
+            "${WM1303_SYNC_WORD_MODE}" "${WM1303_SYNC_WORD_VALUE}"
+    fi
+    echo "  ℹ All channels start disabled. Configure channels via the WM1303 Manager UI."
 }
 
 if [ "${IS_UPGRADE}" -eq 0 ]; then
