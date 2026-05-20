@@ -1375,6 +1375,36 @@ class WM1303Backend:
         # Write bridge_conf.json with SSOT overlay
         self._write_pktfwd_config()
 
+        # Check if ANY channel is active before starting pkt_fwd.
+        # If no channels are configured (fresh install), run in IDLE mode:
+        # webserver + API are available so the user can configure channels,
+        # but pkt_fwd is NOT started (it crashes without active channels).
+        _has_active_channels = False
+        try:
+            _ui_data = json.loads(UI_JSON_PATH.read_text()) if UI_JSON_PATH.exists() else {}
+            _ui_channels = _ui_data.get('channels', [])
+            _che = _ui_data.get('channel_e', {})
+            _chf = _ui_data.get('channel_f', {})
+            _has_active_channels = (
+                any(ch.get('active', False) for ch in _ui_channels) or
+                _che.get('enabled', False) or
+                _chf.get('enabled', False)
+            )
+        except Exception as _ex:
+            logger.warning('WM1303Backend: error checking active channels: %s', _ex)
+
+        if not _has_active_channels:
+            logger.warning(
+                'WM1303Backend: NO active channels configured. '
+                'Running in IDLE mode (web UI available, radio not started). '
+                'Configure channels via http://<ip>:8000/wm1303.html then restart the service.'
+            )
+            self._idle_mode = True
+            self._running = True
+            return True
+
+        self._idle_mode = False
+
         # Start UDP server
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
