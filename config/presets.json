@@ -1,0 +1,55 @@
+{
+    "version": 3,
+    "description": "Region presets for the WM1303 installation wizard. Each preset defines ONLY the regulatory region and a recommended RF center frequency. Channels are NOT pre-configured — users configure channels after installation via the Channels tab in the WM1303 Manager UI.",
+    "note_for_ui": "Presets are install-time only. After install, the user configures channels manually. The rf_center_freq_mhz is the default SX1302 radio_0 center frequency for the region.",
+    "presets": [
+        {
+            "name": "EU868",
+            "region": "EU868",
+            "rf_center_freq_mhz": 869.525,
+            "description": "Europe 863-870 MHz ISM band (SRD). Center frequency in the 869 MHz sub-band."
+        },
+        {
+            "name": "US915",
+            "region": "US915",
+            "rf_center_freq_mhz": 915.5,
+            "description": "North America 902-928 MHz ISM band. Center frequency in the 915 MHz uplink segment."
+        },
+        {
+            "name": "AU915",
+            "region": "AU915",
+            "rf_center_freq_mhz": 915.275,
+            "description": "Australia / Brazil 915-928 MHz ISM band. Center frequency for the AU-Mid community standard (915.075 MHz channel)."
+        },
+        {
+            "name": "AS923",
+            "region": "AS923",
+            "rf_center_freq_mhz": 923.2,
+            "description": "Asia 915-928 MHz (sub-regions AS923-1/2/3/4 vary). Center frequency for AS923-1."
+        },
+        {
+            "name": "IN865",
+            "region": "IN865",
+            "rf_center_freq_mhz": 866.0,
+            "description": "India 865-867 MHz ISM band. Center frequency in the middle of the band."
+        },
+        {
+            "name": "JP920",
+            "region": "JP920",
+            "rf_center_freq_mhz": 923.2,
+            "description": "Japan 920-928 MHz (ARIB STD-T108). Center frequency for common JP sub-band."
+        },
+        {
+            "name": "KR920",
+            "region": "KR920",
+            "rf_center_freq_mhz": 922.1,
+            "description": "South Korea 920.9-923.3 MHz. Center frequency in the middle of the band."
+        },
+        {
+            "name": "Custom",
+            "region": "CUSTOM",
+            "rf_center_freq_mhz": null,
+            "description": "User-defined frequency limits. Set the RF center frequency and TX bounds manually after installation."
+        }
+    ]
+}

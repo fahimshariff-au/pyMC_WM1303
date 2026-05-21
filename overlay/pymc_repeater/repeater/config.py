@@ -9,6 +9,30 @@ import yaml
 logger = logging.getLogger("Config")
 
 
+def resolve_storage_dir(
+    config: Dict[str, Any],
+    *,
+    config_path: Optional[str] = None,
+    default: str = "/var/lib/pymc_repeater",
+) -> Path:
+
+    storage_dir_cfg = (
+        config.get("storage", {}).get("storage_dir")
+        or config.get("storage_dir")
+        or default
+    )
+
+    storage_dir = Path(str(storage_dir_cfg)).expanduser()
+    if not storage_dir.is_absolute():
+        if config_path:
+            base_dir = Path(config_path).expanduser().resolve().parent
+            storage_dir = (base_dir / storage_dir).resolve()
+        else:
+            storage_dir = storage_dir.resolve()
+
+    return storage_dir
+
+
 def get_node_info(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract node name, radio configuration, and MQTT settings from config.
@@ -65,6 +89,16 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     except Exception as e:
         raise RuntimeError(f"Failed to load configuration from {config_path}: {e}") from e
 
+    storage_dir = resolve_storage_dir(config, config_path=config_path)
+    if "storage" not in config or not isinstance(config.get("storage"), dict):
+        config["storage"] = {}
+    config["storage"]["storage_dir"] = str(storage_dir)
+
+    if config.get("storage_dir"):
+        logger.warning(
+            "Deprecated config key 'storage_dir' detected; prefer 'storage.storage_dir'."
+        )
+
     if "mesh" not in config:
         config["mesh"] = {}
 
@@ -100,6 +134,14 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
             "time_sync_min_valid_year": 2020,
             "persist_gps_fix_to_config": False,
             "persist_gps_fix_interval_seconds": 600.0,
+        }
+
+    if "sensors" not in config:
+        config["sensors"] = {
+            "enabled": False,
+            "poll_interval_seconds": 30.0,
+            "auto_install_packages": False,
+            "definitions": [],
         }
 
     # Ensure repeater.security exists with defaults for upgrades from older configs
@@ -333,7 +375,7 @@ def get_radio_for_board(board_config: dict):
             "bandwidth": int(radio_config["bandwidth"]),
             "coding_rate": radio_config["coding_rate"],
             "preamble_length": radio_config["preamble_length"],
-            "sync_word": radio_config["sync_word"],
+            "sync_word": _parse_int(radio_config.get("sync_word", 0x12)),
         }
 
         en_pin = _parse_int(spi_config.get("en_pin"), default=None)
@@ -408,13 +450,105 @@ def get_radio_for_board(board_config: dict):
 
         return radio
 
+    elif radio_type == "pymc_tcp":
+        try:
+            from pymc_core.hardware.tcp_radio import TCPLoRaRadio
+        except ImportError:
+            raise RuntimeError(
+                "pymc_tcp radio requires pyMC_core >= the release that includes "
+                "PR pyMC-dev/pyMC_core#68 (merged 2026-05-13). "
+                "Reinstall the [hardware] extra to pick it up."
+            ) from None
+
+        tcp_cfg = board_config.get("pymc_tcp")
+        if not tcp_cfg:
+            raise ValueError(
+                "Missing 'pymc_tcp' section in configuration file for radio_type: pymc_tcp"
+            )
+
+        host = tcp_cfg.get("host")
+        if not host:
+            raise ValueError(
+                "Missing 'host' in 'pymc_tcp' section (modem hostname or LAN IP)"
+            )
+
+        radio_cfg = board_config.get("radio") or {}
+        radio = TCPLoRaRadio(
+            host=host,
+            port=int(tcp_cfg.get("port", 5055)),
+            token=tcp_cfg.get("token", ""),
+            connect_timeout=float(tcp_cfg.get("connect_timeout", 5.0)),
+            frequency=int(radio_cfg.get("frequency", 869618000)),
+            bandwidth=int(radio_cfg.get("bandwidth", 62500)),
+            spreading_factor=int(radio_cfg.get("spreading_factor", 8)),
+            coding_rate=int(radio_cfg.get("coding_rate", 8)),
+            tx_power=int(radio_cfg.get("tx_power", 22)),
+            sync_word=_parse_int(radio_cfg.get("sync_word", 0x12)),
+            preamble_length=int(radio_cfg.get("preamble_length", 16)),
+            lbt_enabled=bool(tcp_cfg.get("lbt_enabled", True)),
+            lbt_max_attempts=int(tcp_cfg.get("lbt_max_attempts", 5)),
+        )
+
+        try:
+            radio.begin()
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize pymc_tcp radio: {e}") from e
+
+        return radio
+
+    elif radio_type == "pymc_usb":
+        try:
+            from pymc_core.hardware.usb_radio import USBLoRaRadio
+        except ImportError:
+            raise RuntimeError(
+                "pymc_usb radio requires pyMC_core >= the release that includes "
+                "PR pyMC-dev/pyMC_core#68 (merged 2026-05-13). "
+                "Reinstall the [hardware] extra to pick it up."
+            ) from None
+
+        usb_cfg = board_config.get("pymc_usb")
+        if not usb_cfg:
+            raise ValueError(
+                "Missing 'pymc_usb' section in configuration file for radio_type: pymc_usb"
+            )
+
+        port = usb_cfg.get("port")
+        if not port:
+            raise ValueError(
+                "Missing 'port' in 'pymc_usb' section (e.g. /dev/ttyACM0)"
+            )
+
+        radio_cfg = board_config.get("radio") or {}
+        radio = USBLoRaRadio(
+            port=port,
+            baudrate=int(usb_cfg.get("baudrate", 921600)),
+            frequency=int(radio_cfg.get("frequency", 869618000)),
+            bandwidth=int(radio_cfg.get("bandwidth", 62500)),
+            spreading_factor=int(radio_cfg.get("spreading_factor", 8)),
+            coding_rate=int(radio_cfg.get("coding_rate", 8)),
+            tx_power=int(radio_cfg.get("tx_power", 22)),
+            sync_word=_parse_int(radio_cfg.get("sync_word", 0x12)),
+            preamble_length=int(radio_cfg.get("preamble_length", 16)),
+            lbt_enabled=bool(usb_cfg.get("lbt_enabled", True)),
+            lbt_max_attempts=int(usb_cfg.get("lbt_max_attempts", 5)),
+        )
+
+        try:
+            radio.begin()
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize pymc_usb radio: {e}") from e
+
+        return radio
+
     elif radio_type == "wm1303":
+        # WM1303 SenseCAP M1 backend (pyMC_WM1303 overlay)
         try:
             from pymc_core.hardware.wm1303_backend import WM1303Backend
         except ImportError:
             raise RuntimeError(
                 "WM1303 support requires pyMC_core with WM1303Backend. "
-                "Install your fork with: pip install -e /path/to/pyMC_core"
+                "Install the pyMC_WM1303 overlay (or run install.sh from "
+                "https://github.com/HansvanMeer/pyMC_WM1303)."
             ) from None
 
         radio = WM1303Backend(config=board_config)
@@ -443,5 +577,6 @@ def get_radio_for_board(board_config: dict):
         return radio
 
     raise RuntimeError(
-        f"Unknown radio type: {radio_type}. Supported: sx1262, sx1262_ch341, kiss (or kiss-modem), wm1303"
+        f"Unknown radio type: {radio_type}. "
+        "Supported: sx1262, sx1262_ch341, kiss (or kiss-modem), pymc_tcp, pymc_usb, wm1303"
     )

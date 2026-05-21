@@ -1,78 +1,56 @@
 {
-  "channels": [
-    {
-      "name": "AU-Mid",
-      "frequency": 915075000,
-      "active": true,
-      "preamble_length": 16,
-      "friendly_name": "Channel A",
-      "lbt_rssi_target": -90,
-      "tx_power": 20,
-      "lbt_enabled": true,
-      "cad_enabled": false,
-      "lbt_threshold": -90,
-      "spreading_factor": 9,
-      "coding_rate": "4/5",
-      "bandwidth": 125000,
-      "sync_word": 13380
-    }
-  ],
-  "bridge": {
-    "rules": [
-      {
-        "name": "channel_e_to_rep",
-        "from": "channel_e",
-        "to": "repeater",
-        "enabled": true,
-        "tx_delay_ms": 0
-      },
-      {
-        "name": "rep_to_channel_e",
-        "from": "repeater",
-        "to": "channel_e",
-        "enabled": true,
-        "tx_delay_ms": 0
-      },
-      {
-        "name": "rep_to_cha",
-        "from": "repeater",
-        "to": "AU-Mid",
-        "enabled": true,
-        "tx_delay_ms": 0
-      },
-      {
-        "name": "cha_to_rep",
-        "from": "AU-Mid",
-        "to": "repeater",
-        "enabled": true,
-        "tx_delay_ms": 0
-      }
-    ]
-  },
-  "channel_e": {
-    "friendly_name": "AU-Narrow",
-    "boosted_rx": true,
-    "preamble_length": 16,
-    "cad_enabled": false,
-    "tx_power": 27,
-    "enabled": true,
-    "frequency": 923125000,
-    "bandwidth": 62500,
-    "spreading_factor": 8,
-    "coding_rate": "4/5",
-    "lbt_enabled": true,
-    "lbt_threshold": -90,
-    "name": "AU-Narrow",
-    "lbt_rssi_target": -90,
-    "sync_word": 13380
-  },
-  "rf_center_freq_mhz": 915.275,
-  "hal_advanced": {
-    "agc_reload_interval_s": 30
-  },
-  "adv_config": {
+    "channels": [],
+    "channel_e": {
+        "friendly_name": "Channel E",
+        "name": "Channel E",
+        "enabled": false,
+        "frequency": 0,
+        "bandwidth": 125000,
+        "spreading_factor": 8,
+        "coding_rate": "4/5",
+        "preamble_length": 17,
+        "tx_power": 22,
+        "lbt_enabled": false,
+        "lbt_threshold": -80,
+        "lbt_rssi_target": -80,
+        "cad_enabled": false,
+        "boosted_rx": true
+    },
+    "channel_f": {
+        "friendly_name": "Channel F",
+        "name": "Channel F",
+        "enabled": false,
+        "frequency": 0,
+        "bandwidth": 250000,
+        "spreading_factor": 9,
+        "coding_rate": "4/5",
+        "preamble_length": 16,
+        "tx_power": 22,
+        "lbt_enabled": false,
+        "lbt_threshold": -80,
+        "lbt_rssi_target": -80,
+        "cad_enabled": false,
+        "boosted_rx": false
+    },
+    "region": {
+        "code": "",
+        "tx_freq_min": null,
+        "tx_freq_max": null
+    },
+    "rf_center_freq_mhz": null,
+    "bridge": {
+        "rules": []
+    },
     "hal_advanced": {
-      "agc_reload_interval_s": 300
+        "agc_reload_interval_s": 300
+    },
+    "adv_config": {
+        "hal_advanced": {
+            "agc_reload_interval_s": 300
+        }
+    },
+    "sync_word": {
+        "value": 5156,
+        "mode": "private"
     }
-  }
 }
