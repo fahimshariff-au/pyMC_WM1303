@@ -3686,7 +3686,7 @@ class WM1303Backend:
         # Track hash for self-echo detection at enqueue time (stable payload hash)
         _tx_stable = _extract_mc_payload(data)
         _tx_hash = hashlib.md5(data[0:1] + _tx_stable).hexdigest()[:12]
-        if data[0] != 0x09:  # Don't echo-filter TRACE packets (type 0x09)
+        if (data[0] >> 2) & 0x0F != 0x09:  # Don't echo-filter TRACE packets (TYPE nibble)
             self._tx_echo_hashes[_tx_hash] = time.monotonic()
         logger.info('WM1303Backend: TX echo hash pre-stored: %s (ch=%s)', _tx_hash, channel_id)
 
@@ -3950,7 +3950,7 @@ class WM1303Backend:
                     _tx_payload = base64.b64decode(_tx_data_b64)
                     _tx_stable = _extract_mc_payload(_tx_payload)
                     _tx_hash = hashlib.md5(_tx_payload[0:1] + _tx_stable).hexdigest()[:12]
-                    if _tx_payload[0] != 0x09:  # Don't echo-filter TRACE packets (type 0x09)
+                    if (_tx_payload[0] >> 2) & 0x0F != 0x09:  # Don't echo-filter TRACE packets (TYPE nibble)
                         self._tx_echo_hashes[_tx_hash] = time.monotonic()
                     logger.info('WM1303Backend: TX echo hash stored: %s (total=%d)',
                                _tx_hash, len(self._tx_echo_hashes))
