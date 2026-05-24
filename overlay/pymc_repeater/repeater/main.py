@@ -1011,6 +1011,7 @@ class RepeaterDaemon:
         """
         from pymc_core.protocol.packet import Packet
         from pymc_core.node.handlers.advert import AdvertHandler
+        from pymc_core.node.handlers.trace import TraceHandler
 
         # Parse raw bytes into Packet object
         pkt = Packet()
@@ -1042,6 +1043,45 @@ class RepeaterDaemon:
                             _rssi, _snr)
             except Exception as e:
                 logger.warning("BridgeRepeaterHandler: advert processing error: %s", e)
+
+        # WM1303 v2.4.11: dispatch TRACE packets to TraceHelper for proper
+        # response generation. The upstream pymc_repeater packet_router.py
+        # routes TRACE via TraceHelper.process_trace_packet(), but our bridge
+        # bypasses that router entirely. Without this dispatch, TRACE pings
+        # to the repeater are silently forwarded as flood broadcasts and
+        # never produce a TRACE response, so companion node pings time out.
+        #
+        # We temporarily override the TraceHelper packet_injector so that the
+        # forwarded TRACE (with our SNR appended) goes through the bridge
+        # engine TX path (channel_e/f), not via the router (which only knows
+        # about classic radios[0]/[1]).
+        if payload_type == TraceHandler.payload_type() and self.trace_helper:
+            _saved_injector = self.trace_helper.packet_injector
+
+            async def _bridge_trace_injector(fwd_packet, wait_for_ack=False):
+                try:
+                    fwd_bytes = fwd_packet.write_to()
+                except Exception as e:
+                    logger.warning("BridgeRepeaterHandler: trace forward serialize failed: %s", e)
+                    return
+                if self.bridge_engine:
+                    await self.bridge_engine.inject_packet(
+                        'repeater', fwd_bytes, origin_channel=origin_channel
+                    )
+
+            self.trace_helper.packet_injector = _bridge_trace_injector
+            try:
+                await self.trace_helper.process_trace_packet(pkt)
+                logger.info(
+                    "BridgeRepeaterHandler: TRACE dispatched to TraceHelper "
+                    "(origin_channel=%s, rssi=%s, snr=%s)",
+                    origin_channel, rssi, snr
+                )
+            except Exception as e:
+                logger.warning("BridgeRepeaterHandler: trace processing error: %s", e)
+            finally:
+                self.trace_helper.packet_injector = _saved_injector
+            return
 
         # Run repeater forwarding logic
         result = self.repeater_handler.process_packet(pkt)

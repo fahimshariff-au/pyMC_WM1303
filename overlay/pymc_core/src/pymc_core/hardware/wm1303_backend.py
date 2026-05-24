@@ -3677,10 +3677,18 @@ class WM1303Backend:
             tx_power = int(cfg.get('tx_power', 14))
 
         # Track hash for self-echo detection at enqueue time (stable payload hash)
-        _tx_stable = _extract_mc_payload(data)
-        _tx_hash = hashlib.md5(data[0:1] + _tx_stable).hexdigest()[:12]
-        self._tx_echo_hashes[_tx_hash] = time.monotonic()
-        logger.info('WM1303Backend: TX echo hash pre-stored: %s (ch=%s)', _tx_hash, channel_id)
+        # Skip TRACE packets (MeshCore TYPE=9): byte 0 encodes [VER(2)|TYPE(4)|ROUTE(2)],
+        # so TYPE nibble must be extracted via (byte0 >> 2) & 0x0F.
+        # Without this guard, TRACE_RESP packets match the stored TX hash and get
+        # discarded as unknown_echo, breaking all pings. (Credit: @fahimshariff-au, issue #7)
+        _tx_type = (data[0] >> 2) & 0x0F if len(data) > 0 else 0
+        if _tx_type != 0x09:
+            _tx_stable = _extract_mc_payload(data)
+            _tx_hash = hashlib.md5(data[0:1] + _tx_stable).hexdigest()[:12]
+            self._tx_echo_hashes[_tx_hash] = time.monotonic()
+            logger.info('WM1303Backend: TX echo hash pre-stored: %s (ch=%s)', _tx_hash, channel_id)
+        else:
+            logger.debug('WM1303Backend: skipping echo hash for TRACE packet (ch=%s)', channel_id)
 
         # Enqueue to the per-channel TXQueue (GlobalTXScheduler handles sending)
         if self._tx_queue_manager:
@@ -3940,17 +3948,26 @@ class WM1303Backend:
                 _tx_data_b64 = txpk.get('data', '')
                 if _tx_data_b64:
                     _tx_payload = base64.b64decode(_tx_data_b64)
-                    _tx_stable = _extract_mc_payload(_tx_payload)
-                    _tx_hash = hashlib.md5(_tx_payload[0:1] + _tx_stable).hexdigest()[:12]
-                    self._tx_echo_hashes[_tx_hash] = time.monotonic()
-                    logger.info('WM1303Backend: TX echo hash stored: %s (total=%d)',
-                               _tx_hash, len(self._tx_echo_hashes))
-                    # Cleanup expired entries
-                    _now_m = time.monotonic()
-                    self._tx_echo_hashes = {
-                        k: v for k, v in self._tx_echo_hashes.items()
-                        if _now_m - v < self._tx_echo_ttl
-                    }
+                    # Skip TRACE packets (MeshCore TYPE=9): byte 0 encodes
+                    # [VER(2)|TYPE(4)|ROUTE(2)], so TYPE nibble must be extracted
+                    # via (byte0 >> 2) & 0x0F. Without this guard, TRACE_RESP
+                    # packets match the stored TX hash and get discarded as
+                    # unknown_echo, breaking all pings. (Credit: @fahimshariff-au, issue #7)
+                    _tx_type = (_tx_payload[0] >> 2) & 0x0F if len(_tx_payload) > 0 else 0
+                    if _tx_type != 0x09:
+                        _tx_stable = _extract_mc_payload(_tx_payload)
+                        _tx_hash = hashlib.md5(_tx_payload[0:1] + _tx_stable).hexdigest()[:12]
+                        self._tx_echo_hashes[_tx_hash] = time.monotonic()
+                        logger.info('WM1303Backend: TX echo hash stored: %s (total=%d)',
+                                   _tx_hash, len(self._tx_echo_hashes))
+                        # Cleanup expired entries
+                        _now_m = time.monotonic()
+                        self._tx_echo_hashes = {
+                            k: v for k, v in self._tx_echo_hashes.items()
+                            if _now_m - v < self._tx_echo_ttl
+                        }
+                    else:
+                        logger.debug('WM1303Backend: skipping echo hash for TRACE packet (scheduler)')
             except Exception as _e:
                 logger.debug('WM1303Backend: TX hash storage error: %s', _e)
 

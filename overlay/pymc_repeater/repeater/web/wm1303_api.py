@@ -108,13 +108,54 @@ def _body():
     except Exception:
         return {}
 
+def _migrate_ui_config(data: dict) -> tuple[dict, bool]:
+    """Migrate legacy wm1303_ui.json schemas to the current format.
+
+    Returns (migrated_data, changed_flag). When changed_flag is True the caller
+    should persist the data so subsequent reads use the canonical schema.
+
+    Currently handles:
+    - region: legacy plain string (e.g. "EU868") -> nested dict
+      {"code": "EU868", "tx_freq_min": null, "tx_freq_max": null}
+      (Credit: @fahimshariff-au, issue #7 — v2.4.10 startup error on upgrade)
+    - region: missing key -> empty nested dict so the UI region selector loads
+      cleanly instead of crashing.
+    """
+    changed = False
+    if not isinstance(data, dict):
+        return data, changed
+    region_val = data.get("region")
+    if isinstance(region_val, str):
+        # Legacy: region was a plain string code
+        logger.warning("_migrate_ui_config: migrating legacy region string %r to nested dict", region_val)
+        data["region"] = {
+            "code": region_val,
+            "tx_freq_min": None,
+            "tx_freq_max": None,
+        }
+        changed = True
+    elif region_val is None and "region" not in data:
+        # Missing: initialize empty so downstream code never KeyErrors
+        data["region"] = {"code": "", "tx_freq_min": None, "tx_freq_max": None}
+        changed = True
+    return data, changed
+
+
 def _load_ui() -> dict:
     if _UI_JSON.exists():
         try:
-            return json.loads(_UI_JSON.read_text())
+            data = json.loads(_UI_JSON.read_text())
+            data, changed = _migrate_ui_config(data)
+            if changed:
+                try:
+                    _safe_write(_UI_JSON, json.dumps(data, indent=2))
+                    logger.info("_load_ui: persisted migrated wm1303_ui.json schema")
+                except Exception as ex:
+                    logger.warning("_load_ui: failed to persist migration: %s", ex)
+            return data
         except Exception:
             pass
-    return {"channels": [], "bridge": {"rules": []}}
+    return {"channels": [], "bridge": {"rules": []}, "region": {"code": "", "tx_freq_min": None, "tx_freq_max": None}}
 
 def _save_ui(data: dict):
     _safe_write(_UI_JSON, json.dumps(data, indent=2))
