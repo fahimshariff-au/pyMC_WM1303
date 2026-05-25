@@ -4040,7 +4040,8 @@ class WM1303Backend:
                             if _now_m - v < self._tx_echo_ttl
                         }
                     else:
-                        logger.debug('WM1303Backend: skipping echo hash for TRACE packet (scheduler)')            except Exception as _e:
+                        logger.debug('WM1303Backend: skipping echo hash for TRACE packet (scheduler)')
+            except Exception as _e:
                 logger.debug('WM1303Backend: TX hash storage error: %s', _e)
 
             # Schedule AGC recovery reset after TX burst
