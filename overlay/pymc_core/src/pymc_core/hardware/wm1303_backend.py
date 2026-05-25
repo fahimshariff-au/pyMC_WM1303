@@ -666,7 +666,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
     # makes the config self-describing and avoids surprises if HAL adds support.
     _che_d = {}  # default: empty dict, populated from wm1303_ui.json channel_e section
     _che_lora_rx = {
-        'enable': True, 'freq_hz': 869618000, 'bandwidth': 62500,
+        'enable': False, 'freq_hz': 869618000, 'bandwidth': 62500,
         'spreading_factor': 8, 'coding_rate': 1, 'boosted': True,
         'sync_word': int(_sync_word_value) & 0xFFFF,
     }
@@ -677,7 +677,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             _che_d = _jche.loads(_che_path.read_text()).get('channel_e', {})
             if _che_d:
                 _che_lora_rx = {
-                    'enable': bool(_che_d.get('enabled', True)),
+                    'enable': bool(_che_d.get('enabled', False)),
                     'freq_hz': int(_che_d.get('frequency', 869618000)),
                     'bandwidth': int(_che_d.get('bandwidth', 62500)),
                     'spreading_factor': int(_che_d.get('spreading_factor', 8)),
