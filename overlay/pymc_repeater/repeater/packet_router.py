@@ -245,19 +245,22 @@ class PacketRouter:
 
         # Route to specific handlers for parsing only
         if payload_type == TraceHandler.payload_type():
-            # Locally-injected outgoing TRACE requests (path empty, _injected_for_tx set)
-            # re-enter the router for bookkeeping only — skip TraceHelper to avoid false
-            # ping-tag matches against the zeroed local metadata of our own TX.
+            # Locally-injected outgoing TRACE requests (path empty, _injected_for_tx
+            # set) re-enter the router for companion delivery only — skip TraceHelper
+            # to avoid false ping-tag matches against zeroed local metadata of our
+            # own TX.
             #
             # TRACE_RESPs received from other nodes via the bridge also arrive with
-            # _injected_for_tx=True (set by BridgeRepeaterHandler / Bug2 fix) but carry
-            # ≥1 path byte (the SNR appended by the responding node). These MUST reach
-            # TraceHelper so the ping result is delivered to companion c6.
-            # Distinguish by packet.path: empty → outgoing TX, non-empty → RF response.
+            # _injected_for_tx=True (set by _bridge_repeater_handler / Bug 1 fix)
+            # but carry >=1 path byte (the SNR appended by the responding node).
+            # These MUST reach TraceHelper so the ping result is delivered to
+            # companion clients.
+            # Distinguish by packet.path: empty -> outgoing TX, non-empty -> RF
+            # response.
             _pkt_path = getattr(packet, "path", None)
             _is_outgoing_tx = (
                 getattr(packet, "_injected_for_tx", False)
-                and not _pkt_path  # empty list or None → locally-originated outgoing TRACE
+                and not _pkt_path  # empty list or None -> locally-originated TX
             )
             if _is_outgoing_tx:
                 processed_by_injection = True

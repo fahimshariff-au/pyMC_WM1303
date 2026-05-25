@@ -46,7 +46,7 @@ REGIONS: Dict[str, Dict[str, Any]] = {
         "tx_freq_min": 915_000_000,
         "tx_freq_max": 928_000_000,
         "max_eirp_dbm": 30,
-        "sx1261_calib": (0xE5, 0xE9),
+        "sx1261_calib": (0xE1, 0xE9),  # 900-932 MHz — must cover full AU915 band from 915.0 MHz
         "description": "Australia / Brazil 915-928 MHz ISM band",
     },
     "AS923": {

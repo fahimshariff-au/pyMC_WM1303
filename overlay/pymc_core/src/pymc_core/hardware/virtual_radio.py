@@ -32,18 +32,18 @@ class VirtualLoRaRadio(LoRaRadio):
         self.channel_id = channel_id
         self.channel_config = channel_config
 
-        # Stamp channel_config values as plain attributes so engine.py
-        # can read them via getattr(radio, 'spreading_factor', 8) etc.
-        # Without this, getattr falls back to hardcoded EU defaults
-        # (sf=8, coding_rate=8, tx_power=14) for every channel.
-        _cr = channel_config.get('coding_rate', '4/5')
-        _cr_map = {'4/5': 5, '4/6': 6, '4/7': 7, '4/8': 8}
-        self.spreading_factor = int(channel_config.get('spreading_factor', 9))
-        self.bandwidth        = int(channel_config.get('bandwidth', 125000))
-        self.coding_rate      = _cr_map.get(str(_cr), 5) if isinstance(_cr, str) else int(_cr)
-        self.tx_power         = int(channel_config.get('tx_power', 20))
-        self.frequency        = int(channel_config.get('frequency', 916200000))
-        self.preamble_length  = int(channel_config.get('preamble_length', 17))
+        # Expose radio parameters as instance attributes so that
+        # getattr(radio, "spreading_factor", ...) in engine.py picks up
+        # the actual per-channel values instead of falling back to
+        # hardcoded defaults.  Values come from the SSOT (wm1303_ui.json)
+        # which is region- and channel-specific.
+        self.frequency = int(channel_config.get("frequency", 0))
+        self.spreading_factor = int(channel_config.get("spreading_factor", 7))
+        self.bandwidth = int(channel_config.get("bandwidth", 125000))
+        self.coding_rate = channel_config.get("coding_rate", "4/5")
+        self.preamble_length = int(channel_config.get("preamble_length", 17))
+        self.tx_power = int(channel_config.get("tx_power", 14))
+
         self._rx_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._rx_callback: Optional[Callable] = None
         self._started = False
@@ -55,7 +55,10 @@ class VirtualLoRaRadio(LoRaRadio):
         self._rssi_history: list[tuple[float, float]] = []
         self._noise_floor_dbm: float = self.NOISE_FLOOR_DEFAULT
         self.backend.register_virtual_radio(self)
-        logger.info("VirtualLoRaRadio[%s] __init__: queue id=%s", channel_id, id(self._rx_queue))
+        logger.info("VirtualLoRaRadio[%s] __init__: freq=%d SF%d BW%d CR=%s tx_power=%d queue id=%s",
+                    channel_id, self.frequency, self.spreading_factor,
+                    self.bandwidth, self.coding_rate, self.tx_power,
+                    id(self._rx_queue))
 
     def begin(self):
         self._started = True

@@ -419,8 +419,13 @@ class RepeaterDaemon:
             # Load companion identities (CompanionBridge + frame server per companion)
             await self._load_companion_identities()
 
-            # Subscribe to raw RX in pyMC_core so we can push PUSH_CODE_LOG_RX_DATA to companion clients
-            self.dispatcher.add_raw_rx_subscriber(self._on_raw_rx_for_companions)
+            # Subscribe to raw RX in pyMC_core so we can push PUSH_CODE_LOG_RX_DATA to companion clients.
+            # Note: on WM1303 hardware the Dispatcher path is bypassed (BridgeEngine handles RF),
+            # so this subscriber only fires for non-bridge radios.  The main companion delivery
+            # path is via the BridgeEngine raw RX callback registered in _setup_bridge_engine.
+            async def _async_raw_rx_wrapper(data, rssi, snr):
+                self._on_raw_rx_for_companions(data, 'dispatcher', rssi, snr)
+            self.dispatcher.add_raw_rx_subscriber(_async_raw_rx_wrapper)
             n = len(getattr(self, "companion_frame_servers", []))
             logger.info(
                 "Raw RX subscriber registered (%s companion frame server(s)). Connect a client to see rx_log (0x88).",
@@ -598,7 +603,7 @@ class RepeaterDaemon:
 
                 bridge = RepeaterCompanionBridge(
                     identity=identity,
-                    packet_injector=self.router.inject_packet,
+                    packet_injector=self._companion_injector,
                     node_name=node_name,
                     radio_config=radio_config,
                     sqlite_handler=sqlite_handler,
@@ -759,7 +764,7 @@ class RepeaterDaemon:
 
         bridge = RepeaterCompanionBridge(
             identity=identity,
-            packet_injector=self.router.inject_packet,
+            packet_injector=self._companion_injector,
             node_name=node_name,
             radio_config=radio_config,
             sqlite_handler=sqlite_handler,
@@ -845,16 +850,30 @@ class RepeaterDaemon:
             f"port={tcp_port}, bind={bind_address}, client_idle_timeout_sec={client_idle_timeout_sec}"
         )
 
-    async def _on_raw_rx_for_companions(self, data: bytes, rssi: int, snr: float) -> None:
-        """Raw RX subscriber: push PUSH_CODE_LOG_RX_DATA (0x88) to connected companion clients."""
+    def _on_raw_rx_for_companions(self, data: bytes, source_name: str = '',
+                                    rssi=None, snr=None) -> None:
+        """Raw RX callback: push PUSH_CODE_LOG_RX_DATA (0x88) to connected
+        companion clients.  Registered as a BridgeEngine raw RX callback so it
+        is invoked for ALL RF packets BEFORE echo/dedup filtering, enabling
+        Heard Repeats and node discovery in companion apps.
+
+        Signature matches BridgeEngine._fire_raw_rx_callbacks:
+            callback(data, source_name, rssi, snr)
+        """
         servers = getattr(self, "companion_frame_servers", [])
         if not servers:
             return
+        _rssi = int(rssi) if rssi is not None else 0
+        _snr = float(snr) if snr is not None else 0.0
         for fs in servers:
             try:
-                fs.push_rx_raw(snr, rssi, data)
+                fs.push_rx_raw(_snr, _rssi, data)
             except Exception as e:
                 logger.debug("Push RX raw to companion: %s", e)
+        logger.info(
+            "BridgeEngine raw RX → %d companion server(s) (%d bytes, src=%s, rssi=%s, snr=%s)",
+            len(servers), len(data), source_name, _rssi, _snr
+        )
 
     def _on_raw_packet_for_dedup_logging(self, pkt, data: bytes, analysis: dict) -> None:
         """Record duplicate packets for UI visibility.
@@ -1047,6 +1066,71 @@ class RepeaterDaemon:
                 "_response_injector: no injector available (bridge_engine and router both None)"
             )
 
+    async def _companion_injector(self, packet, wait_for_ack: bool = False):
+        """WM1303: bridge-aware packet injector for companion-originated TX.
+
+        Used as the `packet_injector` for RepeaterCompanionBridge so that
+        messages sent from a TCP companion app are transmitted via the
+        BridgeEngine (RF TX on all active channels) instead of the upstream
+        PacketRouter/Dispatcher which targets classic radios that are not
+        active in a WM1303 setup.
+
+        After bridge injection the packet is also enqueued on the PacketRouter
+        so that:
+        - The sending companion sees its own message echoed back.
+        - Other companion bridges receive a copy.
+        - The _injected_for_tx flag prevents the engine from re-processing it.
+        """
+        try:
+            packet_bytes = packet.write_to()
+        except Exception as e:
+            logger.warning(
+                "_companion_injector: serialize failed: %s (falling back to router)",
+                e,
+            )
+            packet_bytes = None
+
+        bridge_ok = False
+        if packet_bytes is not None and self.bridge_engine is not None:
+            try:
+                await self.bridge_engine.inject_packet('repeater', packet_bytes)
+                bridge_ok = True
+                ptype = getattr(packet, 'get_payload_type', lambda: None)()
+                logger.info(
+                    "_companion_injector: bridge TX OK (%d bytes, type=%s)",
+                    len(packet_bytes), ptype,
+                )
+            except Exception as e:
+                logger.warning(
+                    "_companion_injector: bridge inject failed: %s (falling back to router)",
+                    e,
+                )
+
+        if not bridge_ok:
+            # Fallback: classic router (for setups without bridge_engine).
+            if self.router is not None:
+                try:
+                    await self.router.inject_packet(packet, wait_for_ack=wait_for_ack)
+                    return  # router.inject_packet already enqueues
+                except Exception as e:
+                    logger.error("_companion_injector: router fallback failed: %s", e)
+            else:
+                logger.error(
+                    "_companion_injector: no injector available (bridge_engine and router both None)"
+                )
+            return
+
+        # Bridge injection succeeded — also enqueue on the PacketRouter so
+        # companion bridges (including the sender) receive a copy.
+        if self.router is not None:
+            try:
+                packet._injected_for_tx = True
+                await self.router.enqueue(packet)
+            except Exception as e:
+                logger.debug(
+                    "_companion_injector: router enqueue failed (non-fatal): %s", e
+                )
+
     async def _bridge_repeater_handler(self, data: bytes,
                                         origin_channel: str | None = None,
                                         rssi: float | None = None,
@@ -1086,33 +1170,59 @@ class RepeaterDaemon:
             logger.warning("BridgeRepeaterHandler: failed to parse %d bytes", len(data))
             return
 
-        # Attach RSSI/SNR from bridge metadata to the parsed Packet.
-        # Set both underscore-prefixed and plain attributes so all downstream
-        # consumers (_route_packet, advert_helper) use the correct values.
-        _rssi_int = int(rssi) if rssi is not None else 0
-        _snr_float = float(snr) if snr is not None else 0.0
-        pkt._rssi = _rssi_int
-        pkt._snr = _snr_float
+        # Attach RSSI/SNR from bridge metadata to the parsed Packet so
+        # downstream handlers (advert processing, neighbor tracking) can
+        # access signal quality even though it's not in the wire format.
+        if rssi is not None:
+            pkt._rssi = int(rssi)
+        if snr is not None:
+            pkt._snr = float(snr)
 
         logger.info(
             "BridgeRepeaterHandler: parsed %d bytes, header=0x%02x, origin_channel=%s, rssi=%s, snr=%s",
             len(data), pkt.header, origin_channel, rssi, snr
         )
 
-        # Bug 2 fix: deliver RF-received packets to TCP companion bridges.
+        # NOTE: Raw RX push to companion frame servers (0x88 / Heard Repeats)
+        # is now handled by the BridgeEngine raw RX callback mechanism.
+        # The callback is registered in _setup_bridge_engine and fires BEFORE
+        # echo/dedup filtering, so companions receive ALL RF packets including
+        # TX echoes (which are "heard repeats" of our own transmissions).
+
+        # Deliver RF-received packets to TCP companion bridges.
         # BridgeEngine bypasses the Dispatcher on WM1303 hardware, so packets
-        # never reach PacketRouter via the normal Dispatcher->router->companion path,
-        # making companions deaf to RF traffic.  Enqueue here so _route_packet
-        # delivers to companion_bridges (ADVERT, TXT_MSG, ACK, PATH, GRP_TXT ...).
-        # _injected_for_tx=True prevents _route_packet from calling daemon.repeater_handler
-        # a second time (forwarding is handled below via process_packet + inject_packet).
+        # never reach PacketRouter via the normal Dispatcher->router->companion
+        # path, making companions deaf to RF traffic.  Enqueue here so
+        # _route_packet delivers to companion_bridges (ADVERT, GRP_TXT, ACK,
+        # PATH, TXT_MSG, TRACE ...).
+        # _injected_for_tx=True prevents _route_packet from triggering
+        # repeater forwarding a second time (that is handled below via
+        # process_packet + inject_packet).
         if self.router:
             try:
                 pkt._injected_for_tx = True
                 await self.router.enqueue(pkt)
-                logger.debug('BridgeRepeaterHandler: enqueued for companion delivery')
+                logger.debug(
+                    "BridgeRepeaterHandler: enqueued for companion delivery "
+                    "(header=0x%02x, origin_channel=%s)",
+                    pkt.header, origin_channel
+                )
             except Exception as e:
-                logger.warning('BridgeRepeaterHandler: companion delivery enqueue failed: %s', e)
+                logger.warning(
+                    "BridgeRepeaterHandler: companion delivery enqueue failed: %s", e
+                )
+
+        # Process ADVERT packets for neighbor tracking
+        payload_type = pkt.get_payload_type() if hasattr(pkt, 'get_payload_type') else None
+        if payload_type == AdvertHandler.payload_type() and self.advert_helper:
+            try:
+                _rssi = int(rssi) if rssi is not None else 0
+                _snr = float(snr) if snr is not None else 0.0
+                await self.advert_helper.process_advert_packet(pkt, _rssi, _snr)
+                logger.info("BridgeRepeaterHandler: processed ADVERT for neighbor tracking (rssi=%s, snr=%s)",
+                            _rssi, _snr)
+            except Exception as e:
+                logger.warning("BridgeRepeaterHandler: advert processing error: %s", e)
 
         # WM1303 v2.4.11: dispatch TRACE packets to TraceHelper for proper
         # response generation. The upstream pymc_repeater packet_router.py
@@ -1311,6 +1421,14 @@ class RepeaterDaemon:
                 "WM1303: repeater_handler is None at bridge init time! "
                 "Will attempt re-registration after startup."
             )
+
+        # Register raw RX callback so companion frame servers receive ALL RF
+        # packets (including TX echoes and duplicates) BEFORE echo/dedup
+        # filtering.  This enables Heard Repeats and node discovery in
+        # companion apps.  The callback is invoked from BridgeEngine._rx_loop
+        # and inject_packet before _is_tx_echo / _is_duplicate checks.
+        self.bridge_engine.register_on_raw_rx(self._on_raw_rx_for_companions)
+        logger.info("WM1303: raw RX callback registered with bridge engine for companion delivery")
 
         logger.info(
             f"BridgeEngine initialized: {len(radios)} radios, {len(rules)} rules, "

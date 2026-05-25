@@ -612,6 +612,14 @@ for f in bridge_engine.py channel_e_bridge.py channel_f_bridge.py config_manager
     fi
 done
 
+# repeater/companion/ overlay files (echo-filter node_name sync)
+mkdir -p "${RPT_DIR}/repeater/companion" >> "${LOG_FILE}" 2>&1
+for f in bridge.py; do
+    if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/companion/${f}" ]; then
+        cp "${OVERLAY_DIR}/pymc_repeater/repeater/companion/${f}" "${RPT_DIR}/repeater/companion/" >> "${LOG_FILE}" 2>&1
+    fi
+done
+
 # repeater/handler_helpers/ level files (v2.4.11+ overlays)
 mkdir -p "${RPT_DIR}/repeater/handler_helpers" >> "${LOG_FILE}" 2>&1
 for f in mesh_cli.py; do
@@ -871,6 +879,86 @@ if [ -f "${SCRIPT_DIR}/config/presets.json" ]; then
     ok "presets.json installed"
 else
     warn "presets.json not found in config/, skipping"
+fi
+
+# ---------------------------------------------------------------------------
+# WiFi Power Save Check (prevents SSH/network dropouts on wireless links)
+# ---------------------------------------------------------------------------
+step "Checking WiFi power save settings"
+WIFI_IFACE=""
+for iface in /sys/class/net/wlan*; do
+    [ -d "$iface" ] && WIFI_IFACE=$(basename "$iface") && break
+done
+
+if [ -z "$WIFI_IFACE" ]; then
+    ok "No WiFi interface detected — skipping"
+else
+    # Check current power save status
+    PWRSAVE="unknown"
+    if command -v iw >/dev/null 2>&1; then
+        PWRSAVE=$(iw dev "$WIFI_IFACE" get power_save 2>/dev/null | awk '{print $NF}' || echo "unknown")
+    fi
+
+    if [ "$PWRSAVE" = "off" ]; then
+        ok "WiFi power save already disabled on $WIFI_IFACE"
+    else
+        # Disable immediately
+        if command -v iw >/dev/null 2>&1; then
+            iw dev "$WIFI_IFACE" set power_save off >> "${LOG_FILE}" 2>&1 || true
+        fi
+
+        # Make persistent — try multiple methods for OS compatibility
+        WIFI_PS_PERSISTED=false
+
+        # Method 1: NetworkManager (Debian/Ubuntu with NM)
+        if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+            NM_CONF_DIR="/etc/NetworkManager/conf.d"
+            NM_CONF_FILE="${NM_CONF_DIR}/99-wifi-powersave-off.conf"
+            if [ ! -f "$NM_CONF_FILE" ]; then
+                mkdir -p "$NM_CONF_DIR"
+                cat > "$NM_CONF_FILE" << 'NMEOF'
+[connection]
+wifi.powersave = 2
+NMEOF
+                systemctl restart NetworkManager >> "${LOG_FILE}" 2>&1 || true
+            fi
+            WIFI_PS_PERSISTED=true
+            ok "WiFi power save disabled on $WIFI_IFACE (NetworkManager)"
+        fi
+
+        # Method 2: dhcpcd hook (Raspberry Pi OS Bookworm and older)
+        if [ "$WIFI_PS_PERSISTED" = false ] && [ -d "/etc/dhcpcd.conf" ] || [ -f "/etc/dhcpcd.conf" ]; then
+            DHCPCD_HOOK="/etc/dhcpcd.exit-hook"
+            HOOK_LINE='command -v iw >/dev/null 2>&1 && iw dev wlan0 set power_save off 2>/dev/null || true'
+            if [ -f "$DHCPCD_HOOK" ] && grep -q "power_save off" "$DHCPCD_HOOK" 2>/dev/null; then
+                WIFI_PS_PERSISTED=true
+                ok "WiFi power save disabled on $WIFI_IFACE (dhcpcd hook exists)"
+            else
+                echo "$HOOK_LINE" >> "$DHCPCD_HOOK"
+                chmod +x "$DHCPCD_HOOK"
+                WIFI_PS_PERSISTED=true
+                ok "WiFi power save disabled on $WIFI_IFACE (dhcpcd hook)"
+            fi
+        fi
+
+        # Method 3: udev rule (generic fallback for systemd-networkd or other setups)
+        if [ "$WIFI_PS_PERSISTED" = false ]; then
+            UDEV_RULE="/etc/udev/rules.d/70-wifi-powersave.rules"
+            if [ ! -f "$UDEV_RULE" ]; then
+                cat > "$UDEV_RULE" << 'UDEVEOF'
+# Disable WiFi power save for network stability
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set power_save off"
+UDEVEOF
+                udevadm control --reload-rules >> "${LOG_FILE}" 2>&1 || true
+            fi
+            WIFI_PS_PERSISTED=true
+            ok "WiFi power save disabled on $WIFI_IFACE (udev rule)"
+        fi
+
+        if [ "$WIFI_PS_PERSISTED" = false ]; then
+            warn "Could not persist WiFi power save setting — disable manually if needed"
+        fi
+    fi
 fi
 
 step "Checking SPI buffer size (spidev bufsiz=32768)"
