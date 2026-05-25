@@ -18,8 +18,8 @@ def _load_bridge_conf() -> dict:
     from pathlib import Path
     candidates = [
         Path("/tmp/pymc_wm1303_bridge_conf.json"),
-        Path("/home/pi/wm1303_pf/bridge_conf.json"),
-        Path("/home/pi/wm1303_pf/global_conf.json"),
+        _PKTFWD_DIR / "bridge_conf.json",
+        _PKTFWD_DIR / "global_conf.json",
     ]
     for src in candidates:
         if src.exists():
@@ -64,11 +64,56 @@ _STATUS_CACHE_TTL=8
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Detect PKTFWD_DIR dynamically (supports non-pi users and alternate distros)
+# ---------------------------------------------------------------------------
+def _detect_pktfwd_dir() -> Path:
+    """Resolve the packet forwarder directory at import time."""
+    # 1. From config.yaml
+    try:
+        import yaml as _yaml
+        with open('/etc/pymc_repeater/config.yaml') as _f:
+            _cfg = _yaml.safe_load(_f) or {}
+        _pdir = _cfg.get('wm1303', {}).get('pktfwd_dir', '')
+        if _pdir and Path(_pdir).is_dir():
+            return Path(_pdir)
+    except Exception:
+        pass
+    # 2. From systemd service User=
+    try:
+        import subprocess as _sp
+        _svc_user = _sp.check_output(
+            ['systemctl', 'show', 'pymc-repeater', '-p', 'User', '--value'],
+            text=True, timeout=3
+        ).strip()
+        if _svc_user and _svc_user != 'root':
+            import pwd as _pwd
+            _home = Path(_pwd.getpwnam(_svc_user).pw_dir)
+            _candidate = _home / 'wm1303_pf'
+            if _candidate.is_dir():
+                return _candidate
+    except Exception:
+        pass
+    # 3. Scan common user home directories
+    try:
+        import pwd as _pwd
+        for _pw in _pwd.getpwall():
+            if _pw.pw_uid >= 1000 and _pw.pw_uid < 65534 and _pw.pw_dir != '/':
+                _candidate = Path(_pw.pw_dir) / 'wm1303_pf'
+                if _candidate.is_dir():
+                    return _candidate
+    except Exception:
+        pass
+    # 4. Fallback
+    return Path('/home/pi/wm1303_pf')
+
+_PKTFWD_DIR  = _detect_pktfwd_dir()
+
 # Paths
 _SVC_NAME    = "pymc-repeater"
 _UI_JSON     = Path("/etc/pymc_repeater/wm1303_ui.json")
-_GLOBAL_CONF = Path("/home/pi/wm1303_pf/global_conf.json")
-_SPECTRAL_BIN = Path("/home/pi/wm1303_pf/spectral_scan")
+_GLOBAL_CONF = _PKTFWD_DIR / "global_conf.json"
+_SPECTRAL_BIN = _PKTFWD_DIR / "spectral_scan"
 _SPECTRAL_RES = Path("/tmp/pymc_spectral_results.json")
 
 def _safe_write(path: Path, content: str) -> bool:
@@ -108,13 +153,54 @@ def _body():
     except Exception:
         return {}
 
+def _migrate_ui_config(data: dict) -> tuple[dict, bool]:
+    """Migrate legacy wm1303_ui.json schemas to the current format.
+
+    Returns (migrated_data, changed_flag). When changed_flag is True the caller
+    should persist the data so subsequent reads use the canonical schema.
+
+    Currently handles:
+    - region: legacy plain string (e.g. "EU868") -> nested dict
+      {"code": "EU868", "tx_freq_min": null, "tx_freq_max": null}
+      (Credit: @fahimshariff-au, issue #7 — v2.4.10 startup error on upgrade)
+    - region: missing key -> empty nested dict so the UI region selector loads
+      cleanly instead of crashing.
+    """
+    changed = False
+    if not isinstance(data, dict):
+        return data, changed
+    region_val = data.get("region")
+    if isinstance(region_val, str):
+        # Legacy: region was a plain string code
+        logger.warning("_migrate_ui_config: migrating legacy region string %r to nested dict", region_val)
+        data["region"] = {
+            "code": region_val,
+            "tx_freq_min": None,
+            "tx_freq_max": None,
+        }
+        changed = True
+    elif region_val is None and "region" not in data:
+        # Missing: initialize empty so downstream code never KeyErrors
+        data["region"] = {"code": "", "tx_freq_min": None, "tx_freq_max": None}
+        changed = True
+    return data, changed
+
+
 def _load_ui() -> dict:
     if _UI_JSON.exists():
         try:
-            return json.loads(_UI_JSON.read_text())
+            data = json.loads(_UI_JSON.read_text())
+            data, changed = _migrate_ui_config(data)
+            if changed:
+                try:
+                    _safe_write(_UI_JSON, json.dumps(data, indent=2))
+                    logger.info("_load_ui: persisted migrated wm1303_ui.json schema")
+                except Exception as ex:
+                    logger.warning("_load_ui: failed to persist migration: %s", ex)
+            return data
         except Exception:
             pass
-    return {"channels": [], "bridge": {"rules": []}}
+    return {"channels": [], "bridge": {"rules": []}, "region": {"code": "", "tx_freq_min": None, "tx_freq_max": None}}
 
 def _save_ui(data: dict):
     _safe_write(_UI_JSON, json.dumps(data, indent=2))
@@ -217,7 +303,7 @@ def sync_global_conf():
         return {'status': 'error', 'reason': str(ex)}
 
     # Write bridge_conf.json (authoritative)
-    _BRIDGE_CONF_PATH = Path('/home/pi/wm1303_pf/bridge_conf.json')
+    _BRIDGE_CONF_PATH = _PKTFWD_DIR / 'bridge_conf.json'
     try:
         _BRIDGE_CONF_PATH.write_text(json.dumps(conf, indent=2))
         logger.info('sync_global_conf: wrote bridge_conf.json')
@@ -360,7 +446,7 @@ def _regenerate_gpio_scripts(gpio: dict):
     sx1261_rst = sx1261_rst_bcm + base
     ad5338r_rst = ad5338r_rst_bcm + base
 
-    script_dir = '/home/pi/wm1303_pf'
+    script_dir = str(_PKTFWD_DIR)
     os.makedirs(script_dir, exist_ok=True)
 
     # --- reset_lgw.sh ---
@@ -1049,8 +1135,8 @@ class WM1303API:
             "pkt_fwd_pid": pkt_fwd_pid,
             "chip": "WM1303 (SX1302/SX1303)",
             "chip_version": "v1.2",
-            "spi_path": "/dev/spidev0.0",
-            "sx1261_spi": "/dev/spidev0.1",
+            "spi_path": _load_ui().get("spi_devices", {}).get("sx1302_spi_path", "/dev/spidev0.0"),
+            "sx1261_spi": _load_ui().get("spi_devices", {}).get("sx1261_spi_path", "/dev/spidev0.1"),
             "uptime": uptime_str,
             "eui": eui_str,
             "temperature": concentrator_temp if concentrator_temp is not None else temperature,
@@ -2108,7 +2194,7 @@ class WM1303API:
             "channels": channels,
             "radio_0_freq_mhz": round(rf[0] / 1e6, 4),
             "radio_1_freq_mhz": round(rf[1] / 1e6, 4),
-            "sx1261_spi": sx1261.get("spi_path", "/dev/spidev0.1"),
+            "sx1261_spi": sx1261.get("spi_path", _load_ui().get("spi_devices", {}).get("sx1261_spi_path", "/dev/spidev0.1")),
             "spectral_scan_enabled": spec_scan.get("enable", False) or sx1261_status.get("managed_by_hal", False),
             "lbt_enabled": lbt.get("enable", False) or sx1261_status.get("managed_by_hal", False),
             "lbt_channels": [
@@ -3650,6 +3736,7 @@ class WM1303API:
             adv = ui.get("adv_config", {})
             hal = ui.get("hal_advanced", {})
             gpio = ui.get("gpio_pins", {})
+            spi = ui.get("spi_devices", {})
             result = {
                 "dedup_ttl_seconds":    cfg.get("bridge", {}).get("dedup_ttl_seconds", cfg.get("bridge", {}).get("dedup_ttl", 300)),
                 "cache_ttl":            cfg.get("repeater", {}).get("cache_ttl", 60),
@@ -3672,6 +3759,8 @@ class WM1303API:
                 "sx1302_power_en_pin":  gpio.get("sx1302_power_en", 18),
                 "sx1261_reset_pin":     gpio.get("sx1261_reset", 5),
                 "ad5338r_reset_pin":    gpio.get("ad5338r_reset", 13),
+                "sx1302_spi_path":      spi.get("sx1302_spi_path", "/dev/spidev0.0"),
+                "sx1261_spi_path":      spi.get("sx1261_spi_path", "/dev/spidev0.1"),
                 "tx_delay_factor":      cfg.get("delays", {}).get("tx_delay_factor", 0.5),
                 "agc_reload_interval_s": hal.get("agc_reload_interval_s", 300),
             }
@@ -3784,6 +3873,28 @@ class WM1303API:
                 except Exception as e:
                     logger.error("adv_config: failed to regenerate GPIO scripts: %s", e)
 
+            elif group == "spi_devices":
+                spi = ui.setdefault("spi_devices", {})
+                if "sx1302_spi_path" in params:
+                    spi["sx1302_spi_path"] = str(params["sx1302_spi_path"]).strip()
+                if "sx1261_spi_path" in params:
+                    spi["sx1261_spi_path"] = str(params["sx1261_spi_path"]).strip()
+                ui["spi_devices"] = spi
+                # Update global_conf.json with new SPI paths
+                try:
+                    gc_path = Path(_PKTFWD_DIR) / "global_conf.json"
+                    if gc_path.exists():
+                        gc = json.loads(gc_path.read_text())
+                        if "sx1302_spi_path" in params:
+                            gc.setdefault("SX130x_conf", {})["com_path"] = spi["sx1302_spi_path"]
+                        if "sx1261_spi_path" in params:
+                            gc.setdefault("SX130x_conf", {}).setdefault("sx1261_conf", {})["spi_path"] = spi["sx1261_spi_path"]
+                        _safe_write(gc_path, json.dumps(gc, indent=2))
+                        cfg_changed = False  # already written directly
+                        logger.info("adv_config: updated SPI paths in global_conf.json")
+                except Exception as e:
+                    logger.error("adv_config: failed to update global_conf.json SPI paths: %s", e)
+
             else:
                 return _j({"status": "error", "error": "Unknown group: " + group})
 
@@ -3883,9 +3994,8 @@ class WM1303API:
                 lbt["enable"] = bool(body["lbt_enabled"])
             if "lbt_threshold" in body or "lbt_rssi_target" in body:
                 lbt["rssi_target"] = int(body.get("lbt_rssi_target", body.get("lbt_threshold", -80)))
-            from pathlib import Path as _P
-            _P("/home/pi/wm1303_pf/global_conf.json").write_text(json.dumps(gc, indent=2))
-            _P("/home/pi/wm1303_pf/bridge_conf.json").write_text(json.dumps(gc, indent=2))
+            (_PKTFWD_DIR / "global_conf.json").write_text(json.dumps(gc, indent=2))
+            (_PKTFWD_DIR / "bridge_conf.json").write_text(json.dumps(gc, indent=2))
             ui = _load_ui()
             che_ui = ui.setdefault("channel_e", {})
             # Note: sync_word is intentionally NOT accepted here. It is a

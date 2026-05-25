@@ -122,6 +122,18 @@ curl -sSL https://raw.githubusercontent.com/fahimshariff-au/pyMC_WM1303/main/boo
 
 The script handles system updates, dependencies, HAL compilation, Python setup, and service configuration.
 
+#### Advanced: non-interactive install with pre-selected region
+
+For automation, scripted deployments, or to skip the interactive region wizard, set `WM1303_REGION` before the curl command:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh | sudo WM1303_REGION=EU868 bash
+```
+
+Supported region codes: `EU868`, `US915`, `AU915`, `AS923`, `IN865`, `JP920`, `KR920`, `CUSTOM`.
+
+When `WM1303_REGION` is set, the bootstrap selects the matching channel preset automatically and skips the interactive wizard.
+
 > ⚠️ **After every upgrade**, perform a hard refresh in your browser to load the updated UI:  
 > **Ctrl+Shift+R** or **Ctrl+F5** on `http://<pi-ip>:8000/wm1303.html`
 

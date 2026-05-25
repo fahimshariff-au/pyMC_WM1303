@@ -12,8 +12,8 @@ The WM1303 system uses multiple configuration files with a **Single Source of Tr
 |------|---------------------|------|-------------|
 | `wm1303_ui.json` | `/etc/pymc_repeater/wm1303_ui.json` | **SSOT** — all WM1303 UI/runtime settings | WM1303 Manager UI, API, manual |
 | `config.yaml` | `/etc/pymc_repeater/config.yaml` | Repeater-level config (radio type, identity) | pyMC Repeater UI, manual |
-| `bridge_conf.json` | `/home/pi/wm1303_pf/bridge_conf.json` | **Generated** — HAL/forwarder config | Auto-generated on service start |
-| `global_conf.json` | `/home/pi/wm1303_pf/global_conf.json` | **Copy** of bridge_conf.json | Auto-generated |
+| `bridge_conf.json` | `~/wm1303_pf/bridge_conf.json` | **Generated** — HAL/forwarder config | Auto-generated on service start |
+| `global_conf.json` | `~/wm1303_pf/global_conf.json` | **Copy** of bridge_conf.json | Auto-generated |
 | `version` | `/etc/pymc_repeater/version` | Deployed version number | Install/upgrade scripts |
 
 ## SSOT Model — `wm1303_ui.json`

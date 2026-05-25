@@ -57,7 +57,7 @@ The periodic SX1261 spectral-scan sweep is now **disabled by default** in both t
 
 **How to re-enable (if needed):**
 
-Set `spectral_scan.enable = true` in `/home/pi/wm1303_pf/bridge_conf.json` (or via the Adv. Config tab when that UI field is exposed). The freq_start / nb_chan / nb_scan / pace_s values are kept in the generated config so manual re-enable is a one-field change. All bug fixes (see section J) remain active in that case.
+Set `spectral_scan.enable = true` in `~/wm1303_pf/bridge_conf.json` (or via the Adv. Config tab when that UI field is exposed). The freq_start / nb_chan / nb_scan / pace_s values are kept in the generated config so manual re-enable is a one-field change. All bug fixes (see section J) remain active in that case.
 
 ### D. Dead Code Cleanup (~396 lines removed)
 

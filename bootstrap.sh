@@ -29,10 +29,45 @@ set -e
 
 REPO_URL="https://github.com/HansvanMeer/pyMC_WM1303.git"
 BOOTSTRAP_RAW_URL="https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh"
-INSTALL_DIR="/home/pi/pyMC_WM1303"
-PI_USER="pi"
 CONFIG_DIR="/etc/pymc_repeater"
 UI_JSON="${CONFIG_DIR}/wm1303_ui.json"
+
+# ---------------------------------------------------------------------------
+# Detect target user
+# Priority: SUDO_USER > common default users > first non-root user with UID>=1000
+# ---------------------------------------------------------------------------
+_detect_user() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && id "$SUDO_USER" &>/dev/null; then
+        echo "$SUDO_USER"; return
+    fi
+    for candidate in pi orangepi radxa rock dietpi; do
+        if id "$candidate" &>/dev/null; then echo "$candidate"; return; fi
+    done
+    local found
+    found=$(awk -F: '$3 >= 1000 && $3 < 65534 && $6 != "/" && $7 !~ /nologin|false/ {print $1; exit}' /etc/passwd)
+    if [ -n "$found" ] && id "$found" &>/dev/null; then echo "$found"; return; fi
+    echo ""
+}
+
+PI_USER=$(_detect_user)
+if [ -z "$PI_USER" ]; then
+    echo "  ✗ Could not detect a non-root user. Create one first or run install.sh with --user=<name>."
+    exit 1
+fi
+# Resolve home directory safely (getent is more reliable than eval echo ~)
+PI_HOME=$(getent passwd "${PI_USER}" 2>/dev/null | cut -d: -f6)
+if [ -z "${PI_HOME}" ]; then
+    PI_HOME=$(eval echo ~"${PI_USER}" 2>/dev/null)
+fi
+if [ -z "${PI_HOME}" ] || [ "${PI_HOME}" = "~${PI_USER}" ]; then
+    echo "  ✗ Could not determine home directory for user '${PI_USER}'."
+    exit 1
+fi
+if [ ! -d "${PI_HOME}" ]; then
+    echo "  ✗ Home directory '${PI_HOME}' for user '${PI_USER}' does not exist."
+    exit 1
+fi
+INSTALL_DIR="${PI_HOME}/pyMC_WM1303"
 
 # --- Early parse of --non-interactive flag and WM1303_REGION env var ---------
 # Must happen BEFORE self-reexec so we can skip reexec when not needed.
@@ -167,6 +202,14 @@ run_wizard() {
     echo "  ╚══════════════════════════════════════════════════════════╝"
     echo ""
 
+    # Track whether the user supplied ANY override env var. If none were set
+    # and we're running non-interactively, we'll show a clear summary warning
+    # at the end with the full override syntax (issue #7 Bug 1).
+    local _all_defaulted=1
+    [ -n "${WM1303_REGION}" ] && _all_defaulted=0
+    [ -n "${WM1303_PRESET}" ] && _all_defaulted=0
+    [ -n "${WM1303_SYNC_WORD}" ] && _all_defaulted=0
+
     # Build region list from presets.json (unique region codes)
     local regions
     regions=$(jq -r '.presets[].region' "${presets_file}" | sort -u)
@@ -267,6 +310,30 @@ run_wizard() {
         esac
     fi
     printf "  ► Selected sync word: %s (0x%04X)\n" "${WM1303_SYNC_WORD_MODE}" "${WM1303_SYNC_WORD_VALUE}"
+
+    # Issue #7 Bug 1 — Final summary warning when running fully unattended.
+    # If the install is non-interactive AND the user did not supply any env
+    # var, print a single prominent block showing what was defaulted and the
+    # exact override command for next time. Keeps headless installs easy to
+    # diagnose when the wrong region is silently selected.
+    if [ "${NON_INTERACTIVE}" -eq 1 ] && [ "${_all_defaulted}" -eq 1 ]; then
+        echo ""
+        echo "  ╔══════════════════════════════════════════════════════════════╗"
+        echo "  ║  ⚠  NON-INTERACTIVE DEFAULTS APPLIED                         ║"
+        echo "  ║                                                              ║"
+        printf "  ║    Region:    %-46s ║\n" "${WM1303_REGION}"
+        printf "  ║    Preset:    %-46s ║\n" "${WM1303_PRESET}"
+        printf "  ║    Sync word: %-46s ║\n" "${WM1303_SYNC_WORD_MODE} (0x$(printf %04X "${WM1303_SYNC_WORD_VALUE}"))"
+        echo "  ║                                                              ║"
+        echo "  ║  To install for a different region, re-run with:             ║"
+        echo "  ║    WM1303_REGION=AU915 WM1303_SYNC_WORD=public \\           ║"
+        echo "  ║      curl -sSL https://raw.githubusercontent.com/HansvanMeer/║"
+        echo "  ║      pyMC_WM1303/main/bootstrap.sh | sudo -E bash            ║"
+        echo "  ║                                                              ║"
+        echo "  ║  Supported: EU868 US915 AU915 AS923 IN865 JP920 KR920 CUSTOM ║"
+        echo "  ╚══════════════════════════════════════════════════════════════╝"
+        echo ""
+    fi
 
     write_wizard_config
 }

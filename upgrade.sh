@@ -88,36 +88,36 @@ INSTALL_BASE="/opt/pymc_repeater"
 REPO_DIR="${INSTALL_BASE}/repos"
 VENV_DIR="${INSTALL_BASE}/venv"
 CONFIG_DIR="/etc/pymc_repeater"
-PKTFWD_DIR="/home/pi/wm1303_pf"
-HAL_DIR="/home/pi/sx1302_hal"
 LOG_DIR="/var/log/pymc_repeater"
 DATA_DIR="/var/lib/pymc_repeater"
 OVERLAY_DIR="${SCRIPT_DIR}/overlay"
-BACKUP_DIR="/home/pi/backups"
+# PKTFWD_DIR, HAL_DIR, BACKUP_DIR are set after user detection (see below)
 
-PI_USER="pi"
 REBOOT_REQUIRED=false
 VENV_REBUILD_NEEDED=false
 
 # Branch configuration
 HAL_BRANCH="master"
-CORE_BRANCH="dev"
-REPEATER_BRANCH="dev"
+CORE_BRANCH="main"
+REPEATER_BRANCH="main"
 
 # Parse arguments
 FORCE_REBUILD=false
 FORCE_CONFIG=false
 SKIP_PULL=false
+FORCE_USER=""
 for arg in "$@"; do
     case "$arg" in
         --force-rebuild|--rebuild) FORCE_REBUILD=true ;;
         --force-config) FORCE_CONFIG=true ;;
         --skip-pull)    SKIP_PULL=true ;;
+        --user=*)       FORCE_USER="${arg#--user=}" ;;
         --help|-h)
-            echo "Usage: sudo bash upgrade.sh [--force-rebuild] [--force-config] [--skip-pull]"
+            echo "Usage: sudo bash upgrade.sh [--force-rebuild] [--force-config] [--skip-pull] [--user=<username>]"
             echo "  --force-rebuild  Force rebuild of HAL and packet forwarder"
             echo "  --force-config   Overwrite existing config files with templates"
             echo "  --skip-pull      Skip pulling from remote repositories"
+            echo "  --user=<name>    Force upgrade for specific user (default: auto-detect)"
             exit 0
             ;;
     esac
@@ -136,6 +136,80 @@ echo -e "${NC}"
 if [ "$(id -u)" -ne 0 ]; then
     fail "This script must be run as root (sudo bash upgrade.sh)"
 fi
+
+# ---------------------------------------------------------------------------
+# Detect target user (must match install.sh logic)
+# Priority: --user=<name> > existing service file > SUDO_USER > auto-detect
+# ---------------------------------------------------------------------------
+detect_user() {
+    # 1. Explicit --user=<name> argument
+    if [ -n "$FORCE_USER" ]; then
+        if id "$FORCE_USER" &>/dev/null; then
+            echo "$FORCE_USER"
+            return
+        else
+            fail "Specified user '$FORCE_USER' does not exist."
+        fi
+    fi
+
+    # 2. Read from existing service file (preserves the user from initial install)
+    if [ -f /etc/systemd/system/pymc-repeater.service ]; then
+        local svc_user
+        svc_user=$(grep -oP '^User=\K.+' /etc/systemd/system/pymc-repeater.service 2>/dev/null || true)
+        if [ -n "$svc_user" ] && [ "$svc_user" != "root" ] && id "$svc_user" &>/dev/null; then
+            echo "$svc_user"
+            return
+        fi
+    fi
+
+    # 3. SUDO_USER (set by sudo when a regular user runs 'sudo bash upgrade.sh')
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && id "$SUDO_USER" &>/dev/null; then
+        echo "$SUDO_USER"
+        return
+    fi
+
+    # 4. Check for common default users
+    for candidate in pi orangepi radxa rock dietpi; do
+        if id "$candidate" &>/dev/null; then
+            echo "$candidate"
+            return
+        fi
+    done
+
+    # 5. First non-root user with UID >= 1000 and a valid home directory
+    local found
+    found=$(awk -F: '$3 >= 1000 && $3 < 65534 && $6 != "/" && $7 !~ /nologin|false/ {print $1; exit}' /etc/passwd)
+    if [ -n "$found" ] && id "$found" &>/dev/null; then
+        echo "$found"
+        return
+    fi
+
+    fail "Could not detect a non-root user. Please specify one with --user=<username>\n  Example: sudo bash upgrade.sh --user=myuser"
+}
+
+PI_USER=$(detect_user)
+
+# Resolve home directory safely (getent is more reliable than eval echo ~)
+PI_HOME=$(getent passwd "${PI_USER}" 2>/dev/null | cut -d: -f6)
+if [ -z "${PI_HOME}" ]; then
+    # Fallback: try eval echo ~ (works on most systems)
+    PI_HOME=$(eval echo ~"${PI_USER}" 2>/dev/null)
+fi
+
+if [ -z "${PI_HOME}" ] || [ "${PI_HOME}" = "~${PI_USER}" ]; then
+    fail "Could not determine home directory for user '${PI_USER}'."
+fi
+
+if [ ! -d "${PI_HOME}" ]; then
+    fail "Home directory '${PI_HOME}' for user '${PI_USER}' does not exist."
+fi
+
+# Set user-relative paths
+PKTFWD_DIR="${PI_HOME}/wm1303_pf"
+HAL_DIR="${PI_HOME}/sx1302_hal"
+BACKUP_DIR="${PI_HOME}/backups"
+
+info "Detected target user: ${PI_USER} (home: ${PI_HOME})"
 
 if [ ! -d "${INSTALL_BASE}" ]; then
     fail "Installation not found at ${INSTALL_BASE}. Run install.sh first."
@@ -387,12 +461,21 @@ update_repo() {
     cd "${target_dir}"
     local before=$(git rev-parse HEAD)
 
-    # Discard local changes (overlay will be re-applied)
-    sudo -u ${PI_USER} git checkout -- . >> "${LOG_FILE}" 2>&1 || true
-    sudo -u ${PI_USER} git clean -fd >> "${LOG_FILE}" 2>&1 || true
+    # Discard local changes (overlay will be re-applied below).
+    # `git reset --hard origin/<branch>` after fetch is idempotent and avoids
+    # "Your local changes would be overwritten by merge" errors that can occur
+    # when the overlay-copy has modified tracked files (e.g. repeater/main.py,
+    # repeater/config.py) since the last upgrade.
     sudo -u ${PI_USER} git fetch --all >> "${LOG_FILE}" 2>&1
-    sudo -u ${PI_USER} git checkout "${branch}" >> "${LOG_FILE}" 2>&1
-    sudo -u ${PI_USER} git pull origin "${branch}" >> "${LOG_FILE}" 2>&1
+    # Use `git checkout -B` to FORCE creating/resetting the local branch to track
+    # origin/<branch>. Without `-B`, a plain `git checkout main` would silently fail
+    # when the local main branch doesn't yet exist (because the repo was originally
+    # cloned with `-b dev`), leaving the local branch pointer on 'dev' even though
+    # `git reset --hard origin/main` advances HEAD to the correct commit. This
+    # caused branch-name vs HEAD inconsistency in v2.5.0 first deployments.
+    sudo -u ${PI_USER} git checkout -B "${branch}" "origin/${branch}" >> "${LOG_FILE}" 2>&1
+    sudo -u ${PI_USER} git reset --hard "origin/${branch}" >> "${LOG_FILE}" 2>&1
+    sudo -u ${PI_USER} git clean -fd >> "${LOG_FILE}" 2>&1 || true
 
     # Sync upstream tags so setuptools-scm computes correct version numbers
     local upstream_url=""
@@ -523,14 +606,22 @@ step "Applying pyMC_Repeater overlay"
 RPT_DIR="${REPO_DIR}/pyMC_Repeater"
 
 # repeater/ level files
-for f in bridge_engine.py channel_e_bridge.py channel_f_bridge.py config_manager.py engine.py main.py identity_manager.py config.py packet_router.py metrics_retention.py uniform_tracer.py; do
+for f in bridge_engine.py channel_e_bridge.py channel_f_bridge.py config_manager.py engine.py main.py identity_manager.py config.py packet_router.py metrics_retention.py uniform_tracer.py wm1303_telemetry_helper.py; do
     if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_repeater/repeater/${f}" "${RPT_DIR}/repeater/" >> "${LOG_FILE}" 2>&1
     fi
 done
 
+# repeater/handler_helpers/ level files (v2.4.11+ overlays)
+mkdir -p "${RPT_DIR}/repeater/handler_helpers" >> "${LOG_FILE}" 2>&1
+for f in mesh_cli.py; do
+    if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/handler_helpers/${f}" ]; then
+        cp "${OVERLAY_DIR}/pymc_repeater/repeater/handler_helpers/${f}" "${RPT_DIR}/repeater/handler_helpers/" >> "${LOG_FILE}" 2>&1
+    fi
+done
+
 # repeater/web/ level files
-for f in wm1303_api.py http_server.py spectrum_collector.py cad_calibration_engine.py api_endpoints.py debug_collector.py packet_trace.py tiered_query.py; do
+for f in wm1303_api.py http_server.py spectrum_collector.py cad_calibration_engine.py api_endpoints.py debug_collector.py packet_trace.py tiered_query.py update_endpoints.py; do
     if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/web/${f}" ]; then
         cp "${OVERLAY_DIR}/pymc_repeater/repeater/web/${f}" "${RPT_DIR}/repeater/web/" >> "${LOG_FILE}" 2>&1
     fi
@@ -710,35 +801,46 @@ else
     fi
 fi  # end VENV_REBUILD_NEEDED
 
-# Verify overlays are accessible after all pip installs
+# Verify overlays are accessible after all pip installs.
+# On Python 3.13 `pip install -e .` may fall back to a non-editable install for
+# pymc_core: site-packages then contains *copies* of the repo files and our
+# overlay changes to e.g. hardware/__init__.py are invisible. The blocks below
+# detect this case via the import path and rsync the full overlay tree on top.
 step "Verifying pyMC_core overlay is accessible"
 PYMC_CORE_IMPORT_PATH=$(sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import pymc_core.hardware; print(pymc_core.hardware.__file__)" 2>/dev/null || echo "")
 if echo "$PYMC_CORE_IMPORT_PATH" | grep -q "site-packages"; then
     SITE_HW_DIR=$(dirname "$PYMC_CORE_IMPORT_PATH")
-    cp "${OVERLAY_DIR}/pymc_core/src/pymc_core/hardware/"*.py "${SITE_HW_DIR}/" >> "${LOG_FILE}" 2>&1
+    # Recursive rsync so sub-directories and non-.py files (e.g. __init__.py
+    # with the WM1303Backend conditional import block) are always included.
+    rsync -a "${OVERLAY_DIR}/pymc_core/src/pymc_core/hardware/" "${SITE_HW_DIR}/" >> "${LOG_FILE}" 2>&1
     # Also re-apply companion overlay to site-packages
     SITE_COMPANION_DIR=$(dirname "$SITE_HW_DIR")/companion
-    if [ -d "${SITE_COMPANION_DIR}" ]; then
-        for f in models.py contact_store.py; do
-            if [ -f "${OVERLAY_DIR}/pymc_core/src/pymc_core/companion/${f}" ]; then
-                cp "${OVERLAY_DIR}/pymc_core/src/pymc_core/companion/${f}" "${SITE_COMPANION_DIR}/" >> "${LOG_FILE}" 2>&1
-            fi
-        done
+    if [ -d "${SITE_COMPANION_DIR}" ] && [ -d "${OVERLAY_DIR}/pymc_core/src/pymc_core/companion" ]; then
+        rsync -a "${OVERLAY_DIR}/pymc_core/src/pymc_core/companion/" "${SITE_COMPANION_DIR}/" >> "${LOG_FILE}" 2>&1
     fi
     chown -R ${PI_USER}:${PI_USER} "${SITE_HW_DIR}"
     chown -R ${PI_USER}:${PI_USER} "${SITE_COMPANION_DIR}" 2>/dev/null || true
-    ok "Re-applied overlay to site-packages"
+    ok "Re-applied overlay to site-packages (rsync)"
 else
     ok "Editable install active"
+fi
+
+# Sanity check: WM1303Backend must be importable after re-apply, otherwise
+# bridge/scheduler init will run in degraded mode at service start.
+step "Verifying WM1303Backend import"
+if sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c 'from pymc_core.hardware import WM1303Backend; assert WM1303Backend is not None' >> "${LOG_FILE}" 2>&1; then
+    ok "WM1303Backend importable"
+else
+    warn "WM1303Backend import failed — bridge/scheduler may run in degraded mode (check ${LOG_FILE})"
 fi
 
 step "Verifying pyMC_Repeater overlay is accessible"
 REPEATER_IMPORT_PATH=$(sudo -u ${PI_USER} "${VENV_DIR}/bin/python3" -c "import repeater.config; print(repeater.config.__file__)" 2>/dev/null || echo "")
 if echo "$REPEATER_IMPORT_PATH" | grep -q "site-packages"; then
     SITE_REPEATER_DIR=$(dirname "$REPEATER_IMPORT_PATH")
-    cp -r "${OVERLAY_DIR}/pymc_repeater/repeater/"* "${SITE_REPEATER_DIR}/" >> "${LOG_FILE}" 2>&1
+    rsync -a "${OVERLAY_DIR}/pymc_repeater/repeater/" "${SITE_REPEATER_DIR}/" >> "${LOG_FILE}" 2>&1
     chown -R ${PI_USER}:${PI_USER} "${SITE_REPEATER_DIR}"
-    ok "Re-applied overlay to site-packages"
+    ok "Re-applied overlay to site-packages (rsync)"
 else
     ok "Editable install active"
 fi
@@ -914,7 +1016,9 @@ if [ "$FORCE_CONFIG" = true ]; then
 
     step "Updating config.yaml"
     cp "${SCRIPT_DIR}/config/config.yaml.template" "${CONFIG_DIR}/config.yaml" >> "${LOG_FILE}" 2>&1
-    ok "Overwritten"
+    # Replace placeholders with detected paths
+    sed -i "s|__PKTFWD_DIR__|${PKTFWD_DIR}|g" "${CONFIG_DIR}/config.yaml"
+    ok "Overwritten (pktfwd_dir: ${PKTFWD_DIR})"
 
     step "Updating global_conf.json"
     cp "${SCRIPT_DIR}/config/global_conf.json" "${PKTFWD_DIR}/global_conf.json" >> "${LOG_FILE}" 2>&1
@@ -1205,8 +1309,11 @@ fi
 
 step "Updating systemd service file"
 cp "${SCRIPT_DIR}/config/pymc-repeater.service" /etc/systemd/system/pymc-repeater.service >> "${LOG_FILE}" 2>&1
+# Replace placeholders with detected user
+sed -i "s|__PI_USER__|${PI_USER}|g" /etc/systemd/system/pymc-repeater.service
+sed -i "s|__PI_HOME__|${PI_HOME}|g" /etc/systemd/system/pymc-repeater.service
 systemctl daemon-reload >> "${LOG_FILE}" 2>&1
-ok "Service file updated"
+ok "Service file updated (user: ${PI_USER})"
 
 step "Updating version file"
 if [ -f "${SCRIPT_DIR}/VERSION" ]; then
@@ -1771,6 +1878,42 @@ else
     warn "Errors detected in journal after startup:"
     echo "${JOURNAL_ERRORS}" | head -5 | sed 's/^/    /'
     info "Review with: journalctl -u pymc-repeater --since '5 minutes ago'"
+fi
+
+step "Checking concentrator module detection"
+sleep 10
+CONCENTRATOR_LOG=$(journalctl -u pymc-repeater --since '90 seconds ago' --no-pager 2>/dev/null || true)
+if echo "${CONCENTRATOR_LOG}" | grep -qi 'lora_pkt_fwd started\|pktfwd ready\|backend started'; then
+    ok "SX1302 concentrator module detected and running"
+else
+    if echo "${CONCENTRATOR_LOG}" | grep -qi 'Failed to set SX1250\|ERROR.*spi\|ERROR.*gpio\|pktfwd.*fail'; then
+        warn "Concentrator module detection failed (SPI/GPIO errors found)"
+    else
+        warn "Concentrator module not yet confirmed (may need more time)"
+    fi
+    echo ""
+    echo -e "  ${BOLD}${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${BOLD}${YELLOW}║  ⚠️  CONCENTRATOR MODULE NOT DETECTED                     ║${NC}"
+    echo -e "  ${BOLD}${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  The upgrade completed successfully, but the SX1302 concentrator"
+    echo -e "  module was not detected. This usually means:"
+    echo ""
+    echo -e "  1. GPIO pin numbers may not match your board"
+    echo -e "  2. SPI device path may be different on your system"
+    echo -e "  3. Power supply may be insufficient (ensure >= 3A)"
+    echo ""
+    echo -e "  ${BOLD}Next steps:${NC}"
+    echo -e "  - Open the web UI: ${CYAN}http://<this-pi-ip>:${WEB_PORT}/wm1303.html${NC}"
+    echo -e "  - Go to ${CYAN}Adv. Config → SPI Device Configuration${NC}"
+    echo -e "  - Go to ${CYAN}Adv. Config → GPIO Pin Configuration${NC}"
+    echo -e "  - Verify and adjust the SPI paths and GPIO pins for your board"
+    echo -e "  - See: ${CYAN}https://github.com/HansvanMeer/pyMC_WM1303/blob/main/docs/spi-troubleshooting.md${NC}"
+    echo ""
+    echo -e "  The service is running and will start automatically on boot."
+    echo -e "  You can restart it after adjusting settings:"
+    echo -e "  ${CYAN}sudo systemctl restart pymc-repeater${NC}"
+    echo ""
 fi
 
 # =============================================================================

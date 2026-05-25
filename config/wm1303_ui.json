@@ -52,5 +52,16 @@
     "sync_word": {
         "value": 5156,
         "mode": "private"
+    },
+    "gpio_pins": {
+        "sx1302_reset": 17,
+        "sx1302_power_en": 18,
+        "sx1261_reset": 5,
+        "ad5338r_reset": 13,
+        "gpio_base_offset": 512
+    },
+    "spi_devices": {
+        "sx1302_spi_path": "/dev/spidev0.0",
+        "sx1261_spi_path": "/dev/spidev0.1"
     }
 }

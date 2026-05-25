@@ -68,7 +68,7 @@ After upgrading, verify the fix is active:
 
 ```bash
 # Check that unused IF channels are disabled
-sudo cat /home/pi/wm1303_pf/bridge_conf.json | python3 -c "
+sudo cat ~/wm1303_pf/bridge_conf.json | python3 -c "
 import sys, json
 c = json.load(sys.stdin)
 for i in range(8):

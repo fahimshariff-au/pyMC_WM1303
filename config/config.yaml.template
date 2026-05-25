@@ -210,7 +210,7 @@ wm1303:
   bridge_rules: []
   channels: {}
   pktfwd_bin: lora_pkt_fwd
-  pktfwd_dir: /home/pi/wm1303_pf
+  pktfwd_dir: __PKTFWD_DIR__
   reset_script: reset_lgw.sh
   spi_path: /dev/spidev0.0
   tx_queue:

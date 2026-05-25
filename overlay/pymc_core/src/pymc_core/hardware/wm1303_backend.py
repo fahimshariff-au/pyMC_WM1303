@@ -165,8 +165,51 @@ PKT_PULL_ACK  = 0x04
 PKT_TX_ACK    = 0x05
 PROTOCOL_VER  = 0x02
 
-# Default paths for SenseCAP M1 WM1303 Pi HAT
-PKTFWD_DIR     = Path('/home/pi/wm1303_pf')
+# ---------------------------------------------------------------------------
+# Detect PKTFWD_DIR dynamically (supports non-pi users and alternate distros)
+# Priority: config.yaml > systemd service User= home > common user homes > /home/pi
+# ---------------------------------------------------------------------------
+def _detect_pktfwd_dir() -> Path:
+    """Resolve the packet forwarder directory at import time."""
+    import yaml as _yaml
+    # 1. From config.yaml
+    try:
+        with open('/etc/pymc_repeater/config.yaml') as _f:
+            _cfg = _yaml.safe_load(_f) or {}
+        _pdir = _cfg.get('wm1303', {}).get('pktfwd_dir', '')
+        if _pdir and Path(_pdir).is_dir():
+            return Path(_pdir)
+    except Exception:
+        pass
+    # 2. From systemd service file User=
+    try:
+        import subprocess as _sp
+        _svc_user = _sp.check_output(
+            ['systemctl', 'show', 'pymc-repeater', '-p', 'User', '--value'],
+            text=True, timeout=3
+        ).strip()
+        if _svc_user and _svc_user != 'root':
+            import pwd as _pwd
+            _home = Path(_pwd.getpwnam(_svc_user).pw_dir)
+            _candidate = _home / 'wm1303_pf'
+            if _candidate.is_dir():
+                return _candidate
+    except Exception:
+        pass
+    # 3. Scan common user home directories
+    try:
+        import pwd as _pwd
+        for _pw in _pwd.getpwall():
+            if _pw.pw_uid >= 1000 and _pw.pw_uid < 65534 and _pw.pw_dir != '/':
+                _candidate = Path(_pw.pw_dir) / 'wm1303_pf'
+                if _candidate.is_dir():
+                    return _candidate
+    except Exception:
+        pass
+    # 4. Fallback to traditional path
+    return Path('/home/pi/wm1303_pf')
+
+PKTFWD_DIR     = _detect_pktfwd_dir()
 PKTFWD_BIN     = PKTFWD_DIR / 'lora_pkt_fwd'
 PKTFWD_RESET   = PKTFWD_DIR / 'reset_lgw.sh'
 BRIDGE_CONF    = PKTFWD_DIR / 'bridge_conf.json'
@@ -672,6 +715,30 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                         '_generate_bridge_conf: channel_f ENABLED freq=%d bw=%d sf=%d',
                         _chf_freq_hz, _chf_bw_hz, _chf_sf,
                     )
+                    # Issue #7 Bug 3 — runtime IF range guard for Channel F
+                    # (chan_Lora_std on SX1302). When the configured Channel F
+                    # frequency is too far from the RF0 center (e.g. preset
+                    # region mismatch left over from an old install), the HAL
+                    # rejects the standard channel with "invalid configuration
+                    # for Lora standard channel" and pkt_fwd crash-loops. The
+                    # SX1302 max IF offset is (RF_RX_BW/2) − (chan_BW/2);
+                    # we apply a 7.5 kHz safety margin matching the chan_multiSF
+                    # validation above. Force-disable on overrange so the
+                    # service starts cleanly; user can fix Channel F config
+                    # via the UI without a crash loop blocking access.
+                    _chf_max_if = (RF_RX_BANDWIDTH_HZ // 2) - (_chf_bw_hz // 2) - 7500
+                    _chf_if_offset = abs(_chf_freq_hz - center)
+                    if _chf_if_offset > _chf_max_if:
+                        logger.warning(
+                            '_generate_bridge_conf: channel_f freq %d is %d Hz '
+                            'from center %d (max %d Hz for BW %d) — '
+                            'forcing DISABLED to prevent pkt_fwd crash. '
+                            'Update channel_f.frequency or rf_center_freq_mhz '
+                            'in wm1303_ui.json to re-enable.',
+                            _chf_freq_hz, _chf_if_offset, center,
+                            _chf_max_if, _chf_bw_hz,
+                        )
+                        _chf_enabled = False
     except Exception as _chfex:
         logger.warning('_generate_bridge_conf: channel_f read error: %s', _chfex)
 
@@ -816,8 +883,8 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
 
     # ── CAPTURE_RAM streaming config (BW62.5 decoder) ──────────────
     capture_conf_path = os.path.join(os.path.dirname(__file__), "capture_conf.json")
-    # Try loading from /home/pi/wm1303_pf/capture_conf.json first
-    _cap_path = "/home/pi/wm1303_pf/capture_conf.json"
+    # Try loading from PKTFWD_DIR/capture_conf.json first
+    _cap_path = str(PKTFWD_DIR / 'capture_conf.json')
     try:
         import json as _json
         with open(_cap_path) as _f:
@@ -1466,7 +1533,7 @@ class WM1303Backend:
                     '(fixed IF chain mapping, RF0-TX architecture)', len(self.channels))
 
         # Copy bridge_conf.json -> global_conf.json (bridge is authoritative)
-        _gc_path = Path('/home/pi/wm1303_pf/global_conf.json')
+        _gc_path = PKTFWD_DIR / 'global_conf.json'
         try:
             _bc = json.loads(BRIDGE_CONF.read_text())
             _gc_path.write_text(json.dumps(_bc, indent=2))
@@ -3684,12 +3751,18 @@ class WM1303Backend:
             tx_power = int(cfg.get('tx_power', 14))
 
         # Track hash for self-echo detection at enqueue time (stable payload hash)
-        _tx_stable = _extract_mc_payload(data)
-        _tx_hash = hashlib.md5(data[0:1] + _tx_stable).hexdigest()[:12]
-        if (data[0] >> 2) & 0x0F != 0x09:  # Don't echo-filter TRACE packets (TYPE nibble)
+        # Skip TRACE packets (MeshCore TYPE=9): byte 0 encodes [VER(2)|TYPE(4)|ROUTE(2)],
+        # so TYPE nibble must be extracted via (byte0 >> 2) & 0x0F.
+        # Without this guard, TRACE_RESP packets match the stored TX hash and get
+        # discarded as unknown_echo, breaking all pings. (Credit: @fahimshariff-au, issue #7)
+        _tx_type = (data[0] >> 2) & 0x0F if len(data) > 0 else 0
+        if _tx_type != 0x09:
+            _tx_stable = _extract_mc_payload(data)
+            _tx_hash = hashlib.md5(data[0:1] + _tx_stable).hexdigest()[:12]
             self._tx_echo_hashes[_tx_hash] = time.monotonic()
-        logger.info('WM1303Backend: TX echo hash pre-stored: %s (ch=%s)', _tx_hash, channel_id)
-
+            logger.info('WM1303Backend: TX echo hash pre-stored: %s (ch=%s)', _tx_hash, channel_id)
+        else:
+            logger.debug('WM1303Backend: skipping echo hash for TRACE packet (ch=%s)', channel_id)
         # Enqueue to the per-channel TXQueue (GlobalTXScheduler handles sending)
         if self._tx_queue_manager:
             result = await self._tx_queue_manager.enqueue(channel_id, data, tx_power,
@@ -3948,19 +4021,26 @@ class WM1303Backend:
                 _tx_data_b64 = txpk.get('data', '')
                 if _tx_data_b64:
                     _tx_payload = base64.b64decode(_tx_data_b64)
-                    _tx_stable = _extract_mc_payload(_tx_payload)
-                    _tx_hash = hashlib.md5(_tx_payload[0:1] + _tx_stable).hexdigest()[:12]
-                    if (_tx_payload[0] >> 2) & 0x0F != 0x09:  # Don't echo-filter TRACE packets (TYPE nibble)
+                    # Skip TRACE packets (MeshCore TYPE=9): byte 0 encodes
+                    # [VER(2)|TYPE(4)|ROUTE(2)], so TYPE nibble must be extracted
+                    # via (byte0 >> 2) & 0x0F. Without this guard, TRACE_RESP
+                    # packets match the stored TX hash and get discarded as
+                    # unknown_echo, breaking all pings. (Credit: @fahimshariff-au, issue #7)
+                    _tx_type = (_tx_payload[0] >> 2) & 0x0F if len(_tx_payload) > 0 else 0
+                    if _tx_type != 0x09:
+                        _tx_stable = _extract_mc_payload(_tx_payload)
+                        _tx_hash = hashlib.md5(_tx_payload[0:1] + _tx_stable).hexdigest()[:12]
                         self._tx_echo_hashes[_tx_hash] = time.monotonic()
-                    logger.info('WM1303Backend: TX echo hash stored: %s (total=%d)',
-                               _tx_hash, len(self._tx_echo_hashes))
-                    # Cleanup expired entries
-                    _now_m = time.monotonic()
-                    self._tx_echo_hashes = {
-                        k: v for k, v in self._tx_echo_hashes.items()
-                        if _now_m - v < self._tx_echo_ttl
-                    }
-            except Exception as _e:
+                        logger.info('WM1303Backend: TX echo hash stored: %s (total=%d)',
+                                   _tx_hash, len(self._tx_echo_hashes))
+                        # Cleanup expired entries
+                        _now_m = time.monotonic()
+                        self._tx_echo_hashes = {
+                            k: v for k, v in self._tx_echo_hashes.items()
+                            if _now_m - v < self._tx_echo_ttl
+                        }
+                    else:
+                        logger.debug('WM1303Backend: skipping echo hash for TRACE packet (scheduler)')            except Exception as _e:
                 logger.debug('WM1303Backend: TX hash storage error: %s', _e)
 
             # Schedule AGC recovery reset after TX burst
