@@ -603,7 +603,7 @@ class RepeaterDaemon:
 
                 bridge = RepeaterCompanionBridge(
                     identity=identity,
-                    packet_injector=self.router.inject_packet,
+                    packet_injector=self._companion_injector,
                     node_name=node_name,
                     radio_config=radio_config,
                     sqlite_handler=sqlite_handler,
@@ -764,7 +764,7 @@ class RepeaterDaemon:
 
         bridge = RepeaterCompanionBridge(
             identity=identity,
-            packet_injector=self.router.inject_packet,
+            packet_injector=self._companion_injector,
             node_name=node_name,
             radio_config=radio_config,
             sqlite_handler=sqlite_handler,
@@ -1065,6 +1065,71 @@ class RepeaterDaemon:
             logger.error(
                 "_response_injector: no injector available (bridge_engine and router both None)"
             )
+
+    async def _companion_injector(self, packet, wait_for_ack: bool = False):
+        """WM1303: bridge-aware packet injector for companion-originated TX.
+
+        Used as the `packet_injector` for RepeaterCompanionBridge so that
+        messages sent from a TCP companion app are transmitted via the
+        BridgeEngine (RF TX on all active channels) instead of the upstream
+        PacketRouter/Dispatcher which targets classic radios that are not
+        active in a WM1303 setup.
+
+        After bridge injection the packet is also enqueued on the PacketRouter
+        so that:
+        - The sending companion sees its own message echoed back.
+        - Other companion bridges receive a copy.
+        - The _injected_for_tx flag prevents the engine from re-processing it.
+        """
+        try:
+            packet_bytes = packet.write_to()
+        except Exception as e:
+            logger.warning(
+                "_companion_injector: serialize failed: %s (falling back to router)",
+                e,
+            )
+            packet_bytes = None
+
+        bridge_ok = False
+        if packet_bytes is not None and self.bridge_engine is not None:
+            try:
+                await self.bridge_engine.inject_packet('repeater', packet_bytes)
+                bridge_ok = True
+                ptype = getattr(packet, 'get_payload_type', lambda: None)()
+                logger.info(
+                    "_companion_injector: bridge TX OK (%d bytes, type=%s)",
+                    len(packet_bytes), ptype,
+                )
+            except Exception as e:
+                logger.warning(
+                    "_companion_injector: bridge inject failed: %s (falling back to router)",
+                    e,
+                )
+
+        if not bridge_ok:
+            # Fallback: classic router (for setups without bridge_engine).
+            if self.router is not None:
+                try:
+                    await self.router.inject_packet(packet, wait_for_ack=wait_for_ack)
+                    return  # router.inject_packet already enqueues
+                except Exception as e:
+                    logger.error("_companion_injector: router fallback failed: %s", e)
+            else:
+                logger.error(
+                    "_companion_injector: no injector available (bridge_engine and router both None)"
+                )
+            return
+
+        # Bridge injection succeeded — also enqueue on the PacketRouter so
+        # companion bridges (including the sender) receive a copy.
+        if self.router is not None:
+            try:
+                packet._injected_for_tx = True
+                await self.router.enqueue(packet)
+            except Exception as e:
+                logger.debug(
+                    "_companion_injector: router enqueue failed (non-fatal): %s", e
+                )
 
     async def _bridge_repeater_handler(self, data: bytes,
                                         origin_channel: str | None = None,

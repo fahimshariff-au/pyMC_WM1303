@@ -72,6 +72,12 @@ class RepeaterCompanionBridge(CompanionBridge):
         )
         # Load persisted prefs (e.g. node_name) from SQLite so matching uses last-saved name
         self._load_prefs()
+        # Force auto-add ALL contact types so the companion app discovers
+        # nodes from RF adverts.  The MeshCore Companion app sets
+        # manual_add_contacts=1 (selective mode) by default, which blocks
+        # auto-add when autoadd_config=0x00.  A WM1303 repeater bridge
+        # should always discover and expose all node types to companions.
+        self.prefs.manual_add_contacts = 0
 
     def _save_prefs(self) -> None:
         """Persist full NodePrefs as JSON to SQLite."""
