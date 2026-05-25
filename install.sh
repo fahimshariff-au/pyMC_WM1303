@@ -650,6 +650,14 @@ for f in bridge_engine.py channel_e_bridge.py channel_f_bridge.py config_manager
     fi
 done
 
+# repeater/companion/ overlay files (echo-filter node_name sync)
+mkdir -p "${RPT_DIR}/repeater/companion" >> "${LOG_FILE}" 2>&1
+for f in bridge.py; do
+    if [ -f "${OVERLAY_DIR}/pymc_repeater/repeater/companion/${f}" ]; then
+        cp "${OVERLAY_DIR}/pymc_repeater/repeater/companion/${f}" "${RPT_DIR}/repeater/companion/" >> "${LOG_FILE}" 2>&1
+    fi
+done
+
 # repeater/handler_helpers/ level files (v2.4.11+ overlays)
 mkdir -p "${RPT_DIR}/repeater/handler_helpers" >> "${LOG_FILE}" 2>&1
 for f in mesh_cli.py; do

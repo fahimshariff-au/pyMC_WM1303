@@ -1099,6 +1099,29 @@ class RepeaterDaemon:
             len(data), pkt.header, origin_channel, rssi, snr
         )
 
+        # Deliver RF-received packets to TCP companion bridges.
+        # BridgeEngine bypasses the Dispatcher on WM1303 hardware, so packets
+        # never reach PacketRouter via the normal Dispatcher->router->companion
+        # path, making companions deaf to RF traffic.  Enqueue here so
+        # _route_packet delivers to companion_bridges (ADVERT, GRP_TXT, ACK,
+        # PATH, TXT_MSG, TRACE ...).
+        # _injected_for_tx=True prevents _route_packet from triggering
+        # repeater forwarding a second time (that is handled below via
+        # process_packet + inject_packet).
+        if self.router:
+            try:
+                pkt._injected_for_tx = True
+                await self.router.enqueue(pkt)
+                logger.debug(
+                    "BridgeRepeaterHandler: enqueued for companion delivery "
+                    "(header=0x%02x, origin_channel=%s)",
+                    pkt.header, origin_channel
+                )
+            except Exception as e:
+                logger.warning(
+                    "BridgeRepeaterHandler: companion delivery enqueue failed: %s", e
+                )
+
         # Process ADVERT packets for neighbor tracking
         payload_type = pkt.get_payload_type() if hasattr(pkt, 'get_payload_type') else None
         if payload_type == AdvertHandler.payload_type() and self.advert_helper:
