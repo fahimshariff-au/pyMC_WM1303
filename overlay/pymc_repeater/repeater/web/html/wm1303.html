@@ -802,9 +802,31 @@ select.ci option{background:#1e293b}
   <!-- Group 5: GPIO Pin Configuration -->
   <div style="background:var(--bg2);border:1px solid rgba(251,191,36,.4);border-radius:12px;padding:20px;margin-bottom:16px">
     <h3 style="margin:0 0 12px 0;color:var(--tx);font-size:1.1em">&#128268; GPIO Pin Configuration</h3>
-    <div style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.4);border-radius:8px;padding:12px;margin-bottom:16px;color:#fbbf24;font-size:0.85em">
+    <div style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.4);border-radius:8px;padding:12px;margin-bottom:12px;color:#fbbf24;font-size:0.85em">
       &#9888;&#65039; <strong>WARNING</strong>: Wrong pin assignments can damage hardware. Verify the BCM pin numbers of your board before making changes.
     </div>
+    <details style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.3);border-radius:8px;padding:0;margin-bottom:16px;color:var(--tx);font-size:0.85em">
+      <summary style="cursor:pointer;padding:12px;font-weight:500;color:#60a5fa">&#128712; How to find the correct GPIO settings for your board</summary>
+      <div style="padding:4px 12px 12px 12px;line-height:1.6">
+        <p style="margin:8px 0 4px 0"><strong>GPIO Base Offset</strong></p>
+        <p style="margin:0 0 4px 0">The base offset depends on your <em>kernel version</em>, not the Linux distro. Run this command to find it:</p>
+        <code style="display:block;background:rgba(0,0,0,.3);padding:8px 10px;border-radius:6px;font-size:0.9em;margin:4px 0 8px 0;color:#a5f3fc">cat /sys/class/gpio/gpiochip*/base</code>
+        <p style="margin:0 0 4px 0">Common values: <strong>512</strong> (RPi4/5 with kernel 6.x+), <strong>0</strong> (older kernels). Use the highest value returned.</p>
+        <p style="margin:12px 0 4px 0"><strong>BCM Pin Numbers</strong></p>
+        <p style="margin:0 0 4px 0">BCM pins are <em>hardware-dependent</em> (tied to the SoC), not OS-dependent. If you use the same Pi model, the BCM numbers stay the same across Raspberry Pi OS, Armbian, Ubuntu, or DietPi.</p>
+        <p style="margin:0 0 4px 0">Default values (SenseCAP M1, Pisces P100, most SX1302 HATs):</p>
+        <ul style="margin:4px 0 8px 16px;padding:0">
+          <li>SX1302 Reset: <strong>BCM 17</strong></li>
+          <li>SX1302 Power: <strong>BCM 18</strong></li>
+          <li>SX1261 Reset: <strong>BCM 5</strong></li>
+          <li>AD5338R Reset: <strong>BCM 13</strong></li>
+        </ul>
+        <p style="margin:0 0 4px 0">Check your HAT&rsquo;s datasheet or PCB silkscreen markings to confirm the pin mapping.</p>
+        <p style="margin:12px 0 4px 0"><strong>Sysfs Number</strong></p>
+        <p style="margin:0 0 4px 0">The sysfs GPIO number shown next to each pin is automatically calculated as: <code style="background:rgba(0,0,0,.3);padding:2px 6px;border-radius:4px;color:#a5f3fc">base_offset + BCM_pin</code>. These are the actual numbers used by the reset and power-cycle scripts.</p>
+        <p style="margin:12px 0 0 0">&#128214; For detailed SPI and GPIO troubleshooting, see the <a href="https://github.com/HansvanMeer/pyMC_WM1303/blob/main/docs/spi-troubleshooting.md" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:underline">SPI Troubleshooting Guide</a>.</p>
+      </div>
+    </details>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">
 
       <div class="ac-field">

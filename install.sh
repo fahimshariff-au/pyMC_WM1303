@@ -73,10 +73,9 @@ INSTALL_BASE="/opt/pymc_repeater"
 REPO_DIR="${INSTALL_BASE}/repos"
 VENV_DIR="${INSTALL_BASE}/venv"
 CONFIG_DIR="/etc/pymc_repeater"
-PKTFWD_DIR="/home/pi/wm1303_pf"
-HAL_DIR="/home/pi/sx1302_hal"
 LOG_DIR="/var/log/pymc_repeater"
 DATA_DIR="/var/lib/pymc_repeater"
+# PKTFWD_DIR and HAL_DIR are set after user detection (see below)
 
 # GitHub repositories (unmodified forks)
 HAL_REPO="https://github.com/HansvanMeer/sx1302_hal.git"
@@ -91,14 +90,17 @@ REPEATER_BRANCH="main"
 # Parse arguments
 SKIP_UPDATE=false
 SKIP_BUILD=false
+FORCE_USER=""
 for arg in "$@"; do
     case "$arg" in
         --skip-update) SKIP_UPDATE=true ;;
         --skip-build)  SKIP_BUILD=true ;;
+        --user=*)      FORCE_USER="${arg#--user=}" ;;
         --help|-h)
-            echo "Usage: sudo bash install.sh [--skip-update] [--skip-build]"
-            echo "  --skip-update  Skip apt update/upgrade"
-            echo "  --skip-build   Skip HAL/packet forwarder build"
+            echo "Usage: sudo bash install.sh [--skip-update] [--skip-build] [--user=<username>]"
+            echo "  --skip-update    Skip apt update/upgrade"
+            echo "  --skip-build     Skip HAL/packet forwarder build"
+            echo "  --user=<name>    Force install for specific user (default: auto-detect)"
             exit 0
             ;;
     esac
@@ -140,12 +142,69 @@ if [ "$(id -u)" -ne 0 ]; then
     fail "This script must be run as root (sudo bash install.sh)"
 fi
 
-# Detect Pi user
-PI_USER="pi"
-if ! id "$PI_USER" &>/dev/null; then
-    fail "User '$PI_USER' not found. This script is designed for Raspberry Pi OS."
+# ---------------------------------------------------------------------------
+# Detect target user (the non-root user who will own the installation)
+# Priority: --user=<name> > SUDO_USER > first non-root user with a home dir
+# ---------------------------------------------------------------------------
+detect_user() {
+    # 1. Explicit --user=<name> argument
+    if [ -n "$FORCE_USER" ]; then
+        if id "$FORCE_USER" &>/dev/null; then
+            echo "$FORCE_USER"
+            return
+        else
+            fail "Specified user '$FORCE_USER' does not exist."
+        fi
+    fi
+
+    # 2. SUDO_USER (set by sudo when a regular user runs 'sudo bash install.sh')
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && id "$SUDO_USER" &>/dev/null; then
+        echo "$SUDO_USER"
+        return
+    fi
+
+    # 3. Check for common default users
+    for candidate in pi orangepi radxa rock dietpi; do
+        if id "$candidate" &>/dev/null; then
+            echo "$candidate"
+            return
+        fi
+    done
+
+    # 4. First non-root user with UID >= 1000 and a valid home directory
+    local found
+    found=$(awk -F: '$3 >= 1000 && $3 < 65534 && $6 != "/" && $7 !~ /nologin|false/ {print $1; exit}' /etc/passwd)
+    if [ -n "$found" ] && id "$found" &>/dev/null; then
+        echo "$found"
+        return
+    fi
+
+    # 5. No suitable user found
+    fail "Could not detect a non-root user. Please specify one with --user=<username>\n  Example: sudo bash install.sh --user=myuser"
+}
+
+PI_USER=$(detect_user)
+
+# Resolve home directory safely (getent is more reliable than eval echo ~)
+PI_HOME=$(getent passwd "${PI_USER}" 2>/dev/null | cut -d: -f6)
+if [ -z "${PI_HOME}" ]; then
+    # Fallback: try eval echo ~ (works on most systems)
+    PI_HOME=$(eval echo ~"${PI_USER}" 2>/dev/null)
 fi
-PI_HOME=$(eval echo ~${PI_USER})
+
+if [ -z "${PI_HOME}" ] || [ "${PI_HOME}" = "~${PI_USER}" ]; then
+    fail "Could not determine home directory for user '${PI_USER}'."
+fi
+
+if [ ! -d "${PI_HOME}" ]; then
+    fail "Home directory '${PI_HOME}' for user '${PI_USER}' does not exist."
+fi
+
+info "Detected target user: ${PI_USER} (home: ${PI_HOME})"
+
+# Set user-relative paths
+PKTFWD_DIR="${PI_HOME}/wm1303_pf"
+HAL_DIR="${PI_HOME}/sx1302_hal"
 
 INSTALL_VERSION="unknown"
 if [ -f "${SCRIPT_DIR}/VERSION" ]; then
@@ -890,8 +949,15 @@ fi
 step "Installing config.yaml"
 if [ ! -f "${CONFIG_DIR}/config.yaml" ]; then
     cp "${SCRIPT_DIR}/config/config.yaml.template" "${CONFIG_DIR}/config.yaml" >> "${LOG_FILE}" 2>&1
-    ok "Installed from template"
+    # Replace placeholders with detected paths
+    sed -i "s|__PKTFWD_DIR__|${PKTFWD_DIR}|g" "${CONFIG_DIR}/config.yaml"
+    ok "Installed from template (pktfwd_dir: ${PKTFWD_DIR})"
 else
+    # Ensure existing config has correct pktfwd_dir for detected user
+    if grep -q '/home/pi/wm1303_pf' "${CONFIG_DIR}/config.yaml" 2>/dev/null && [ "${PI_USER}" != "pi" ]; then
+        sed -i "s|/home/pi/wm1303_pf|${PKTFWD_DIR}|g" "${CONFIG_DIR}/config.yaml"
+        info "Updated pktfwd_dir in existing config to ${PKTFWD_DIR}"
+    fi
     ok "Existing config preserved"
 fi
 
@@ -1155,7 +1221,10 @@ ok "Done"
 
 step "Installing systemd service file"
 cp "${SCRIPT_DIR}/config/pymc-repeater.service" /etc/systemd/system/pymc-repeater.service >> "${LOG_FILE}" 2>&1
-ok "Installed"
+# Replace placeholders with detected user
+sed -i "s|__PI_USER__|${PI_USER}|g" /etc/systemd/system/pymc-repeater.service
+sed -i "s|__PI_HOME__|${PI_HOME}|g" /etc/systemd/system/pymc-repeater.service
+ok "Installed (user: ${PI_USER})"
 
 step "Reloading systemd daemon"
 systemctl daemon-reload >> "${LOG_FILE}" 2>&1

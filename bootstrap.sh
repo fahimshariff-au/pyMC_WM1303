@@ -29,10 +29,45 @@ set -e
 
 REPO_URL="https://github.com/HansvanMeer/pyMC_WM1303.git"
 BOOTSTRAP_RAW_URL="https://raw.githubusercontent.com/HansvanMeer/pyMC_WM1303/main/bootstrap.sh"
-INSTALL_DIR="/home/pi/pyMC_WM1303"
-PI_USER="pi"
 CONFIG_DIR="/etc/pymc_repeater"
 UI_JSON="${CONFIG_DIR}/wm1303_ui.json"
+
+# ---------------------------------------------------------------------------
+# Detect target user
+# Priority: SUDO_USER > common default users > first non-root user with UID>=1000
+# ---------------------------------------------------------------------------
+_detect_user() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && id "$SUDO_USER" &>/dev/null; then
+        echo "$SUDO_USER"; return
+    fi
+    for candidate in pi orangepi radxa rock dietpi; do
+        if id "$candidate" &>/dev/null; then echo "$candidate"; return; fi
+    done
+    local found
+    found=$(awk -F: '$3 >= 1000 && $3 < 65534 && $6 != "/" && $7 !~ /nologin|false/ {print $1; exit}' /etc/passwd)
+    if [ -n "$found" ] && id "$found" &>/dev/null; then echo "$found"; return; fi
+    echo ""
+}
+
+PI_USER=$(_detect_user)
+if [ -z "$PI_USER" ]; then
+    echo "  ✗ Could not detect a non-root user. Create one first or run install.sh with --user=<name>."
+    exit 1
+fi
+# Resolve home directory safely (getent is more reliable than eval echo ~)
+PI_HOME=$(getent passwd "${PI_USER}" 2>/dev/null | cut -d: -f6)
+if [ -z "${PI_HOME}" ]; then
+    PI_HOME=$(eval echo ~"${PI_USER}" 2>/dev/null)
+fi
+if [ -z "${PI_HOME}" ] || [ "${PI_HOME}" = "~${PI_USER}" ]; then
+    echo "  ✗ Could not determine home directory for user '${PI_USER}'."
+    exit 1
+fi
+if [ ! -d "${PI_HOME}" ]; then
+    echo "  ✗ Home directory '${PI_HOME}' for user '${PI_USER}' does not exist."
+    exit 1
+fi
+INSTALL_DIR="${PI_HOME}/pyMC_WM1303"
 
 # --- Early parse of --non-interactive flag and WM1303_REGION env var ---------
 # Must happen BEFORE self-reexec so we can skip reexec when not needed.

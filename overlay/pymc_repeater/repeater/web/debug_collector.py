@@ -28,6 +28,47 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("DebugCollector")
 
 # ---------------------------------------------------------------------------
+# Detect user home dynamically (supports non-pi users and alternate distros)
+# ---------------------------------------------------------------------------
+def _detect_user_home() -> Path:
+    """Find the home directory of the service user."""
+    # 1. From config.yaml pktfwd_dir
+    try:
+        import yaml as _yaml
+        with open('/etc/pymc_repeater/config.yaml') as _f:
+            _cfg = _yaml.safe_load(_f) or {}
+        _pdir = _cfg.get('wm1303', {}).get('pktfwd_dir', '')
+        if _pdir and Path(_pdir).is_dir():
+            return Path(_pdir).parent
+    except Exception:
+        pass
+    # 2. From systemd service User=
+    try:
+        _svc_user = subprocess.check_output(
+            ['systemctl', 'show', 'pymc-repeater', '-p', 'User', '--value'],
+            text=True, timeout=3
+        ).strip()
+        if _svc_user and _svc_user != 'root':
+            import pwd
+            return Path(pwd.getpwnam(_svc_user).pw_dir)
+    except Exception:
+        pass
+    # 3. Scan for existing wm1303_pf directory
+    try:
+        import pwd
+        for _pw in pwd.getpwall():
+            if _pw.pw_uid >= 1000 and _pw.pw_uid < 65534 and _pw.pw_dir != '/':
+                if (Path(_pw.pw_dir) / 'wm1303_pf').is_dir():
+                    return Path(_pw.pw_dir)
+    except Exception:
+        pass
+    return Path('/home/pi')
+
+_USER_HOME   = _detect_user_home()
+_PKTFWD_DIR  = _USER_HOME / 'wm1303_pf'
+_HAL_DIR     = _USER_HOME / 'sx1302_hal'
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 BUNDLE_DIR = Path("/tmp/wm1303_debug")
@@ -455,7 +496,7 @@ class DebugCollector:
 
         # bridge_conf.json (generated)
         for name in ["bridge_conf.json", "global_conf.json"]:
-            src = Path(f"/home/pi/wm1303_pf/{name}")
+            src = _PKTFWD_DIR / name
             if src.exists():
                 try:
                     with open(src) as f:
@@ -713,23 +754,24 @@ class DebugCollector:
         check_files.extend(repeater_files)
 
         # HAL source files (WM1303 overlay tracks these for patch detection)
+        _hal = str(_HAL_DIR)
         hal_files = [
-            "/home/pi/sx1302_hal/libloragw/src/loragw_sx1302.c",
-            "/home/pi/sx1302_hal/libloragw/src/loragw_hal.c",
-            "/home/pi/sx1302_hal/libloragw/src/loragw_lbt.c",
-            "/home/pi/sx1302_hal/libloragw/src/loragw_sx1261.c",
-            "/home/pi/sx1302_hal/libloragw/src/loragw_aux.c",
-            "/home/pi/sx1302_hal/libloragw/src/loragw_spi.c",
-            "/home/pi/sx1302_hal/libloragw/src/sx1261_spi.c",
-            "/home/pi/sx1302_hal/libloragw/inc/loragw_hal.h",
-            "/home/pi/sx1302_hal/libloragw/inc/sx1261_defs.h",
-            "/home/pi/sx1302_hal/packet_forwarder/src/lora_pkt_fwd.c",
-            "/home/pi/sx1302_hal/packet_forwarder/src/capture_thread.c",
+            f"{_hal}/libloragw/src/loragw_sx1302.c",
+            f"{_hal}/libloragw/src/loragw_hal.c",
+            f"{_hal}/libloragw/src/loragw_lbt.c",
+            f"{_hal}/libloragw/src/loragw_sx1261.c",
+            f"{_hal}/libloragw/src/loragw_aux.c",
+            f"{_hal}/libloragw/src/loragw_spi.c",
+            f"{_hal}/libloragw/src/sx1261_spi.c",
+            f"{_hal}/libloragw/inc/loragw_hal.h",
+            f"{_hal}/libloragw/inc/sx1261_defs.h",
+            f"{_hal}/packet_forwarder/src/lora_pkt_fwd.c",
+            f"{_hal}/packet_forwarder/src/capture_thread.c",
         ]
         check_files.extend(hal_files)
 
         # pkt_fwd binary
-        check_files.append("/home/pi/wm1303_pf/lora_pkt_fwd")
+        check_files.append(str(_PKTFWD_DIR / "lora_pkt_fwd"))
 
         # Generate checksums
         checksums = []
@@ -1211,7 +1253,7 @@ class DebugCollector:
         # pkt_fwd binary version
         out.append("\n--- pkt_fwd binary ---")
         try:
-            r = _sp.run(["/home/pi/wm1303_pf/lora_pkt_fwd", "-v"],
+            r = _sp.run([str(_PKTFWD_DIR / "lora_pkt_fwd"), "-v"],
                         capture_output=True, text=True, timeout=5)
             out.append(f"  {(r.stdout or r.stderr).strip()[:200]}")
         except Exception as e:
@@ -1220,8 +1262,8 @@ class DebugCollector:
         # HAL patch detection (EXP-v markers in source files)
         out.append("\n--- HAL patch detection (EXP markers) ---")
         hal_src_files = [
-            "/home/pi/sx1302_hal/libloragw/src/loragw_sx1302.c",
-            "/home/pi/sx1302_hal/packet_forwarder/src/lora_pkt_fwd.c",
+            str(_HAL_DIR / "libloragw/src/loragw_sx1302.c"),
+            str(_HAL_DIR / "packet_forwarder/src/lora_pkt_fwd.c"),
         ]
         for fpath in hal_src_files:
             try:

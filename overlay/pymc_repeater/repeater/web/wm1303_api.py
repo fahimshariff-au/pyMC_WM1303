@@ -18,8 +18,8 @@ def _load_bridge_conf() -> dict:
     from pathlib import Path
     candidates = [
         Path("/tmp/pymc_wm1303_bridge_conf.json"),
-        Path("/home/pi/wm1303_pf/bridge_conf.json"),
-        Path("/home/pi/wm1303_pf/global_conf.json"),
+        _PKTFWD_DIR / "bridge_conf.json",
+        _PKTFWD_DIR / "global_conf.json",
     ]
     for src in candidates:
         if src.exists():
@@ -64,11 +64,56 @@ _STATUS_CACHE_TTL=8
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Detect PKTFWD_DIR dynamically (supports non-pi users and alternate distros)
+# ---------------------------------------------------------------------------
+def _detect_pktfwd_dir() -> Path:
+    """Resolve the packet forwarder directory at import time."""
+    # 1. From config.yaml
+    try:
+        import yaml as _yaml
+        with open('/etc/pymc_repeater/config.yaml') as _f:
+            _cfg = _yaml.safe_load(_f) or {}
+        _pdir = _cfg.get('wm1303', {}).get('pktfwd_dir', '')
+        if _pdir and Path(_pdir).is_dir():
+            return Path(_pdir)
+    except Exception:
+        pass
+    # 2. From systemd service User=
+    try:
+        import subprocess as _sp
+        _svc_user = _sp.check_output(
+            ['systemctl', 'show', 'pymc-repeater', '-p', 'User', '--value'],
+            text=True, timeout=3
+        ).strip()
+        if _svc_user and _svc_user != 'root':
+            import pwd as _pwd
+            _home = Path(_pwd.getpwnam(_svc_user).pw_dir)
+            _candidate = _home / 'wm1303_pf'
+            if _candidate.is_dir():
+                return _candidate
+    except Exception:
+        pass
+    # 3. Scan common user home directories
+    try:
+        import pwd as _pwd
+        for _pw in _pwd.getpwall():
+            if _pw.pw_uid >= 1000 and _pw.pw_uid < 65534 and _pw.pw_dir != '/':
+                _candidate = Path(_pw.pw_dir) / 'wm1303_pf'
+                if _candidate.is_dir():
+                    return _candidate
+    except Exception:
+        pass
+    # 4. Fallback
+    return Path('/home/pi/wm1303_pf')
+
+_PKTFWD_DIR  = _detect_pktfwd_dir()
+
 # Paths
 _SVC_NAME    = "pymc-repeater"
 _UI_JSON     = Path("/etc/pymc_repeater/wm1303_ui.json")
-_GLOBAL_CONF = Path("/home/pi/wm1303_pf/global_conf.json")
-_SPECTRAL_BIN = Path("/home/pi/wm1303_pf/spectral_scan")
+_GLOBAL_CONF = _PKTFWD_DIR / "global_conf.json"
+_SPECTRAL_BIN = _PKTFWD_DIR / "spectral_scan"
 _SPECTRAL_RES = Path("/tmp/pymc_spectral_results.json")
 
 def _safe_write(path: Path, content: str) -> bool:
@@ -258,7 +303,7 @@ def sync_global_conf():
         return {'status': 'error', 'reason': str(ex)}
 
     # Write bridge_conf.json (authoritative)
-    _BRIDGE_CONF_PATH = Path('/home/pi/wm1303_pf/bridge_conf.json')
+    _BRIDGE_CONF_PATH = _PKTFWD_DIR / 'bridge_conf.json'
     try:
         _BRIDGE_CONF_PATH.write_text(json.dumps(conf, indent=2))
         logger.info('sync_global_conf: wrote bridge_conf.json')
@@ -401,7 +446,7 @@ def _regenerate_gpio_scripts(gpio: dict):
     sx1261_rst = sx1261_rst_bcm + base
     ad5338r_rst = ad5338r_rst_bcm + base
 
-    script_dir = '/home/pi/wm1303_pf'
+    script_dir = str(_PKTFWD_DIR)
     os.makedirs(script_dir, exist_ok=True)
 
     # --- reset_lgw.sh ---
@@ -3924,9 +3969,8 @@ class WM1303API:
                 lbt["enable"] = bool(body["lbt_enabled"])
             if "lbt_threshold" in body or "lbt_rssi_target" in body:
                 lbt["rssi_target"] = int(body.get("lbt_rssi_target", body.get("lbt_threshold", -80)))
-            from pathlib import Path as _P
-            _P("/home/pi/wm1303_pf/global_conf.json").write_text(json.dumps(gc, indent=2))
-            _P("/home/pi/wm1303_pf/bridge_conf.json").write_text(json.dumps(gc, indent=2))
+            (_PKTFWD_DIR / "global_conf.json").write_text(json.dumps(gc, indent=2))
+            (_PKTFWD_DIR / "bridge_conf.json").write_text(json.dumps(gc, indent=2))
             ui = _load_ui()
             che_ui = ui.setdefault("channel_e", {})
             # Note: sync_word is intentionally NOT accepted here. It is a

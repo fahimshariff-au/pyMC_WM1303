@@ -73,7 +73,7 @@ Clones the required upstream forks:
 ```
 /opt/pymc_repeater/repos/pyMC_core/       ← dev branch
 /opt/pymc_repeater/repos/pyMC_Repeater/   ← dev branch
-/home/pi/sx1302_hal/                      ← HAL v2.10
+~/sx1302_hal/                      ← HAL v2.10
 ```
 
 #### Step 7: Apply Overlay Files
@@ -89,7 +89,7 @@ This is the core of the overlay strategy — upstream repos are not modified, on
 #### Step 8: Build HAL and Packet Forwarder
 - Compiles `libloragw.a` (SX1302 HAL library)
 - Compiles `lora_pkt_fwd` (packet forwarder binary)
-- Copies binary to `/home/pi/wm1303_pf/`
+- Copies binary to `~/wm1303_pf/`
 - Copies configuration files
 
 #### Step 9: Install pyMC Core and Repeater
@@ -102,7 +102,7 @@ This is the core of the overlay strategy — upstream repos are not modified, on
 #### Step 10: Copy Configuration Files
 - `config.yaml.template` → `/etc/pymc_repeater/config.yaml`
 - `wm1303_ui.json` → `/etc/pymc_repeater/wm1303_ui.json`
-- `reset_lgw.sh` and `power_cycle_lgw.sh` → `/home/pi/wm1303_pf/`
+- `reset_lgw.sh` and `power_cycle_lgw.sh` → `~/wm1303_pf/`
 - GPIO reset and power cycle scripts
 - Normalizes legacy field names in `wm1303_ui.json` (`sf`→`spreading_factor`, `bw`→`bandwidth`, `cr`→`coding_rate`) — since v2.1.1
 
@@ -159,7 +159,7 @@ Check that `bridge_conf.json` was generated correctly:
 
 ```bash
 # Verify unused IF channels are disabled
-sudo cat /home/pi/wm1303_pf/bridge_conf.json | python3 -c "
+sudo cat ~/wm1303_pf/bridge_conf.json | python3 -c "
 import sys, json
 c = json.load(sys.stdin)
 for i in range(8):
@@ -280,7 +280,7 @@ Should show `32768`. If not, reboot the Pi.
 ├── wm1303_ui.json
 └── version
 │
-/home/pi/
+~/
 ├── sx1302_hal/                        # HAL source (compiled)
 ├── wm1303_pf/                         # Packet forwarder runtime
 │   ├── lora_pkt_fwd

@@ -165,8 +165,51 @@ PKT_PULL_ACK  = 0x04
 PKT_TX_ACK    = 0x05
 PROTOCOL_VER  = 0x02
 
-# Default paths for SenseCAP M1 WM1303 Pi HAT
-PKTFWD_DIR     = Path('/home/pi/wm1303_pf')
+# ---------------------------------------------------------------------------
+# Detect PKTFWD_DIR dynamically (supports non-pi users and alternate distros)
+# Priority: config.yaml > systemd service User= home > common user homes > /home/pi
+# ---------------------------------------------------------------------------
+def _detect_pktfwd_dir() -> Path:
+    """Resolve the packet forwarder directory at import time."""
+    import yaml as _yaml
+    # 1. From config.yaml
+    try:
+        with open('/etc/pymc_repeater/config.yaml') as _f:
+            _cfg = _yaml.safe_load(_f) or {}
+        _pdir = _cfg.get('wm1303', {}).get('pktfwd_dir', '')
+        if _pdir and Path(_pdir).is_dir():
+            return Path(_pdir)
+    except Exception:
+        pass
+    # 2. From systemd service file User=
+    try:
+        import subprocess as _sp
+        _svc_user = _sp.check_output(
+            ['systemctl', 'show', 'pymc-repeater', '-p', 'User', '--value'],
+            text=True, timeout=3
+        ).strip()
+        if _svc_user and _svc_user != 'root':
+            import pwd as _pwd
+            _home = Path(_pwd.getpwnam(_svc_user).pw_dir)
+            _candidate = _home / 'wm1303_pf'
+            if _candidate.is_dir():
+                return _candidate
+    except Exception:
+        pass
+    # 3. Scan common user home directories
+    try:
+        import pwd as _pwd
+        for _pw in _pwd.getpwall():
+            if _pw.pw_uid >= 1000 and _pw.pw_uid < 65534 and _pw.pw_dir != '/':
+                _candidate = Path(_pw.pw_dir) / 'wm1303_pf'
+                if _candidate.is_dir():
+                    return _candidate
+    except Exception:
+        pass
+    # 4. Fallback to traditional path
+    return Path('/home/pi/wm1303_pf')
+
+PKTFWD_DIR     = _detect_pktfwd_dir()
 PKTFWD_BIN     = PKTFWD_DIR / 'lora_pkt_fwd'
 PKTFWD_RESET   = PKTFWD_DIR / 'reset_lgw.sh'
 BRIDGE_CONF    = PKTFWD_DIR / 'bridge_conf.json'
@@ -840,8 +883,8 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
 
     # ── CAPTURE_RAM streaming config (BW62.5 decoder) ──────────────
     capture_conf_path = os.path.join(os.path.dirname(__file__), "capture_conf.json")
-    # Try loading from /home/pi/wm1303_pf/capture_conf.json first
-    _cap_path = "/home/pi/wm1303_pf/capture_conf.json"
+    # Try loading from PKTFWD_DIR/capture_conf.json first
+    _cap_path = str(PKTFWD_DIR / 'capture_conf.json')
     try:
         import json as _json
         with open(_cap_path) as _f:
@@ -1490,7 +1533,7 @@ class WM1303Backend:
                     '(fixed IF chain mapping, RF0-TX architecture)', len(self.channels))
 
         # Copy bridge_conf.json -> global_conf.json (bridge is authoritative)
-        _gc_path = Path('/home/pi/wm1303_pf/global_conf.json')
+        _gc_path = PKTFWD_DIR / 'global_conf.json'
         try:
             _bc = json.loads(BRIDGE_CONF.read_text())
             _gc_path.write_text(json.dumps(_bc, indent=2))

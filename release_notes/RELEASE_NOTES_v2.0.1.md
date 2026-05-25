@@ -76,7 +76,7 @@ Channel E is now visible in all Spectrum tab charts:
 ## Upgrade Instructions
 
 ```bash
-cd /home/pi/pyMC_WM1303
+cd ~/pyMC_WM1303
 git pull
 sudo bash upgrade.sh --force-rebuild
 sudo reboot  # Required for spidev bufsiz change

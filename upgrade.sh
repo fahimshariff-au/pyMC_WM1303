@@ -88,14 +88,11 @@ INSTALL_BASE="/opt/pymc_repeater"
 REPO_DIR="${INSTALL_BASE}/repos"
 VENV_DIR="${INSTALL_BASE}/venv"
 CONFIG_DIR="/etc/pymc_repeater"
-PKTFWD_DIR="/home/pi/wm1303_pf"
-HAL_DIR="/home/pi/sx1302_hal"
 LOG_DIR="/var/log/pymc_repeater"
 DATA_DIR="/var/lib/pymc_repeater"
 OVERLAY_DIR="${SCRIPT_DIR}/overlay"
-BACKUP_DIR="/home/pi/backups"
+# PKTFWD_DIR, HAL_DIR, BACKUP_DIR are set after user detection (see below)
 
-PI_USER="pi"
 REBOOT_REQUIRED=false
 VENV_REBUILD_NEEDED=false
 
@@ -108,16 +105,19 @@ REPEATER_BRANCH="main"
 FORCE_REBUILD=false
 FORCE_CONFIG=false
 SKIP_PULL=false
+FORCE_USER=""
 for arg in "$@"; do
     case "$arg" in
         --force-rebuild|--rebuild) FORCE_REBUILD=true ;;
         --force-config) FORCE_CONFIG=true ;;
         --skip-pull)    SKIP_PULL=true ;;
+        --user=*)       FORCE_USER="${arg#--user=}" ;;
         --help|-h)
-            echo "Usage: sudo bash upgrade.sh [--force-rebuild] [--force-config] [--skip-pull]"
+            echo "Usage: sudo bash upgrade.sh [--force-rebuild] [--force-config] [--skip-pull] [--user=<username>]"
             echo "  --force-rebuild  Force rebuild of HAL and packet forwarder"
             echo "  --force-config   Overwrite existing config files with templates"
             echo "  --skip-pull      Skip pulling from remote repositories"
+            echo "  --user=<name>    Force upgrade for specific user (default: auto-detect)"
             exit 0
             ;;
     esac
@@ -136,6 +136,80 @@ echo -e "${NC}"
 if [ "$(id -u)" -ne 0 ]; then
     fail "This script must be run as root (sudo bash upgrade.sh)"
 fi
+
+# ---------------------------------------------------------------------------
+# Detect target user (must match install.sh logic)
+# Priority: --user=<name> > existing service file > SUDO_USER > auto-detect
+# ---------------------------------------------------------------------------
+detect_user() {
+    # 1. Explicit --user=<name> argument
+    if [ -n "$FORCE_USER" ]; then
+        if id "$FORCE_USER" &>/dev/null; then
+            echo "$FORCE_USER"
+            return
+        else
+            fail "Specified user '$FORCE_USER' does not exist."
+        fi
+    fi
+
+    # 2. Read from existing service file (preserves the user from initial install)
+    if [ -f /etc/systemd/system/pymc-repeater.service ]; then
+        local svc_user
+        svc_user=$(grep -oP '^User=\K.+' /etc/systemd/system/pymc-repeater.service 2>/dev/null || true)
+        if [ -n "$svc_user" ] && [ "$svc_user" != "root" ] && id "$svc_user" &>/dev/null; then
+            echo "$svc_user"
+            return
+        fi
+    fi
+
+    # 3. SUDO_USER (set by sudo when a regular user runs 'sudo bash upgrade.sh')
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && id "$SUDO_USER" &>/dev/null; then
+        echo "$SUDO_USER"
+        return
+    fi
+
+    # 4. Check for common default users
+    for candidate in pi orangepi radxa rock dietpi; do
+        if id "$candidate" &>/dev/null; then
+            echo "$candidate"
+            return
+        fi
+    done
+
+    # 5. First non-root user with UID >= 1000 and a valid home directory
+    local found
+    found=$(awk -F: '$3 >= 1000 && $3 < 65534 && $6 != "/" && $7 !~ /nologin|false/ {print $1; exit}' /etc/passwd)
+    if [ -n "$found" ] && id "$found" &>/dev/null; then
+        echo "$found"
+        return
+    fi
+
+    fail "Could not detect a non-root user. Please specify one with --user=<username>\n  Example: sudo bash upgrade.sh --user=myuser"
+}
+
+PI_USER=$(detect_user)
+
+# Resolve home directory safely (getent is more reliable than eval echo ~)
+PI_HOME=$(getent passwd "${PI_USER}" 2>/dev/null | cut -d: -f6)
+if [ -z "${PI_HOME}" ]; then
+    # Fallback: try eval echo ~ (works on most systems)
+    PI_HOME=$(eval echo ~"${PI_USER}" 2>/dev/null)
+fi
+
+if [ -z "${PI_HOME}" ] || [ "${PI_HOME}" = "~${PI_USER}" ]; then
+    fail "Could not determine home directory for user '${PI_USER}'."
+fi
+
+if [ ! -d "${PI_HOME}" ]; then
+    fail "Home directory '${PI_HOME}' for user '${PI_USER}' does not exist."
+fi
+
+# Set user-relative paths
+PKTFWD_DIR="${PI_HOME}/wm1303_pf"
+HAL_DIR="${PI_HOME}/sx1302_hal"
+BACKUP_DIR="${PI_HOME}/backups"
+
+info "Detected target user: ${PI_USER} (home: ${PI_HOME})"
 
 if [ ! -d "${INSTALL_BASE}" ]; then
     fail "Installation not found at ${INSTALL_BASE}. Run install.sh first."
@@ -933,7 +1007,9 @@ if [ "$FORCE_CONFIG" = true ]; then
 
     step "Updating config.yaml"
     cp "${SCRIPT_DIR}/config/config.yaml.template" "${CONFIG_DIR}/config.yaml" >> "${LOG_FILE}" 2>&1
-    ok "Overwritten"
+    # Replace placeholders with detected paths
+    sed -i "s|__PKTFWD_DIR__|${PKTFWD_DIR}|g" "${CONFIG_DIR}/config.yaml"
+    ok "Overwritten (pktfwd_dir: ${PKTFWD_DIR})"
 
     step "Updating global_conf.json"
     cp "${SCRIPT_DIR}/config/global_conf.json" "${PKTFWD_DIR}/global_conf.json" >> "${LOG_FILE}" 2>&1
@@ -1224,8 +1300,11 @@ fi
 
 step "Updating systemd service file"
 cp "${SCRIPT_DIR}/config/pymc-repeater.service" /etc/systemd/system/pymc-repeater.service >> "${LOG_FILE}" 2>&1
+# Replace placeholders with detected user
+sed -i "s|__PI_USER__|${PI_USER}|g" /etc/systemd/system/pymc-repeater.service
+sed -i "s|__PI_HOME__|${PI_HOME}|g" /etc/systemd/system/pymc-repeater.service
 systemctl daemon-reload >> "${LOG_FILE}" 2>&1
-ok "Service file updated"
+ok "Service file updated (user: ${PI_USER})"
 
 step "Updating version file"
 if [ -f "${SCRIPT_DIR}/VERSION" ]; then

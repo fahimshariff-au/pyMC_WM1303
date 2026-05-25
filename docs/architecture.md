@@ -344,7 +344,7 @@ This applies to:
 ├── wm1303_ui.json                     # WM1303 SSOT config
 └── version                            # Deployed version
 │
-/home/pi/wm1303_pf/                    # Packet forwarder runtime
+~/wm1303_pf/                    # Packet forwarder runtime
 ├── lora_pkt_fwd                       # Compiled binary
 ├── bridge_conf.json                   # Generated HAL config (authoritative)
 ├── global_conf.json                   # Copy of bridge_conf.json
