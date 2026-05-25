@@ -1872,12 +1872,12 @@ else
 fi
 
 step "Checking concentrator module detection"
-sleep 5
-CONCENTRATOR_LOG=$(journalctl -u pymc-repeater --since '30 seconds ago' --no-pager 2>/dev/null || true)
-if echo "${CONCENTRATOR_LOG}" | grep -qi 'chip version is 0x10\|SX1302'; then
-    ok "SX1302 concentrator module detected successfully"
+sleep 10
+CONCENTRATOR_LOG=$(journalctl -u pymc-repeater --since '90 seconds ago' --no-pager 2>/dev/null || true)
+if echo "${CONCENTRATOR_LOG}" | grep -qi 'lora_pkt_fwd started\|pktfwd ready\|backend started'; then
+    ok "SX1302 concentrator module detected and running"
 else
-    if echo "${CONCENTRATOR_LOG}" | grep -qi 'Failed to set SX1250\|ERROR.*spi\|ERROR.*gpio'; then
+    if echo "${CONCENTRATOR_LOG}" | grep -qi 'Failed to set SX1250\|ERROR.*spi\|ERROR.*gpio\|pktfwd.*fail'; then
         warn "Concentrator module detection failed (SPI/GPIO errors found)"
     else
         warn "Concentrator module not yet confirmed (may need more time)"
