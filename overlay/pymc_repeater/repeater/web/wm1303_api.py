@@ -1135,8 +1135,8 @@ class WM1303API:
             "pkt_fwd_pid": pkt_fwd_pid,
             "chip": "WM1303 (SX1302/SX1303)",
             "chip_version": "v1.2",
-            "spi_path": "/dev/spidev0.0",
-            "sx1261_spi": "/dev/spidev0.1",
+            "spi_path": _load_ui().get("spi_devices", {}).get("sx1302_spi_path", "/dev/spidev0.0"),
+            "sx1261_spi": _load_ui().get("spi_devices", {}).get("sx1261_spi_path", "/dev/spidev0.1"),
             "uptime": uptime_str,
             "eui": eui_str,
             "temperature": concentrator_temp if concentrator_temp is not None else temperature,
@@ -2194,7 +2194,7 @@ class WM1303API:
             "channels": channels,
             "radio_0_freq_mhz": round(rf[0] / 1e6, 4),
             "radio_1_freq_mhz": round(rf[1] / 1e6, 4),
-            "sx1261_spi": sx1261.get("spi_path", "/dev/spidev0.1"),
+            "sx1261_spi": sx1261.get("spi_path", _load_ui().get("spi_devices", {}).get("sx1261_spi_path", "/dev/spidev0.1")),
             "spectral_scan_enabled": spec_scan.get("enable", False) or sx1261_status.get("managed_by_hal", False),
             "lbt_enabled": lbt.get("enable", False) or sx1261_status.get("managed_by_hal", False),
             "lbt_channels": [
@@ -3736,6 +3736,7 @@ class WM1303API:
             adv = ui.get("adv_config", {})
             hal = ui.get("hal_advanced", {})
             gpio = ui.get("gpio_pins", {})
+            spi = ui.get("spi_devices", {})
             result = {
                 "dedup_ttl_seconds":    cfg.get("bridge", {}).get("dedup_ttl_seconds", cfg.get("bridge", {}).get("dedup_ttl", 300)),
                 "cache_ttl":            cfg.get("repeater", {}).get("cache_ttl", 60),
@@ -3758,6 +3759,8 @@ class WM1303API:
                 "sx1302_power_en_pin":  gpio.get("sx1302_power_en", 18),
                 "sx1261_reset_pin":     gpio.get("sx1261_reset", 5),
                 "ad5338r_reset_pin":    gpio.get("ad5338r_reset", 13),
+                "sx1302_spi_path":      spi.get("sx1302_spi_path", "/dev/spidev0.0"),
+                "sx1261_spi_path":      spi.get("sx1261_spi_path", "/dev/spidev0.1"),
                 "tx_delay_factor":      cfg.get("delays", {}).get("tx_delay_factor", 0.5),
                 "agc_reload_interval_s": hal.get("agc_reload_interval_s", 300),
             }
@@ -3869,6 +3872,28 @@ class WM1303API:
                     logger.info("adv_config: regenerated GPIO scripts")
                 except Exception as e:
                     logger.error("adv_config: failed to regenerate GPIO scripts: %s", e)
+
+            elif group == "spi_devices":
+                spi = ui.setdefault("spi_devices", {})
+                if "sx1302_spi_path" in params:
+                    spi["sx1302_spi_path"] = str(params["sx1302_spi_path"]).strip()
+                if "sx1261_spi_path" in params:
+                    spi["sx1261_spi_path"] = str(params["sx1261_spi_path"]).strip()
+                ui["spi_devices"] = spi
+                # Update global_conf.json with new SPI paths
+                try:
+                    gc_path = Path(_PKTFWD_DIR) / "global_conf.json"
+                    if gc_path.exists():
+                        gc = json.loads(gc_path.read_text())
+                        if "sx1302_spi_path" in params:
+                            gc.setdefault("SX130x_conf", {})["com_path"] = spi["sx1302_spi_path"]
+                        if "sx1261_spi_path" in params:
+                            gc.setdefault("SX130x_conf", {}).setdefault("sx1261_conf", {})["spi_path"] = spi["sx1261_spi_path"]
+                        _safe_write(gc_path, json.dumps(gc, indent=2))
+                        cfg_changed = False  # already written directly
+                        logger.info("adv_config: updated SPI paths in global_conf.json")
+                except Exception as e:
+                    logger.error("adv_config: failed to update global_conf.json SPI paths: %s", e)
 
             else:
                 return _j({"status": "error", "error": "Unknown group: " + group})

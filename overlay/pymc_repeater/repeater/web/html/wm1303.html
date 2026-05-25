@@ -799,7 +799,43 @@ select.ci option{background:#1e293b}
     </div>
   </div>
 
-  <!-- Group 5: GPIO Pin Configuration -->
+  <!-- Group 5: SPI Device Configuration -->
+  <div style="background:var(--bg2);border:1px solid rgba(59,130,246,.3);border-radius:12px;padding:20px;margin-bottom:16px">
+    <h3 style="margin:0 0 12px 0;color:var(--tx);font-size:1.1em">&#128268; SPI Device Configuration</h3>
+    <details style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.3);border-radius:8px;padding:0;margin-bottom:16px;color:var(--tx);font-size:0.85em">
+      <summary style="cursor:pointer;padding:12px;font-weight:500;color:#60a5fa">&#128712; How to find the correct SPI device paths</summary>
+      <div style="padding:4px 12px 12px 12px;line-height:1.6">
+        <p style="margin:8px 0 4px 0"><strong>Finding SPI devices</strong></p>
+        <p style="margin:0 0 4px 0">List available SPI devices on your system:</p>
+        <code style="display:block;background:rgba(0,0,0,.3);padding:8px 10px;border-radius:6px;font-size:0.9em;margin:4px 0 8px 0;color:#a5f3fc">ls -la /dev/spidev*</code>
+        <p style="margin:0 0 4px 0">Common output: <code style="background:rgba(0,0,0,.3);padding:2px 6px;border-radius:4px;color:#a5f3fc">/dev/spidev0.0</code> and <code style="background:rgba(0,0,0,.3);padding:2px 6px;border-radius:4px;color:#a5f3fc">/dev/spidev0.1</code></p>
+        <p style="margin:12px 0 4px 0"><strong>SPI device mapping</strong></p>
+        <ul style="margin:4px 0 8px 16px;padding:0">
+          <li><strong>SX1302</strong> (main concentrator): typically uses <code style="background:rgba(0,0,0,.3);padding:2px 6px;border-radius:4px;color:#a5f3fc">spidev0.0</code> (chip select 0)</li>
+          <li><strong>SX1261</strong> (LBT/CAD/Spectrum): typically uses <code style="background:rgba(0,0,0,.3);padding:2px 6px;border-radius:4px;color:#a5f3fc">spidev0.1</code> (chip select 1)</li>
+        </ul>
+        <p style="margin:0 0 4px 0">Some boards may use different SPI bus numbers (e.g. <code style="background:rgba(0,0,0,.3);padding:2px 6px;border-radius:4px;color:#a5f3fc">spidev1.0</code>). Check your board&rsquo;s documentation.</p>
+        <p style="margin:12px 0 0 0">&#128214; For detailed troubleshooting, see the <a href="https://github.com/HansvanMeer/pyMC_WM1303/blob/main/docs/spi-troubleshooting.md" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:underline">SPI Troubleshooting Guide</a>.</p>
+      </div>
+    </details>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">SX1302 SPI Path</label>
+        <input id="ac-spi-sx1302" type="text" value="/dev/spidev0.0" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid rgba(59,130,246,.5);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:#60a5fa;display:block;margin-top:4px">SPI device path for the SX1302 main concentrator chip</small>
+      </div>
+      <div class="ac-field">
+        <label style="color:var(--tx);font-weight:500;display:block;margin-bottom:4px">SX1261 SPI Path</label>
+        <input id="ac-spi-sx1261" type="text" value="/dev/spidev0.1" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid rgba(59,130,246,.5);border-radius:8px;color:var(--tx);font-size:14px;box-sizing:border-box">
+        <small style="color:#60a5fa;display:block;margin-top:4px">SPI device path for the SX1261 (LBT / CAD / Spectrum Scan)</small>
+      </div>
+    </div>
+    <div style="margin-top:16px;text-align:right">
+      <button onclick="saveAdvGroup('spi_devices')" style="padding:8px 20px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:500">Save SPI &amp; Restart</button>
+    </div>
+  </div>
+
+  <!-- Group 6: GPIO Pin Configuration -->
   <div style="background:var(--bg2);border:1px solid rgba(251,191,36,.4);border-radius:12px;padding:20px;margin-bottom:16px">
     <h3 style="margin:0 0 12px 0;color:var(--tx);font-size:1.1em">&#128268; GPIO Pin Configuration</h3>
     <div style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.4);border-radius:8px;padding:12px;margin-bottom:12px;color:#fbbf24;font-size:0.85em">
@@ -4271,7 +4307,9 @@ function renderPmCrcChart(channels) {
     'ac-gpio-sx1302-rst': { key: 'sx1302_reset_pin',           source: 'gpio' },
     'ac-gpio-sx1302-pwr': { key: 'sx1302_power_en_pin',        source: 'gpio' },
     'ac-gpio-sx1261-rst': { key: 'sx1261_reset_pin',           source: 'gpio' },
-    'ac-gpio-ad5338r-rst':{ key: 'ad5338r_reset_pin',          source: 'gpio' }
+    'ac-gpio-ad5338r-rst':{ key: 'ad5338r_reset_pin',          source: 'gpio' },
+    'ac-spi-sx1302':      { key: 'sx1302_spi_path',            source: 'spi' },
+    'ac-spi-sx1261':      { key: 'sx1261_spi_path',            source: 'spi' }
   };
 
   var AC_GROUPS = {
@@ -4279,6 +4317,7 @@ function renderPmCrcChart(channels) {
     tx_queue:     ['ac-queue-size', 'ac-tx-delay', 'ac-pkt-ttl', 'ac-overflow', 'ac-tx-delay-factor'],
     noise_floor:  ['ac-nf-interval', 'ac-nf-hold', 'ac-nf-buffer'],
     hal_advanced: ['ac-force-fe', 'ac-lna-lut', 'ac-pa-lut', 'ac-agc-ana', 'ac-agc-dec', 'ac-chan-fixed', 'ac-agc-reload'],
+    spi_devices:  ['ac-spi-sx1302', 'ac-spi-sx1261'],
     gpio_pins:    ['ac-gpio-base', 'ac-gpio-sx1302-rst', 'ac-gpio-sx1302-pwr', 'ac-gpio-sx1261-rst', 'ac-gpio-ad5338r-rst']
   };
 
@@ -4329,6 +4368,7 @@ function renderPmCrcChart(channels) {
       tx_queue: 'TX Queue Management',
       noise_floor: 'Noise Floor Monitor',
       hal_advanced: 'HAL Advanced (DANGEROUS!)',
+      spi_devices: 'SPI Device Configuration',
       gpio_pins: 'GPIO Pin Configuration'
     }[group] || group;
 

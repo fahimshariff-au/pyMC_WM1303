@@ -1343,6 +1343,42 @@ else
     else
         ok "curl not available, skipping check"
     fi
+
+    step "Checking concentrator module detection"
+    sleep 10
+    CONCENTRATOR_LOG=$(journalctl -u pymc-repeater --since '30 seconds ago' --no-pager 2>/dev/null || true)
+    if echo "${CONCENTRATOR_LOG}" | grep -qi 'chip version is 0x10\|SX1302'; then
+        ok "SX1302 concentrator module detected successfully"
+    else
+        if echo "${CONCENTRATOR_LOG}" | grep -qi 'Failed to set SX1250\|ERROR.*spi\|ERROR.*gpio'; then
+            warn "Concentrator module detection failed (SPI/GPIO errors found)"
+        else
+            warn "Concentrator module not yet confirmed (may need more time)"
+        fi
+        echo ""
+        echo -e "  ${BOLD}${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
+        echo -e "  ${BOLD}${YELLOW}║  ⚠️  CONCENTRATOR MODULE NOT DETECTED                     ║${NC}"
+        echo -e "  ${BOLD}${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  The installation completed successfully, but the SX1302 concentrator"
+        echo -e "  module was not detected. This usually means:"
+        echo ""
+        echo -e "  1. GPIO pin numbers may not match your board"
+        echo -e "  2. SPI device path may be different on your system"
+        echo -e "  3. Power supply may be insufficient (ensure >= 3A)"
+        echo ""
+        echo -e "  ${BOLD}Next steps:${NC}"
+        echo -e "  - Open the web UI: ${CYAN}http://<this-pi-ip>:${WEB_PORT}/wm1303.html${NC}"
+        echo -e "  - Go to ${CYAN}Adv. Config → SPI Device Configuration${NC}"
+        echo -e "  - Go to ${CYAN}Adv. Config → GPIO Pin Configuration${NC}"
+        echo -e "  - Verify and adjust the SPI paths and GPIO pins for your board"
+        echo -e "  - See: ${CYAN}https://github.com/HansvanMeer/pyMC_WM1303/blob/main/docs/spi-troubleshooting.md${NC}"
+        echo ""
+        echo -e "  The service is installed and will start automatically on boot."
+        echo -e "  You can restart it after adjusting settings:"
+        echo -e "  ${CYAN}sudo systemctl restart pymc-repeater${NC}"
+        echo ""
+    fi
 fi
 
 # =============================================================================
