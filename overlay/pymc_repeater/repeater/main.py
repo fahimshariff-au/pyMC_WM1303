@@ -1130,6 +1130,7 @@ class RepeaterDaemon:
                 logger.debug(
                     "_companion_injector: router enqueue failed (non-fatal): %s", e
                 )
+        return True
 
     async def _bridge_repeater_handler(self, data: bytes,
                                         origin_channel: str | None = None,
