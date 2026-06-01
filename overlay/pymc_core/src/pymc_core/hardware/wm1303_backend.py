@@ -386,7 +386,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
     # HAL v2.10 lgw_conf_board_t.lorawan_public is BOARD-LEVEL: true -> Public
     # sync word 0x3444; false -> Private 0x1424. This is the ONLY mechanism
     # SX1302 exposes for sync word selection.
-    _lorawan_public = (_sync_word_mode == 'public')
+    _lorawan_public = False  # MeshCore Public network uses LoRaWAN-private (0x12) sync on-air
     logger.info(
         '_generate_bridge_conf: sync_word=0x%04X mode=%s lorawan_public=%s',
         _sync_word_value, _sync_word_mode, _lorawan_public,
@@ -666,7 +666,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
     # makes the config self-describing and avoids surprises if HAL adds support.
     _che_d = {}  # default: empty dict, populated from wm1303_ui.json channel_e section
     _che_lora_rx = {
-        'enable': False, 'freq_hz': 869618000, 'bandwidth': 62500,
+        'enable': True, 'freq_hz': 869618000, 'bandwidth': 62500,
         'spreading_factor': 8, 'coding_rate': 1, 'boosted': True,
         'sync_word': int(_sync_word_value) & 0xFFFF,
     }
@@ -677,7 +677,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             _che_d = _jche.loads(_che_path.read_text()).get('channel_e', {})
             if _che_d:
                 _che_lora_rx = {
-                    'enable': bool(_che_d.get('enabled', False)),
+                    'enable': bool(_che_d.get('enabled', True)),
                     'freq_hz': int(_che_d.get('frequency', 869618000)),
                     'bandwidth': int(_che_d.get('bandwidth', 62500)),
                     'spreading_factor': int(_che_d.get('spreading_factor', 8)),
@@ -785,7 +785,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
             'full_duplex': False,
             'agc_reload_interval_s': _agc_reload_interval_s,
             'precision_timestamp': {
-                'enable': True,
+                'enable': False,
                 'max_ts_metrics': 255,
                 'nb_symbols': 1,
             },
@@ -2178,11 +2178,10 @@ class WM1303Backend:
                     nearby_rssi.append(rssi_dbm)
 
             if not nearby_rssi:
-                # Closest-scan-point: single nearest point instead of wide window
-                if scan_data:
-                    closest_freq, closest_rssi = min(scan_data.items(),
-                                                     key=lambda x: abs(x[0] - freq_mhz))
-                    nearby_rssi = [closest_rssi]
+                # Try wider tolerance (±1 MHz) if no points within BW
+                for scan_freq, rssi_dbm in scan_data.items():
+                    if abs(scan_freq - freq_mhz) <= 1.0:
+                        nearby_rssi.append(rssi_dbm)
 
             if not nearby_rssi:
                 continue
@@ -2211,13 +2210,7 @@ class WM1303Backend:
 
 
             if not accepted:
-                # Spike-rejection: skip NF update if all scan points above clean floor
-                # Prevents close-range same-frequency TX from inflating NF display
-                if min(nearby_rssi) > -75.0:
-                    logger.debug('NoiseFloorMonitor: %s: skipping NF update - '
-                                'all scan points above -75 dBm (min=%.1f dBm)',
-                                ch_name, min(nearby_rssi))
-                    continue
+                # If all samples above threshold, use the minimum as a rough estimate
                 accepted = [min(nearby_rssi)]
 
             samples_accepted = len(accepted)
@@ -3780,6 +3773,7 @@ class WM1303Backend:
             logger.info('WM1303Backend: TX echo hash pre-stored: %s (ch=%s)', _tx_hash, channel_id)
         else:
             logger.debug('WM1303Backend: skipping echo hash for TRACE packet (ch=%s)', channel_id)
+
         # Enqueue to the per-channel TXQueue (GlobalTXScheduler handles sending)
         if self._tx_queue_manager:
             result = await self._tx_queue_manager.enqueue(channel_id, data, tx_power,
