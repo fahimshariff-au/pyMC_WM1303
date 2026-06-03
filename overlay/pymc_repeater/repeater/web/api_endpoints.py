@@ -2288,7 +2288,7 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
-    def adverts_by_contact_type(self, contact_type=None, limit=None, hours=None):
+    def adverts_by_contact_type(self, contact_type=None, limit=None, hours=None, offset=None):
 
         try:
             if not contact_type:
@@ -2297,9 +2297,14 @@ class APIEndpoints:
             limit_int = int(limit) if limit is not None else None
             hours_int = int(hours) if hours is not None else None
 
+            # Translate numeric contact_type (WM1303 UI) to text value stored in DB
+            _CT_MAP = {'0': 'Unknown', '1': 'Chat Node', '2': 'Repeater',
+                       '3': 'Room Server', '4': 'Hybrid Node'}
+            contact_type_db = _CT_MAP.get(str(contact_type), contact_type)
+
             storage = self._get_storage()
             adverts = storage.sqlite_handler.get_adverts_by_contact_type(
-                contact_type=contact_type, limit=limit_int, hours=hours_int
+                contact_type=contact_type_db, limit=limit_int, hours=hours_int
             )
 
             return self._success(
