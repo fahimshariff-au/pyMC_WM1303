@@ -471,7 +471,12 @@ class PacketRouter:
 
         # Only pass to repeater engine if not already processed by injection
         # Skip engine for packets we injected for TX (already sent; avoid double-send/double-count)
-        if getattr(packet, "_injected_for_tx", False):
+        _pkt_path2 = getattr(packet, "path", None)
+        _is_outgoing_tx2 = (
+            getattr(packet, "_injected_for_tx", False)
+            and not _pkt_path2
+        )
+        if _is_outgoing_tx2:
             processed_by_injection = True
         if self.daemon.repeater_handler and not processed_by_injection:
             metadata = {

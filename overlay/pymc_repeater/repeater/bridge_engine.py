@@ -322,11 +322,6 @@ class BridgeEngine:
 
 
 
-        # Companion frame servers: push raw RX to these for PUSH_CODE_LOG_RX_DATA (0x88).
-        # Enables "Heard Repeats" and "RX logs (last 500)" in the MeshCore app.
-        # Populated by add_companion_frame_server() after frame servers are created.
-        self._companion_frame_servers: list = []
-
         # Dedup event logging for visualization
         self._dedup_events: deque = deque(maxlen=500)  # ring buffer
 
@@ -650,20 +645,6 @@ class BridgeEngine:
     # ------------------------------------------------------------------ #
     # External endpoint handler registration
     # ------------------------------------------------------------------ #
-    def add_companion_frame_server(self, fs) -> None:
-        """Register a companion frame server to receive raw RX pushes (PUSH_CODE_LOG_RX_DATA 0x88).
-
-        Must be called after both the BridgeEngine and the CompanionFrameServer are
-        initialised.  Enables 'Heard Repeats' and 'RX logs (last 500)' in the
-        MeshCore app by streaming every received RF packet to connected companion
-        clients — identical to the rightup dev build's dispatcher.add_raw_rx_subscriber
-        pattern, but wired directly into the BridgeEngine RX path because the
-        pymc_core Dispatcher never sees raw RF packets in the WM1303 bridge architecture.
-        """
-        self._companion_frame_servers.append(fs)
-        logger.info('BridgeEngine: companion frame server registered for 0x88 push '
-                    '(total=%d)', len(self._companion_frame_servers))
-
     def set_repeater_handler(self, callback) -> None:
         """Register a callback for forwarding packets to the repeater."""
         self._repeater_handler = callback
@@ -1191,6 +1172,9 @@ class BridgeEngine:
 
     def _store_tx_echo_hash(self, data: bytes) -> None:
         """Store the stable hash of a transmitted packet for echo detection."""
+        if len(data) > 0 and ((data[0] >> 2) & 0x0F) == 0x09:
+            logger.debug('BridgeEngine: skipping echo hash for TRACE packet')
+            return
         key = _stable_hash(data)
         self._tx_echo_hashes[key] = time.monotonic()
         logger.debug('BridgeEngine: TX echo hash stored: %s (active=%d)',
@@ -1496,20 +1480,6 @@ class BridgeEngine:
                     snr=float(_rx_snr) if _rx_snr is not None else 0.0)
                 continue
 
-            # === Push raw RX to companion frame servers (PUSH_CODE_LOG_RX_DATA 0x88) ===
-            # Enables "Heard Repeats" and "RX logs (last 500)" in the MeshCore app.
-            # Placed AFTER echo-check (self-TX bounces excluded) but BEFORE our own
-            # dedup check, matching the rightup dev build's dispatcher.add_raw_rx_subscriber
-            # behaviour which fires pre-dedup so path-variant duplicates also reach the app.
-            if self._companion_frame_servers:
-                _snr_f = float(_rx_snr) if _rx_snr is not None else 0.0
-                _rssi_i = int(_rx_rssi) if _rx_rssi is not None else -120
-                for _cfs in self._companion_frame_servers:
-                    try:
-                        _cfs.push_rx_raw(_snr_f, _rssi_i, data)
-                    except Exception as _push_e:
-                        logger.debug('BridgeEngine: push_rx_raw to companion failed: %s', _push_e)
-
             if self._is_duplicate(data):
                 _dup_hash8 = _stable_hash(data, 8)
                 _dup_hash = _stable_hash(data)
@@ -1543,7 +1513,7 @@ class BridgeEngine:
 
             logger.info('BridgeEngine: RX %d bytes on %s (type=%s, hash=%s)',
                        len(data), cid, pkt_type_name, pkt_hash)
-            logger.info('[HEXDUMP] dir=RX ch=%s sz=%d rssi=%s snr=%s hdr=%s hex=%s', cid, len(data), _rx_rssi, _rx_snr, _mc_hdr(data), _hexdump(data))
+            logger.info('[HEXDUMP] dir=RX ch=%s sz=%d hdr=%s hex=%s', cid, len(data), _mc_hdr(data), _hexdump(data))
 
             # Store per-packet RX metric for spectrum-tab charts (Option B).
             # Derive hop count from MeshCore header (byte 0) + path_raw (byte 1 or 5 if timestamped).
