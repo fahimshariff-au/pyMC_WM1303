@@ -4627,6 +4627,8 @@ class WM1303Backend:
             nf_est = rssi - snr
         else:
             nf_est = rssi
+        if nf_est > -75.0:  # reject strong-signal estimates (not near noise floor)
+            return
         now = time.time()
         with self._rx_nf_lock:
             if channel_id not in self._rx_nf_estimates:
