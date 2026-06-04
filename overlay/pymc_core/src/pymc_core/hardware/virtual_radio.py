@@ -175,7 +175,14 @@ class VirtualLoRaRadio(LoRaRadio):
         self._noise_floor_dbm = rssi_values[idx]
 
     def get_noise_floor(self) -> float:
-        """Return the estimated noise floor in dBm."""
+        """Return the estimated noise floor in dBm.
+        For WM1303 backend, pull from NoiseFloorMonitor via backend.
+        Fall back to internal RSSI history estimate otherwise.
+        """
+        if hasattr(self, 'backend') and hasattr(self.backend, 'get_channel_noise_floors'):
+            nfs = self.backend.get_channel_noise_floors()
+            if nfs:
+                return min(nfs.values())
         return self._noise_floor_dbm
 
     async def send(self, data: bytes, trace_hash: str = None, **kwargs):

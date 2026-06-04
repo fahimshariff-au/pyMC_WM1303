@@ -831,7 +831,7 @@ def _generate_bridge_conf(channels: dict[str, dict]) -> dict:
                 'spread_factor': int(_chf_sf),
                 'sync_word': int(_sync_word_value) & 0xFFFF,
             },
-            'chan_FSK':       {'enable': False, 'radio': 0, 'if': 0,
+            'chan_FSK':       {'enable': _che_lora_rx['enable'], 'radio': 0, 'if': 0,
                               'bandwidth': 125000, 'datarate': 50000},
             # SX1261 companion chip for LBT (Listen Before Talk)
             'sx1261_conf': {
@@ -2053,6 +2053,8 @@ class WM1303Backend:
 
                 # Feed noise floor values into TX queue LBT RSSI buffers
                 self._feed_noise_floor_to_tx_queues()
+                # Write to noise_floor table for pymc Repeater UI display
+                self._write_nf_to_repeater_db()
             except Exception as e:
                 logger.error('NoiseFloorMonitor error: %s', e)
             # Sleep in small increments for responsive shutdown
@@ -2425,6 +2427,23 @@ class WM1303Backend:
         if fed:
             logger.debug('NoiseFloorMonitor: fed noise-floor RSSI to %d TX queues: %s',
                         fed, mapping_info)
+
+    def _write_nf_to_repeater_db(self) -> None:
+        """Write current NF to the noise_floor table read by pymc Repeater UI."""
+        with self._nf_lock:
+            nfs = dict(self._channel_noise_floors)
+        nf_val = min(nfs.values()) if nfs else getattr(self, '_last_cad_nf_dbm', None)
+        if nf_val is None:
+            return
+        _DB_PATH = '/var/lib/pymc_repeater/repeater.db'
+        try:
+            with _db_conn(_DB_PATH) as conn:
+                conn.execute(
+                    'INSERT INTO noise_floor (timestamp, noise_floor_dbm) VALUES (?, ?)',
+                    (time.time(), nf_val))
+                conn.commit()
+        except Exception as e:
+            logger.debug('NoiseFloorMonitor: failed to write to noise_floor table: %s', e)
 
     # ------------------------------------------------------------------
     # Hardware CAD via SX1261 (interleaved with spectral scan in pkt_fwd)
@@ -3286,6 +3305,13 @@ class WM1303Backend:
             # WM1303: if this is the post-TX ack, resolve the pending future
             # (registered by _send_pull_resp) and/or stash into the short-TTL cache.
             if is_post_tx:
+                # Update channel NF from CAD/FSK-RX measurement (most accurate source)
+                _cad_nf = ack_info.get('tx_noisefloor_dbm')
+                if _cad_nf is not None and _cad_nf < -50:
+                    self._last_cad_nf_dbm = float(_cad_nf)
+                    with self._nf_lock:
+                        for ui_name in (list(self._channel_noise_floors.keys()) or list(self._ui_name_to_ch_id.keys())):
+                            self._channel_noise_floors[ui_name] = float(_cad_nf)
                 self._tx_ack_store(token, ack_info)
 
 
@@ -3580,7 +3606,7 @@ class WM1303Backend:
             _dd_hash = hashlib.md5(payload[0:1] + _stable_payload).hexdigest()[:12]
             _dd_now = time.monotonic()
             if _dd_hash in self._rx_dedup_cache:
-                if _dd_now - self._rx_dedup_cache[_dd_hash] < 2.0:
+                if _dd_now - self._rx_dedup_cache[_dd_hash] < 2.0 and (payload[0] >> 2) & 0x0F != 0x09:  # TRACE: forwarded response shares hash with loopback — never discard
                     logger.debug('WM1303Backend: multi-demod dup %s', _dd_hash)
                     # Emit trace step so the UI shows why no further processing happens
                     try:
@@ -3600,7 +3626,8 @@ class WM1303Backend:
                     except Exception:
                         pass
                     return
-            self._rx_dedup_cache[_dd_hash] = _dd_now
+            if (payload[0] >> 2) & 0x0F != 0x09:  # TRACE: skip cache — loopback poisons forwarded response
+                self._rx_dedup_cache[_dd_hash] = _dd_now
             if len(self._rx_dedup_cache) > 100:
                 self._rx_dedup_cache = {k:v for k,v in self._rx_dedup_cache.items() if _dd_now-v < 5.0}
             rssi = float(rxpk.get('rssi', -99))
